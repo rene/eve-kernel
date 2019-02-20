@@ -2099,6 +2099,12 @@ config MFD_KHADAS_MCU
 	  additional drivers must be enabled in order to use the functionality
 	  of the device.
 
+config MFD_UPBOARD_FPGA
+        tristate "Support for the UP board FPGA"
+        select MFD_CORE
+        help
+          Select this option to enable the UP and UP^2 on-board FPGA.
+
 menu "Multimedia Capabilities Port drivers"
 	depends on ARCH_SA1100
 
