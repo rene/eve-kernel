@@ -149,3 +149,7 @@ obj-$(CONFIG_INTEL_TELEMETRY)		+= intel_telemetry_core.o \
 					   intel_telemetry_pltdrv.o \
 					   intel_telemetry_debugfs.o
 obj-$(CONFIG_PMC_ATOM)			+= pmc_atom.o
+
+# Operational Services EM32x devices
+obj-$(CONFIG_OS_EM32X)	+= os-em32x.o
+
