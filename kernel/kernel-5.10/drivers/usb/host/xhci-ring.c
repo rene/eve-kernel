@@ -1117,6 +1117,7 @@ void xhci_hc_died(struct xhci_hcd *xhci)
 	if (!(xhci->xhc_state & XHCI_STATE_REMOVING))
 		usb_hc_died(xhci_to_hcd(xhci));
 }
+EXPORT_SYMBOL_GPL(xhci_hc_died);
 
 /* Watchdog timer function for when a stop endpoint command fails to complete.
  * In this case, we assume the host controller is broken or dying or dead.  The
@@ -3084,6 +3085,7 @@ out:
 
 	return ret;
 }
+EXPORT_SYMBOL_GPL(xhci_irq);
 
 irqreturn_t xhci_msi_irq(int irq, void *hcd)
 {

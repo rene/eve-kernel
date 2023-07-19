@@ -561,6 +561,7 @@ struct xhci_hub *xhci_get_rhub(struct usb_hcd *hcd)
 		return &xhci->usb3_rhub;
 	return &xhci->usb2_rhub;
 }
+EXPORT_SYMBOL_GPL(xhci_get_rhub);
 
 /*
  * xhci_set_port_power() must be called with xhci->lock held.
@@ -1542,6 +1543,7 @@ error:
 	spin_unlock_irqrestore(&xhci->lock, flags);
 	return retval;
 }
+EXPORT_SYMBOL_GPL(xhci_hub_control);
 
 /*
  * Returns 0 if the status hasn't changed, or the number of bytes in buf.
@@ -1623,6 +1625,7 @@ int xhci_hub_status_data(struct usb_hcd *hcd, char *buf)
 	spin_unlock_irqrestore(&xhci->lock, flags);
 	return status ? retval : 0;
 }
+EXPORT_SYMBOL_GPL(xhci_hub_status_data);
 
 #ifdef CONFIG_PM
 

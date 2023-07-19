@@ -1625,6 +1625,7 @@ free_priv:
 	spin_unlock_irqrestore(&xhci->lock, flags);
 	return ret;
 }
+EXPORT_SYMBOL_GPL(xhci_urb_enqueue);
 
 /*
  * Remove the URB's TD from the endpoint ring.  This may cause the HC to stop
@@ -5070,6 +5071,7 @@ int xhci_enable_usb3_lpm_timeout(struct usb_hcd *hcd,
 		return ret;
 	return hub_encoded_timeout;
 }
+EXPORT_SYMBOL_GPL(xhci_enable_usb3_lpm_timeout);
 
 static int xhci_disable_usb3_lpm_timeout(struct usb_hcd *hcd,
 			struct usb_device *udev, enum usb3_link_state state)
