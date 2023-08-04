@@ -1,0 +1,229 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# NOTE! Don't add files that are generated in specific
+# subdirectories here. Add them in the ".gitignore" file
+# in that subdirectory instead.
+#
+# NOTE! Please use 'git ls-files -i --exclude-standard'
+# command after changing this file, to see if there are
+# any tracked files which get ignored after the change.
+#
+# Normal rules (sorted alphabetically)
+#
+.*
+*.a
+*.asn1.[ch]
+*.bin
+*.bz2
+*.c.[012]*.*
+*.dt.yaml
+*.dtb
+*.dtbo
+*.dtb.S
+*.dwo
+*.elf
+*.gcno
+*.gz
+*.i
+*.ko
+*.lex.c
+*.ll
+*.lst
+*.lz4
+*.lzma
+*.lzo
+*.mod
+*.mod.c
+*.o
+*.o.*
+*.patch
+*.rmeta
+*.rsi
+*.s
+*.so
+*.so.dbg
+*.su
+*.symtypes
+*.symversions
+*.tab.[ch]
+*.tar
+*.usyms
+*.xz
+*.zst
+Module.symvers
+modules.order
+
+#
+# Top-level generic files
+#
+/linux
+/modules-only.symvers
+/vmlinux
+/vmlinux.32
+/vmlinux.map
+/vmlinux.symvers
+/vmlinux-gdb.py
+/vmlinuz
+/System.map
+/Module.markers
+/modules.builtin
+/modules.builtin.modinfo
+/modules.nsdeps
+
+#
+# RPM spec file (make rpm-pkg)
+#
+/*.spec
+
+#
+# Debian directory (make deb-pkg)
+#
+/debian/
+
+#
+# Snap directory (make snap-pkg)
+#
+/snap/
+
+#
+# tar directory (make tar*-pkg)
+#
+/tar-install/
+
+#
+# We don't want to ignore the following even if they are dot-files
+#
+!.clang-format
+!.cocciconfig
+!.get_maintainer.ignore
+!.gitattributes
+!.gitignore
+!.mailmap
+!.rustfmt.toml
+
+#
+# Generated include files
+#
+/include/config/
+/include/generated/
+/include/ksym/
+/arch/*/include/generated/
+
+# stgit generated dirs
+patches-*
+
+# quilt's files
+patches
+series
+
+# ctags files
+tags
+TAGS
+
+# cscope files
+cscope.*
+ncscope.*
+
+# gnu global files
+GPATH
+GRTAGS
+GSYMS
+GTAGS
+
+# id-utils files
+ID
+
+*.orig
+*~
+\#*#
+
+#
+# Leavings from module signing
+#
+extra_certificates
+signing_key.pem
+signing_key.priv
+signing_key.x509
+x509.genkey
+
+# Kconfig presets
+/all.config
+/alldef.config
+/allmod.config
+/allno.config
+/allrandom.config
+/allyes.config
+
+# Kconfig savedefconfig output
+/defconfig
+
+# Kdevelop4
+*.kdev4
+
+# Clang's compilation database file
+/compile_commands.json
+
+# Documentation toolchain
+sphinx_*/
+
+# Rust analyzer configuration
+/rust-project.json
+
+# NVIDIA
+/arch/arm64/boot/Image
+/arch/arm64/crypto/poly1305-core.S
+/arch/arm64/crypto/sha256-core.S
+/arch/arm64/crypto/sha512-core.S
+/arch/arm64/kernel/vdso/vdso.lds
+/arch/arm64/kernel/vmlinux.lds
+/arch/arm64/kvm/hyp/nvhe/hyp.lds
+/build.sh
+/certs/x509_certificate_list
+/drivers/scsi/scsi_devinfo_tbl.c
+/drivers/tty/vt/conmakehash
+/drivers/tty/vt/consolemap_deftbl.c
+/drivers/tty/vt/defkeymap.c
+/drivers/video/tegra/
+/fs/unicode/utf8data.h
+/kernel/config_data
+/lib/crc32table.h
+/lib/gen_crc32table
+/lib/oid_registry_data.c
+/lib/raid6/int1.c
+/lib/raid6/int16.c
+/lib/raid6/int2.c
+/lib/raid6/int32.c
+/lib/raid6/int4.c
+/lib/raid6/int8.c
+/lib/raid6/mktables
+/lib/raid6/neon1.c
+/lib/raid6/neon2.c
+/lib/raid6/neon4.c
+/lib/raid6/neon8.c
+/lib/raid6/tables.c
+/net/wireless/shipped-certs.c
+/scripts/asn1_compiler
+/scripts/basic/fixdep
+/scripts/dtc/dtc
+/scripts/extract-cert
+/scripts/genksyms/genksyms
+/scripts/kallsyms
+/scripts/kconfig/conf
+/scripts/mod/devicetable-offsets.h
+/scripts/mod/elfconfig.h
+/scripts/mod/mk_elfconfig
+/scripts/mod/modpost
+/scripts/module.lds
+/scripts/selinux/genheaders/genheaders
+/scripts/selinux/mdp/mdp
+/scripts/sign-file
+/scripts/sorttable
+/security/selinux/av_permissions.h
+/security/selinux/flask.h
+/usr/gen_init_cpio
+/usr/initramfs_data.cpio
+/usr/initramfs_inc_data
+
+# EVE
+/build/
+/EVE/
