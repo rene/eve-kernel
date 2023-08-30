@@ -176,7 +176,7 @@
 
 &sdmmc3 {
 	status = "okay";
-	uhs-mask = <0x78>;
+	uhs-mask = <0x7c>;
 	mmc-ocr-mask = <0x00>;
 	cd-gpios = <&tegra_aon_gpio TEGRA194_AON_GPIO(CC, 4) 0>;
 	nvidia,cd-wakeup-capable;
