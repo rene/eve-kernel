@@ -1,0 +1,76 @@
+/*
+ * Copyright (C) 2024, Zededa Inc. All rights reserved.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; version 2 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ * more details.
+ */
+
+/dts-v1/;
+#include "common/tegra194-p3668-common.dtsi"
+#include "common/tegra194-p3509-0000-a00.dtsi"
+#include "common/tegra194-siemens-ipc520a.dtsi"
+
+/ {
+	model = "SIMATIC IPC520A";
+	nvidia,dtsfilename = __FILE__;
+	nvidia,dtbbuildtime = __DATE__, __TIME__;
+
+	compatible = "siemens,ipc520a", "nvidia,tegra194";
+
+	host1x@13e00000 {
+		dpaux@155F0000 {
+			status = "okay";
+		};
+	};
+
+	sdhci@3400000 {
+		status = "disabled";
+	};
+};
+
+&tegra_wdt {
+	status = "okay";
+};
+
+&head0 {
+	win-mask = <0x3f>;
+	nvidia,dc-connector = <&sor0>;
+	vdd-dp-pwr-supply = <&p3668_spmic_sd0>;
+	avdd-dp-pll-supply = <&p3668_spmic_sd1>;
+	vdd-edp-sec-mode-supply = <&battery_reg>;
+	vdd-dp-pad-supply = <&battery_reg>;
+};
+
+&head1 {
+	nvidia,dc-connector = <&sor1>;
+	avdd_hdmi-supply = <&p3668_spmic_sd0>; /* 1v0 */
+	avdd_hdmi_pll-supply = <&p3668_spmic_sd1>; /* 1v8 */
+	status = "disabled";
+	bootloader-status = "disabled";
+};
+
+&head2 {
+	bootloader-status = "disabled";
+};
+
+&head3 {
+	bootloader-status = "disabled";
+};
+
+&sor1 {
+	status = "disabled";
+};
+
+&sor1_hdmi_display {
+	status = "disabled";
+};
+
+&dpaux1 {
+	status = "disabled";
+};

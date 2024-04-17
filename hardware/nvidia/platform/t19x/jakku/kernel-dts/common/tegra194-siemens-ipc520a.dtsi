@@ -1,0 +1,223 @@
+/*
+ * Copyright (c) Siemens AG, 2023
+ *
+ * Authors:
+ *  Nian Gao <nian.gao@siemens.com>
+ */
+
+/ {
+	leds {
+		compatible = "gpio-leds";
+		status = "okay";
+
+		user-led-red {
+			gpios = <&pcal9535 14 GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "gpio";
+			default-state = "off";
+		};
+
+		user-led-green {
+			gpios = <&pcal9535 15 GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "gpio";
+			default-state = "off";
+		};
+
+		/delete-node/ pwr;
+	};
+
+	gpio@2200000 {
+		DI_0 {
+			gpio-hog;
+			input;
+			gpios = <TEGRA194_MAIN_GPIO(Q, 5) GPIO_ACTIVE_LOW>;
+			label = "DI_0";
+			status = "okay";
+		};
+
+		DI_1 {
+			gpio-hog;
+			input;
+			gpios = <TEGRA194_MAIN_GPIO(Q, 3) GPIO_ACTIVE_LOW>;
+			label = "DI_1";
+			status = "okay";
+		};
+
+		WWAN_RST_N {
+			gpio-hog;
+			output-high;
+			gpios = <TEGRA194_MAIN_GPIO(P, 0) GPIO_ACTIVE_HIGH>;
+			label = "WWAN_RST_N";
+			status = "okay";
+		};
+	};
+
+	gpio@c2f0000 {
+		DI_2 {
+			gpio-hog;
+			input;
+			gpios = <TEGRA194_AON_GPIO(CC, 0) GPIO_ACTIVE_LOW>;
+			label = "DI_2";
+			status = "okay";
+		};
+
+		DI_3 {
+			gpio-hog;
+			input;
+			gpios = <TEGRA194_AON_GPIO(CC, 1) GPIO_ACTIVE_LOW>;
+			label = "DI_3";
+			status = "okay";
+		};
+
+		DO_0 {
+			gpio-hog;
+			output-low;
+			gpios = <TEGRA194_AON_GPIO(CC, 2) GPIO_ACTIVE_HIGH>;
+			label = "DO_0";
+			status = "okay";
+		};
+
+		DO_1 {
+			gpio-hog;
+			output-low;
+			gpios = <TEGRA194_AON_GPIO(CC, 3) GPIO_ACTIVE_HIGH>;
+			label = "DO_1";
+			status = "okay";
+		};
+
+		/delete-node/ w-disable1;
+
+		/delete-node/ w-disable2;
+
+		/delete-node/ suspend-led-gpio;
+	};
+
+	cam_i2cmux {
+		/delete-property/ mux-gpios;
+	};
+
+	pinmux@2430000 {
+		pinctrl-names = "default";
+		pinctrl-0 = <&jetson_io_pinmux>;
+
+		jetson_io_pinmux: exp-header-pinmux {
+			hdr40-pin11 {
+				nvidia,lpdr = <0x0>;
+				nvidia,enable-input = <0x0>;
+				nvidia,tristate = <0x0>;
+				nvidia,pull = <0x0>;
+				nvidia,function = "uarta";
+				nvidia,pins = "uart1_rts_pr4";
+			};
+
+			hdr40-pin36 {
+				nvidia,pins = "uart1_cts_pr5";
+				nvidia,function = "uarta";
+				nvidia,pin-group = "uarta-cts/rts";
+				nvidia,pull = <TEGRA_PIN_PULL_UP>;
+				nvidia,tristate = <TEGRA_PIN_ENABLE>;
+				nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+				nvidia,lpdr = <TEGRA_PIN_DISABLE>;
+			};
+		};
+	};
+
+	/* not battery-backed */
+	rtc@c2a0000 {
+		status = "disabled";
+	};
+
+};
+
+&sdmmc3 {
+	nvidia,sd-device;
+	cd-gpios = <&tegra_main_gpio TEGRA194_MAIN_GPIO(S, 4) 0>;
+	power-gpios = <&tegra_aon_gpio TEGRA194_AON_GPIO(AA, 2) GPIO_ACTIVE_HIGH>;  // details of GPIO port used to power up SDIO card, Specify GPIOs for power control
+	mmc-ocr-mask = <0>; // Specify OCR register masking details. Based on this value the power up voltage depending on board capabilities can be selected.
+	status = "okay";
+	/delete-property/ nvidia,vqmmc-always-on; // we have SDMMC_VDD_EN gpio
+	/delete-property/ cd-inverted;  // invert the value of external card detect gpio line
+};
+
+&gen2_i2c {
+	pinctrl-names = "default";
+	clock-frequency = <400000>;
+	status = "okay";
+
+	eeprom: eeprom@54 {
+		compatible = "24c08";
+		reg = <0x54>;
+		pagesize = <16>;
+	};
+
+	pcal9535: gpio@23 {
+		compatible = "nxp,pca9535";
+		reg = <0x23>;
+		#gpio-cells = <2>;
+		/* must use 'vcc-supply' for devm_regulator_get() in driver gpio-pca953x.c */
+		vcc-supply = <&p3509_vdd_3v3_cvb>;
+		gpio-controller;
+		gpio-line-names = "BAT_CHECK_EN", "BAT_PRESENT_N", "BAT_LOW_N", "BAT_FAIL_N",
+							"DISABLE_WIFI_N", "DISABLE_BT_N",
+							"NC",
+							"WWAN_PWR_OFF_N", "WWAN_DISABLE_N",
+							"COM1_EN", "COM1_MODE0", "COM1_MODE1", "COM1_RTS_N", "COM1_TERM",
+							"LED_UDF_RD", "LED_UDF_GN";
+
+		wifi-disable {
+			gpio-hog;
+			output-high;
+			gpios = <4 0>;
+			label = "wifi-disable";
+			status = "okay";
+		};
+
+		bt-disable {
+			gpio-hog;
+			output-high;
+			gpios = <5 0>;
+			label = "bt-disable";
+			status = "okay";
+		};
+
+		wwan_pwr_off {
+			gpio-hog;
+			output-high;
+			gpios = <7 0>;
+			label = "wwan_pwr_off";
+			status = "okay";
+		};
+
+		wwan_disable {
+			gpio-hog;
+			output-high;
+			gpios = <8 0>;
+			label = "wwan_disable";
+			status = "okay";
+		};
+	};
+
+	tps23861@20 {
+		compatible = "ti,tps23861";
+		reg = <0x20>;
+		sense-resistor = <250000>;	/* micro-ohms */
+		irq-gpio = <&tegra_main_gpio TEGRA194_MAIN_GPIO(N, 1) 0>;
+
+		dynamic-power;			/* you must set max-power and power-volt if dynamic-power */
+		max-power = <31968>;	/* mW */
+		power-volt = <54000>;	/* mV */
+
+		port0 {
+			label = "poe_1";
+			mode = "semiauto";		/* manual | semiauto | auto */
+			max-power = <20196>;	/* mW, you must set max-power if in mannual or semiauto mode */
+			auto-power;
+		};
+
+		port2 {
+			label = "poe_2";
+			mode = "semiauto";
+			max-power = <20196>;
+			auto-power;
+		};
+	};
+};
