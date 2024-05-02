@@ -227,3 +227,6 @@ sphinx_*/
 # EVE
 /build/
 /EVE/
+
+# NVIDIA's USB firmware
+!/nvidia-firmware/nvidia/tegra194/xusb.bin
