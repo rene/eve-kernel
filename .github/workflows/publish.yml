@@ -1,0 +1,41 @@
+name: eve-kernel build
+
+on:
+  workflow_dispatch:
+  pull_request_review:
+    types: [ submitted ]
+  push:
+    branches:
+      - "eve-kernel-arm64-v5.10.192-nvidia"
+env:
+  branch_name: "refs/heads/eve-kernel-arm64-v5.10.192-nvidia"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  packages:
+    runs-on: self-hosted
+    if: ${{ github.event.review.state == 'approved' }} || github.ref == env.branch_name
+    steps:
+      - name: Get eve-kernel
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Build eve-kernel-arm64
+        run: |
+          make -f Makefile.eve BRANCH?=${GITHUB_REF##*/} kernel-gcc
+
+      - name: Log in to Docker Hub
+        if: ${{ github.ref == env.branch_name }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.RELEASE_DOCKERHUB_ACCOUNT }}
+          password: ${{ secrets.RELEASE_DOCKERHUB_TOKEN }}
+
+      - name: Push eve-kernel-arm64-v5.10.192-nvidia if PR approved or pushed
+        if: ${{ github.ref == env.branch_name }}
+        run: |
+          make -f Makefile.eve BRANCH?=${GITHUB_REF##*/} push-gcc
