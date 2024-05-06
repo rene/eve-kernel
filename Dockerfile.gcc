@@ -113,6 +113,24 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=kernel-ccache-${TARGETARCH}
         INSTALL_MOD_PATH=/tmp/kernel-modules \
     && ccache -s
 
+# Build and install nvdisplay driver
+WORKDIR /kernel-src/kernel/nvdisplay
+RUN --mount=type=cache,target=/root/.cache/ccache,id=nvdisplay-ccache-${TARGETARCH} \
+    KVER=$(cat /kernel-out/include/config/kernel.release) && \
+    make -j$(nproc) \
+        KVER="${KVER}" ARCH=arm64 TARGET_ARCH=aarch64 \
+        CC="${CROSS_COMPILE}gcc" CXX="${CROSS_COMPILE}g++" \
+        LD="${CROSS_COMPILE}ld" AR="${CROSS_COMPILE}ar"   \
+        OBJCOPY="${CROSS_COMPILE}objcopy" \
+        SYSSRC="/kernel-src/kernel/kernel-5.10" SYSOUT="/kernel-out" && \
+    make -j$(nproc) \
+        KVER="${KVER}" ARCH=arm64 TARGET_ARCH=aarch64 \
+        CC="${CROSS_COMPILE}gcc" CXX="${CROSS_COMPILE}g++" \
+        LD="${CROSS_COMPILE}ld" AR="${CROSS_COMPILE}ar"   \
+        OBJCOPY="${CROSS_COMPILE}objcopy" \
+        SYSSRC="/kernel-src/kernel/kernel-5.10" SYSOUT="/kernel-out" \
+        INSTALL_MOD_PATH=/tmp/kernel-modules modules_install
+
 # Install NVIDIA's DTBs
 WORKDIR /kernel-out
 RUN if [ "${TARGETARCH}" = arm64 ]; then \
