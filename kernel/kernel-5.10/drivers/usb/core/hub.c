@@ -103,6 +103,14 @@ MODULE_PARM_DESC(use_both_schemes,
 		"try the other device initialization scheme if the "
 		"first one fails");
 
+/*
+ * Flag to enable workaround for Siemens IPC 520A device
+ */
+static bool warm_reset_workaround;
+module_param(warm_reset_workaround, bool, 0644);
+MODULE_PARM_DESC(warm_reset_workaruond,
+		"warm reset workaround for Siemens IPC520A device");
+
 /* Mutual exclusion for EHCI CF initialization.  This interferes with
  * port reset on some companion controllers.
  */
@@ -5477,6 +5485,7 @@ static void port_event(struct usb_hub *hub, int port1)
 	struct usb_device *udev = port_dev->child;
 	struct usb_device *hdev = hub->hdev;
 	u16 portstatus, portchange;
+	const char *pname;
 
 	connect_change = test_bit(port1, hub->change_bits);
 	clear_bit(port1, hub->event_bits);
@@ -5560,9 +5569,20 @@ static void port_event(struct usb_hub *hub, int port1)
 		dev_dbg(&port_dev->dev, "do warm reset\n");
 		if (!udev || !(portstatus & USB_PORT_STAT_CONNECTION)
 				|| udev->state == USB_STATE_NOTATTACHED) {
-			if (hub_port_reset(hub, port1, NULL,
-					HUB_BH_RESET_TIME, true) < 0)
-				hub_port_disable(hub, port1, 1);
+			/* Check for warm reset workaround */
+			pname = kobject_name(&port_dev->dev.kobj);
+			if (!warm_reset_workaround || pname == NULL) {
+				if (hub_port_reset(hub, port1, NULL,
+							HUB_BH_RESET_TIME, true) < 0)
+					hub_port_disable(hub, port1, 1);
+			} else {
+				if (strcmp(pname, "2-3-port4") == 0) {
+					dev_err(&port_dev->dev, "skip warm reset for it\n");
+				} else if (hub_port_reset(hub, port1, NULL,
+							HUB_BH_RESET_TIME, true) < 0) {
+					hub_port_disable(hub, port1, 1);
+				}
+			}
 		} else {
 			usb_unlock_port(port_dev);
 			usb_lock_device(udev);
