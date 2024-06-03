@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2016-2017, NVIDIA CORPORATION. All rights reserved
+ * Copyright (c) 2016-2022, NVIDIA CORPORATION. All rights reserved
  */
 
 #include <linux/of.h>
@@ -9,6 +9,7 @@
 #include <linux/slab.h>
 #include <linux/version.h>
 
+#include <soc/tegra/fuse.h>
 #include <soc/tegra/bpmp.h>
 #include <soc/tegra/bpmp-abi.h>
 
@@ -186,6 +187,18 @@ tegra_powergate_add(struct tegra_bpmp *bpmp,
 	powergate->genpd.power_on = tegra_powergate_power_on;
 	powergate->genpd.power_off = tegra_powergate_power_off;
 
+	/*
+	 *  Set display power domains to always-on if powergate is already powered
+	 */
+	if (tegra_get_chip_id() == TEGRA194) {
+		if ((!strcmp(powergate->genpd.name, "disp") ||
+			!strcmp(powergate->genpd.name, "dispb") ||
+			!strcmp(powergate->genpd.name, "dispc")) && !off) {
+			    powergate->genpd.flags |= GENPD_FLAG_ALWAYS_ON;
+			    dev_dbg(bpmp->dev, "%s set GENPD_FLAG_ALWAYS_ON flag\n",
+				powergate->genpd.name);
+		}
+	}
 	err = pm_genpd_init(&powergate->genpd, NULL, off);
 	if (err < 0) {
 		kfree(powergate->genpd.name);
