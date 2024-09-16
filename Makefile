@@ -45,7 +45,7 @@ ifeq ($(MAKECMDGOALS), modules)
 	cp -av $(MAKEFILE_DIR)/nvidia-oot/scripts/conftest/* $(NVIDIA_CONFTEST)/nvidia/;
 	$(MAKE) -j $(NPROC) ARCH=arm64 \
 		src=$(NVIDIA_CONFTEST)/nvidia obj=$(NVIDIA_CONFTEST)/nvidia \
-		CC=$(CROSS_COMPILE)gcc LD=$(CROSS_COMPILE)ld \
+		CC="$(CROSS_COMPILE)gcc" LD="$(CROSS_COMPILE)ld" \
 		NV_KERNEL_SOURCES=$(KERNEL_HEADERS) \
 		NV_KERNEL_OUTPUT=$(KERNEL_OUTPUT) \
 		-f $(NVIDIA_CONFTEST)/nvidia/Makefile
@@ -113,11 +113,11 @@ define display-cmd
 		SYSSRC=$(NVIDIA_HEADERS) \
 		SYSOUT=$(NVIDIA_HEADERS) \
 		SYSSRCHOST1X=$(MAKEFILE_DIR)/nvidia-oot/drivers/gpu/host1x/include \
-		CC=$(CROSS_COMPILE)gcc \
-		LD=$(CROSS_COMPILE)ld.bfd \
-		AR=$(CROSS_COMPILE)ar \
-		CXX=$(CROSS_COMPILE)g++ \
-		OBJCOPY=$(CROSS_COMPILE)objcopy
+		CC="$(CROSS_COMPILE)gcc" \
+		LD="$(CROSS_COMPILE)ld.bfd" \
+		AR="$(CROSS_COMPILE)ar" \
+		CXX="$(CROSS_COMPILE)g++" \
+		OBJCOPY="$(CROSS_COMPILE)objcopy"
 endef
 
 

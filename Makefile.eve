@@ -1,0 +1,98 @@
+# Title: Dockerfile for building the EVE kernel
+VERSION=$(shell git rev-parse --short=12 HEAD)
+DIRTY=$(shell git diff --quiet || echo '-dirty')
+EVE_FLAVOR=nvidia
+ARCHITECTURE=arm64
+KERNEL_TAG=v5.15.136
+PLATFORM=linux/$(ARCHITECTURE)
+BUILD_USER:=$(shell id -un)
+
+IMAGE_REPOSITORY?=lfedge/eve-kernel
+
+LINUXKIT_VERSION=58c36c9eb0c32acf66ae7877d18a9ad24d59d73e
+GOBIN=/tmp/linuxkit-$(LINUXKIT_VERSION)
+LK=$(GOBIN)/linuxkit
+
+BUILD_KIT_VERSION=v0.12.5
+BUILD_KIT_BUILDER=eve-kernel-builder-$(BUILD_KIT_VERSION)
+
+SOURCE_DATE_EPOCH=$(shell git log -1 --format=%ct)
+BRANCH=eve-kernel-$(ARCHITECTURE)-$(KERNEL_TAG)-$(EVE_FLAVOR)
+# make sure we get a date in correct format, otherwise initramfs cpio mtime will be variable
+KBUILD_BUILD_TIMESTAMP=$(shell git log -1 --format=%cd | cut -f1 -d"+")
+
+ifeq ($(BUILDKIT_PROGRESS),)
+    export BUILDKIT_PROGRESS := plain
+endif
+
+# if BRANCH is defined on a command line we are running under CI
+# we add user name to DIRTY to avoid docker tag conflicts
+# when building on a shared machine with shared docker cache
+ifeq ($(origin BRANCH), file)
+	DIRTY:=-$(BUILD_USER)$(DIRTY)
+endif
+
+.PHONY: all help
+
+all: kernel-gcc
+
+help: Makefile
+	@echo
+	@echo "Makefile to build EVE kernel"
+	@echo "Usage: make [target]"
+	@echo "Targets:"
+	@echo "  kernel-gcc: build kernel with gcc"
+	@echo "  kernel-clang: build kernel with clang"
+	@echo "  docker-tag-gcc: print docker tag for gcc kernel"
+	@echo "  docker-tag-clang: print docker tag for clang kernel"
+	@echo "  push-gcc: push gcc kernel to docker.io"
+	@echo "  push-clang: push clang kernel to docker.io"
+	@echo "  clean: remove generated files"
+	@echo
+
+.PHONY: ensure-builder
+ensure-builder:
+	docker buildx inspect $(BUILD_KIT_BUILDER) 2>/dev/null || \
+	docker buildx create --name $(BUILD_KIT_BUILDER) \
+	--driver docker-container --bootstrap --driver-opt=image=moby/buildkit:$(BUILD_KIT_VERSION)
+
+.PHONY: linuxkit
+linuxkit: $(LK)
+$(LK):
+	GOBIN=$(GOBIN) go install github.com/linuxkit/linuxkit/src/cmd/linuxkit@$(LINUXKIT_VERSION)
+
+KERNEL_OCI_FILE:=$(shell mktemp -u)-kernel.tar
+
+kernel-build-%: Makefile.eve linuxkit | ensure-builder
+	@echo "Building kernel version $(BRANCH):$(VERSION)-$* with compiler $*"
+	docker buildx build \
+	--builder=$(BUILD_KIT_BUILDER) \
+	--build-arg="SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH)" \
+	--build-arg="KBUILD_BUILD_TIMESTAMP=$(KBUILD_BUILD_TIMESTAMP)" \
+	--build-arg="LOCALVERSION=$(VERSION)$(DIRTY)" \
+	--platform $(PLATFORM) -t $(IMAGE_REPOSITORY):$(BRANCH)-$(VERSION)$(DIRTY)-$* \
+	--sbom=true --output=type=oci,dest=$(KERNEL_OCI_FILE) -f Dockerfile.$* .
+	$(LK) cache import $(KERNEL_OCI_FILE)
+	rm -f $(KERNEL_OCI_FILE)
+
+
+# we need these intermediate targets to make .PHONY work for pattern rules
+kernel-gcc: kernel-build-gcc
+kernel-clang: kernel-build-clang
+docker-tag-gcc: docker-tag-generate-gcc
+docker-tag-clang: docker-tag-generate-clang
+push-gcc: push-image-gcc
+push-clang: push-image-clang
+
+.PHONY: kernel-gcc kernel-clang docker-tag-gcc docker-tag-clang push-gcc push-clang
+
+docker-tag-generate-%:
+	@echo "docker.io/$(IMAGE_REPOSITORY):$(BRANCH)-$(VERSION)$(DIRTY)-$*"
+
+push-image-%:
+	$(if $(DIRTY), $(error "Not pushing since the repo is dirty"))
+	$(LK) cache push $(IMAGE_REPOSITORY):$(BRANCH)-$(VERSION)-$*
+
+.PHONY: clean
+clean:
+	echo "Cleaning"
