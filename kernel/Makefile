@@ -25,6 +25,30 @@ else
 version = $(LOCALVERSION)
 endif
 
+ifdef INSTALL_MOD_STRIP
+export INSTALL_MOD_STRIP
+endif
+
+ifdef KBUILD_BUILD_USER
+export KBUILD_BUILD_USER
+endif
+
+ifdef KBUILD_BUILD_HOST
+export KBUILD_BUILD_HOST
+endif
+
+ifdef KCONFIG_NOTIMESTAMP
+export KCONFIG_NOTIMESTAMP
+endif
+
+ifdef KBUILD_BUILD_TIMESTAMP
+export KBUILD_BUILD_TIMESTAMP
+endif
+
+ifdef SOURCE_DATE_EPOCH
+export SOURCE_DATE_EPOCH
+endif
+
 .PHONY : kernel install clean help
 
 kernel:
