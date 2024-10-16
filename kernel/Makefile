@@ -21,6 +21,30 @@ NPROC ?= $(shell nproc)
 LOCALVERSION ?= $(shell grep -q "CONFIG_PREEMPT_RT=y" \
     ${kernel_source_dir}/arch/arm64/configs/${KERNEL_DEF_CONFIG} && echo "-rt-tegra" || echo "-tegra")
 
+ifdef INSTALL_MOD_STRIP
+export INSTALL_MOD_STRIP
+endif
+
+ifdef KBUILD_BUILD_USER
+export KBUILD_BUILD_USER
+endif
+
+ifdef KBUILD_BUILD_HOST
+export KBUILD_BUILD_HOST
+endif
+
+ifdef KCONFIG_NOTIMESTAMP
+export KCONFIG_NOTIMESTAMP
+endif
+
+ifdef KBUILD_BUILD_TIMESTAMP
+export KBUILD_BUILD_TIMESTAMP
+endif
+
+ifdef SOURCE_DATE_EPOCH
+export SOURCE_DATE_EPOCH
+endif
+
 .PHONY : kernel install clean help
 
 kernel:
