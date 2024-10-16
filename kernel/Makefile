@@ -18,8 +18,12 @@ endif
 NPROC ?= $(shell nproc)
 
 # LOCALVERSION : -tegra or -rt-tegra
+ifndef LOCALVERSION
 version = $(shell grep -q "CONFIG_PREEMPT_RT=y" \
     ${kernel_source_dir}/arch/arm64/configs/${KERNEL_DEF_CONFIG} && echo "-rt-tegra" || echo "-tegra")
+else
+version = $(LOCALVERSION)
+endif
 
 .PHONY : kernel install clean help
 
