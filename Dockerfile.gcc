@@ -193,8 +193,8 @@ RUN mkdir /out && \
 
 # copy build time generated module-signing public key, used for diffing builds
 RUN DVER=$(basename "$(find /tmp/kernel-modules/lib/modules/ -mindepth 1 -maxdepth 1)"); \
-    if [ -f "/kernel-src/certs/signing_key.x509" ]; then \
-        cp /kernel-src/certs/signing_key.x509 "/tmp/kernel-modules/lib/modules/$DVER"; \
+    if [ -f "/kernel-src/kernel/kernel-jammy-src/certs/signing_key.x509" ]; then \
+        cp /kernel-src/kernel/kernel-jammy-src/certs/signing_key.x509 "/tmp/kernel-modules/lib/modules/$DVER"; \
     fi
 
 # Package all the modules up
