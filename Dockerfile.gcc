@@ -150,7 +150,7 @@ RUN DVER=$(basename "$(find /tmp/kernel-modules/lib/modules/ -mindepth 1 -maxdep
 # Package all the modules up
 RUN ( DVER=$(basename $(find /tmp/kernel-modules/lib/modules/ -mindepth 1 -maxdepth 1)) && \
       cd /tmp/kernel-modules/lib/modules/$DVER && \
-      rm build source && \
+      rm -f build source && \
       ln -s /usr/src/linux-headers-$DVER build ) && \
     ( cd /tmp/kernel-modules && tar cf /out/kernel.tar . )
 
