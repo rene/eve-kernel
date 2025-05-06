@@ -233,4 +233,6 @@ enum {
 #define I2C_LT_ON_RUN			0x02
 #define I2C_LT_FORCE_ENABLE		0x03
 
+#define CFG2_I2C_LT_MASK		0x03
+
 #endif /* __LINUX_REG_PCA9450_H__ */
