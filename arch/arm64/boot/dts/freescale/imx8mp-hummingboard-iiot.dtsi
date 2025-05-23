@@ -7,6 +7,7 @@
 #include <dt-bindings/usb/pd.h>
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/phy/phy-imx8-pcie.h>
 #include "imx8mp-sr-som.dtsi"
 
 /* UARTA (UART3): Select RS232 or RS485 */
@@ -916,7 +917,6 @@
 
 &pcie{
 	pinctrl-names = "default";
-	ext_osc = <0>;
 	clocks = <&clk IMX8MP_CLK_HSIO_ROOT>,
 		 <&clk IMX8MP_CLK_PCIE_AUX>,
 		 <&clk IMX8MP_CLK_HSIO_AXI>,
@@ -933,7 +933,9 @@
 };
 
 &pcie_phy{
-	ext_osc = <0>;
+	fsl,refclk-pad-mode = <IMX8_PCIE_REFCLK_PAD_INPUT>;
+	clocks = <&clk IMX8MP_CLK_HSIO_AXI>;
+	clock-names = "ref";
 	status = "okay";
 };
 
