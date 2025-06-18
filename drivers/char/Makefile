@@ -43,5 +43,6 @@ obj-$(CONFIG_TCG_TPM)		+= tpm/
 obj-$(CONFIG_PS3_FLASH)		+= ps3flash.o
 
 obj-$(CONFIG_XILLYBUS_CLASS)	+= xillybus/
+obj-$(CONFIG_BRCM_CHAR_DRIVERS) += broadcom/
 obj-$(CONFIG_POWERNV_OP_PANEL)	+= powernv-op-panel.o
 obj-$(CONFIG_ADI)		+= adi.o
