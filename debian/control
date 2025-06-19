@@ -1,0 +1,229 @@
+Source: linux-qcom
+Section: devel
+Priority: optional
+Maintainer: Ubuntu Kernel Team <kernel-team@lists.ubuntu.com>
+XSC-Ubuntu-Compatible-Signing: ubuntu/4 pro/3
+Rules-Requires-Root: no
+Standards-Version: 3.9.4.0
+Build-Depends:
+ gcc-13, gcc-13-aarch64-linux-gnu [arm64] <cross>, gcc-13-arm-linux-gnueabihf [armhf] <cross>, gcc-13-powerpc64le-linux-gnu [ppc64el] <cross>, gcc-13-riscv64-linux-gnu [riscv64] <cross>, gcc-13-s390x-linux-gnu [s390x] <cross>, gcc-13-x86-64-linux-gnu [amd64] <cross>,
+ debhelper-compat (= 10),
+ cpio,
+ kmod <!stage1>,
+ makedumpfile [amd64] <!stage1>,
+ libcap-dev <!stage1>,
+ libelf-dev <!stage1>,
+ libnewt-dev <!stage1>,
+ libiberty-dev <!stage1>,
+ default-jdk-headless <!stage1>,
+ java-common <!stage1>,
+ rsync [!i386] <!stage1>,
+ libdw-dev <!stage1>,
+ libpci-dev <!stage1>,
+ pkg-config <!stage1>,
+ python3 <!stage1>,
+ python3-dev <!stage1>,
+ python3-setuptools <!stage1>,
+ flex <!stage1>,
+ bison <!stage1>,
+ libunwind8-dev [amd64 arm64 armhf ppc64el] <!stage1>,
+ liblzma-dev <!stage1>,
+ openssl <!stage1>,
+ libssl-dev <!stage1>,
+ libaudit-dev <!stage1>,
+ bc <!stage1>,
+ gawk <!stage1>,
+ libudev-dev <!stage1>,
+ autoconf <!stage1>,
+ automake <!stage1>,
+ libtool <!stage1>,
+ uuid-dev <!stage1>,
+ libnuma-dev [amd64 arm64 ppc64el s390x] <!stage1>,
+ libtraceevent-dev [amd64 arm64 armhf ppc64el s390x riscv64] <!stage1>,
+ libtracefs-dev [amd64 arm64 armhf ppc64el s390x riscv64] <!stage1>,
+ dkms <!stage1>,
+ dwarfdump <!stage1>,
+ curl <!stage1>,
+ zstd <!stage1>,
+ pahole [amd64 arm64 armhf ppc64el s390x riscv64] | dwarves (>= 1.21) [amd64 arm64 armhf ppc64el s390x riscv64] <!stage1>,
+ clang-18 [amd64 arm64 armhf ppc64el riscv64 s390x],
+ rustc [amd64 arm64 armhf ppc64el riscv64 s390x],
+ rust-src [amd64 arm64 armhf ppc64el riscv64 s390x],
+ rustfmt [amd64 arm64 armhf ppc64el riscv64 s390x],
+ bindgen-0.65 [amd64 arm64 armhf ppc64el riscv64 s390x],
+ libstdc++-dev,
+Build-Depends-Indep:
+ xmlto <!stage1>,
+ bzip2 <!stage1>,
+ sharutils <!stage1>,
+ asciidoc <!stage1>,
+ python3-docutils <!stage1>,
+Vcs-Git: git://git.launchpad.net/~canonical-kernel/ubuntu/+source/linux-qcom/+git/noble
+XS-Testsuite: autopkgtest
+#XS-Testsuite-Depends: gcc-4.7 binutils
+
+Package: linux-qcom-headers-6.8.0-1046
+Build-Profiles: <!stage1>
+Architecture: all
+Multi-Arch: foreign
+Section: devel
+Priority: optional
+Depends: ${misc:Depends}, coreutils
+Description: Header files related to Linux kernel version 6.8.0
+ This package provides kernel header files for version 6.8.0, for sites
+ that want the latest kernel headers. Please read
+ /usr/share/doc/linux-qcom-headers-6.8.0-1046/debian.README.gz for details
+
+Package: linux-qcom-tools-6.8.0-1046
+Build-Profiles: <!stage1>
+Architecture: arm64
+Section: devel
+Priority: optional
+Depends: ${misc:Depends}, ${shlibs:Depends}, linux-tools-common
+Description: Linux kernel version specific tools for version 6.8.0-1046
+ This package provides the architecture dependant parts for kernel
+ version locked tools (such as perf and x86_energy_perf_policy) for
+ version 6.8.0-1046 on
+ .
+ You probably want to install linux-tools-6.8.0-1046-<flavour>.
+
+Package: linux-libc-dev-qcom
+Architecture: all
+Depends: ${misc:Depends}
+Description: Linux Kernel Headers for development
+ This package provides additional downstream headers from the Linux kernel.
+ These headers are used by the installed headers for GNU glibc and other system
+ libraries. They are NOT meant to be used to build third-party modules for
+ your kernel. Use linux-qcom-headers-* packages for that.
+
+
+Package: linux-image-6.8.0-1046-qcom
+Build-Profiles: <!stage1>
+Architecture: arm64
+Section: kernel
+Priority: optional
+Provides: linux-image, fuse-module, kvm-api-4, redhat-cluster-modules, ivtv-modules, virtualbox-guest-modules [amd64], ${linux:rprovides}
+Depends: ${misc:Depends}, ${shlibs:Depends}, kmod, linux-base (>= 4.5ubuntu1~16.04.1), linux-modules-6.8.0-1046-qcom
+Recommends: grub-pc [amd64] | grub-efi-amd64 [amd64] | grub-efi-ia32 [amd64] | grub [amd64] | lilo [amd64] | flash-kernel [armhf arm64] | grub-efi-arm64 [arm64] | grub-efi-arm [armhf] | grub-ieee1275 [ppc64el], initramfs-tools | linux-initramfs-tool
+Breaks: flash-kernel (<< 3.90ubuntu2) [arm64 armhf], s390-tools (<< 2.3.0-0ubuntu3) [s390x]
+Conflicts: linux-image-unsigned-6.8.0-1046-qcom
+Suggests: fdutils, linux-qcom-tools, linux-headers-6.8.0-1046-qcom
+Description: Linux kernel image for version 6.8.0 on  SMP
+ This package contains the Linux kernel image for version 6.8.0 on
+  SMP.
+ .
+ Supports Qualcomm SoC processors.
+ .
+ Geared toward desktop and server systems.
+ .
+ You likely do not want to install this package directly. Instead, install
+ the linux-qcom meta-package, which will ensure that upgrades work
+ correctly, and that supporting packages are also installed.
+
+Package: linux-modules-6.8.0-1046-qcom
+Build-Profiles: <!stage1>
+Architecture: arm64
+Section: kernel
+Priority: optional
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Built-Using: ${linux:BuiltUsing}
+Description: Linux kernel modules for version 6.8.0 on  SMP
+ Contains the corresponding System.map file, the modules built by the
+ packager, and scripts that try to ensure that the system is not left in an
+ unbootable state after an update.
+ .
+ Supports Qualcomm SoC processors.
+ .
+ Geared toward desktop and server systems.
+ .
+ You likely do not want to install this package directly. Instead, install
+ the linux-qcom meta-package, which will ensure that upgrades work
+ correctly, and that supporting packages are also installed.
+
+Package: linux-headers-6.8.0-1046-qcom
+Build-Profiles: <!stage1>
+Architecture: arm64
+Section: devel
+Priority: optional
+Depends: ${misc:Depends}, linux-qcom-headers-6.8.0-1046, ${shlibs:Depends}
+Provides: linux-headers, linux-headers-3.0
+Description: Linux kernel headers for version 6.8.0 on  SMP
+ This package provides kernel header files for version 6.8.0 on
+  SMP.
+ .
+ This is for sites that want the latest kernel headers.  Please read
+ /usr/share/doc/linux-headers-6.8.0-1046/debian.README.gz for details.
+
+Package: linux-qcom-lib-rust-6.8.0-1046-qcom
+Build-Profiles: <!stage1>
+Architecture: arm64
+Multi-Arch: foreign
+Section: devel
+Priority: optional
+Depends: ${misc:Depends}, coreutils
+Description: Rust library files related to Linux kernel version 6.8.0
+ This package provides kernel library files for version 6.8.0, that allow to
+ compile out-of-tree kernel modules written in Rust.
+
+Package: linux-image-6.8.0-1046-qcom-dbgsym
+Build-Profiles: <!stage1>
+Architecture: arm64
+Section: devel
+Priority: optional
+Depends: ${misc:Depends}
+Provides: linux-debug
+Description: Linux kernel debug image for version 6.8.0 on  SMP
+ This package provides the kernel debug image for version 6.8.0 on
+  SMP.
+ .
+ This is for sites that wish to debug the kernel.
+ .
+ The kernel image contained in this package is NOT meant to boot from. It
+ is uncompressed, and unstripped. This package also includes the
+ unstripped modules.
+
+Package: linux-tools-6.8.0-1046-qcom
+Build-Profiles: <!stage1>
+Architecture: arm64
+Section: devel
+Priority: optional
+Depends: ${misc:Depends}, linux-qcom-tools-6.8.0-1046
+Description: Linux kernel version specific tools for version 6.8.0-1046
+ This package provides the architecture dependant parts for kernel
+ version locked tools (such as perf and x86_energy_perf_policy) for
+ version 6.8.0-1046 on
+ .
+
+
+Package: linux-buildinfo-6.8.0-1046-qcom
+Build-Profiles: <!stage1>
+Architecture: arm64
+Section: kernel
+Priority: optional
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Built-Using: ${linux:BuiltUsing}
+Description: Linux kernel buildinfo for version 6.8.0 on  SMP
+ This package contains the Linux kernel buildinfo for version 6.8.0 on
+  SMP.
+ .
+ You likely do not want to install this package.
+
+
+Package: linux-modules-iwlwifi-6.8.0-1046-qcom
+Build-Profiles: <!stage1>
+Architecture: arm64
+Section: kernel
+Priority: optional
+Depends:
+ ${misc:Depends},
+ linux-image-6.8.0-1046-qcom | linux-image-unsigned-6.8.0-1046-qcom,
+Built-Using: ${linux:BuiltUsing}
+Description: Linux kernel iwlwifi modules for version 6.8.0-1046
+ This package provides the Linux kernel iwlwifi modules for version
+ 6.8.0-1046.
+ .
+ You likely do not want to install this package directly. Instead, install the
+ one of the linux-modules-iwlwifi-qcom* meta-packages,
+ which will ensure that upgrades work correctly, and that supporting packages are
+ also installed.
+
