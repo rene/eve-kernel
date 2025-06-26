@@ -7,14 +7,9 @@ on:
                 description: "Branch or ref to build"
                 required: false
     pull_request: {}
-    pull_request_review:
-        types: [submitted]
     push:
         branches:
             - "eve-kernel-amd64-v6.1.112-generic"
-
-env:
-    base_branch: "refs/heads/eve-kernel-amd64-v6.1.112-generic"
 
 concurrency:
     group: ${{ github.workflow }}-${{ github.ref }}
@@ -29,12 +24,18 @@ jobs:
             max-parallel: 2
 
         runs-on: self-hosted
-        if: ${{ github.event_name == 'workflow_dispatch' ||
-            (github.event_name == 'pull_request_review' && github.event.review.state == 'approved') ||
-            github.ref == env.base_branch ||
-            github.event_name == 'pull_request' }}
+
+        if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.ref == 'refs/heads/eve-kernel-amd64-v6.1.112-generic' }}
 
         steps:
+            - name: Set constants
+              id: constants
+              run: |
+                  BASE_BRANCH="refs/heads/eve-kernel-amd64-v6.1.112-generic"
+                  SHORT_NAME="${BASE_BRANCH#refs/heads/}"
+                  echo "base_branch=$BASE_BRANCH" >> $GITHUB_OUTPUT
+                  echo "short_name=$SHORT_NAME" >> $GITHUB_OUTPUT
+
             - name: Set checkout reference
               id: set-ref
               run: |
@@ -53,24 +54,26 @@ jobs:
               with:
                   ref: ${{ steps.set-ref.outputs.ref_to_use }}
 
-            - name: Build eve-kernel-amd64 ${{ matrix.flavor | upper }}
+            - name: Build ${{ steps.constants.outputs.short_name }} - ${{ matrix.flavor }} kernel
               run: |
+                  BRANCH=${GITHUB_REF##*/}
                   make -f Makefile.eve \
                     KERNEL_CONFIG_FLAVOR=${{ matrix.flavor }} \
-                    BRANCH?=${GITHUB_REF##*/} \
+                    BRANCH=$BRANCH \
                     kernel-gcc
 
             - name: Log in to Docker Hub
-              if: ${{ github.ref == env.base_branch }}
+              if: ${{ github.ref == steps.constants.outputs.base_branch }}
               uses: docker/login-action@v3
               with:
                   username: ${{ secrets.RELEASE_DOCKERHUB_ACCOUNT }}
                   password: ${{ secrets.RELEASE_DOCKERHUB_TOKEN }}
 
-            - name: Push ${{ matrix.flavor }} image
-              if: ${{ github.ref == env.base_branch }}
+            - name: Push ${{ matrix.flavor }} image for ${{ steps.constants.outputs.short_name }}
+              if: ${{ github.ref == steps.constants.outputs.base_branch }}
               run: |
+                  BRANCH=${GITHUB_REF##*/}
                   make -f Makefile.eve \
                     KERNEL_CONFIG_FLAVOR=${{ matrix.flavor }} \
-                    BRANCH?=${GITHUB_REF##*/} \
+                    BRANCH=$BRANCH \
                     push-gcc
