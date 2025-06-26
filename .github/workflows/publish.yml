@@ -4,12 +4,18 @@ on:
     workflow_dispatch:
         inputs:
             ref:
-                description: "Branch or ref to build"
+                description: "Branch or tag to build"
                 required: false
     pull_request: {}
     push:
         branches:
             - "eve-kernel-amd64-v6.1.112-generic"
+    # Uncomment to enable trigger on PR approval (note: noisy)
+    # pull_request_review:
+    #   types: [submitted]
+
+env:
+    BASE_REF: "eve-kernel-amd64-v6.1.112-generic" # no refs/heads/ prefix
 
 concurrency:
     group: ${{ github.workflow }}-${{ github.ref }}
@@ -25,23 +31,19 @@ jobs:
 
         runs-on: self-hosted
 
-        if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.ref == 'refs/heads/eve-kernel-amd64-v6.1.112-generic' }}
+        if: >
+            github.event_name == 'workflow_dispatch' ||
+            github.event_name == 'push' ||
+            github.event_name == 'pull_request'
+            # Uncomment to react to approvals only
+            # || (github.event_name == 'pull_request_review' && github.event.review.state == 'approved')
 
         steps:
-            - name: Set constants
-              id: constants
-              run: |
-                  BASE_BRANCH="refs/heads/eve-kernel-amd64-v6.1.112-generic"
-                  SHORT_NAME="${BASE_BRANCH#refs/heads/}"
-                  echo "base_branch=$BASE_BRANCH" >> $GITHUB_OUTPUT
-                  echo "short_name=$SHORT_NAME" >> $GITHUB_OUTPUT
-
-            - name: Debug GitHub context
+            - name: Debug GitHub refs
               run: |
                   echo "event_name: ${{ github.event_name }}"
-                  echo "ref: ${{ github.ref }}"
-                  echo "ref_name: ${{ github.ref_name }}"
-                  echo "head_ref: ${{ github.head_ref }}"
+                  echo "github.ref: ${{ github.ref }}"
+                  echo "github.head_ref: ${{ github.head_ref }}"
                   echo "event.inputs.ref: ${{ github.event.inputs.ref }}"
 
             - name: Set checkout reference
@@ -49,11 +51,17 @@ jobs:
               run: |
                   if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.ref }}" ]]; then
                     REF="${{ github.event.inputs.ref }}"
+                    # Normalize input to full ref
+                    if [[ "$REF" != refs/* ]]; then
+                      REF="refs/heads/$REF"
+                    fi
                   elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
-                    REF="${{ github.head_ref }}"
+                    # Use GitHub's generated merge ref for PRs
+                    REF="${{ github.ref }}"
                   else
-                    REF="${{ github.ref_name }}"
+                    REF="${{ github.ref }}"
                   fi
+
                   echo "Using ref: $REF"
                   echo "ref_to_use=$REF" >> $GITHUB_OUTPUT
 
@@ -62,26 +70,24 @@ jobs:
               with:
                   ref: ${{ steps.set-ref.outputs.ref_to_use }}
 
-            - name: Build ${{ steps.constants.outputs.short_name }} - ${{ matrix.flavor }} kernel
+            - name: Build kernel flavor ${{ matrix.flavor }}
               run: |
-                  BRANCH=${{ steps.set-ref.outputs.ref_to_use }}
                   make -f Makefile.eve \
                     KERNEL_CONFIG_FLAVOR=${{ matrix.flavor }} \
-                    BRANCH=$BRANCH \
+                    BRANCH="${GITHUB_REF##*/}" \
                     kernel-gcc
 
             - name: Log in to Docker Hub
-              if: ${{ github.ref == steps.constants.outputs.base_branch }}
+              if: ${{ github.ref == 'refs/heads/' && github.ref_name == env.BASE_REF }}
               uses: docker/login-action@v3
               with:
                   username: ${{ secrets.RELEASE_DOCKERHUB_ACCOUNT }}
                   password: ${{ secrets.RELEASE_DOCKERHUB_TOKEN }}
 
-            - name: Push ${{ matrix.flavor }} image for ${{ steps.constants.outputs.short_name }}
-              if: ${{ github.ref == steps.constants.outputs.base_branch }}
+            - name: Push ${{ matrix.flavor }} image
+              if: ${{ github.ref == 'refs/heads/' && github.ref_name == env.BASE_REF }}
               run: |
-                  BRANCH=${{ steps.set-ref.outputs.ref_to_use }}
                   make -f Makefile.eve \
                     KERNEL_CONFIG_FLAVOR=${{ matrix.flavor }} \
-                    BRANCH=$BRANCH \
+                    BRANCH="${GITHUB_REF##*/}" \
                     push-gcc
