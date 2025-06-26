@@ -36,15 +36,23 @@ jobs:
                   echo "base_branch=$BASE_BRANCH" >> $GITHUB_OUTPUT
                   echo "short_name=$SHORT_NAME" >> $GITHUB_OUTPUT
 
+            - name: Debug GitHub context
+              run: |
+                  echo "event_name: ${{ github.event_name }}"
+                  echo "ref: ${{ github.ref }}"
+                  echo "ref_name: ${{ github.ref_name }}"
+                  echo "head_ref: ${{ github.head_ref }}"
+                  echo "event.inputs.ref: ${{ github.event.inputs.ref }}"
+
             - name: Set checkout reference
               id: set-ref
               run: |
-                  if [ -n "${{ github.event.inputs.ref }}" ]; then
+                  if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.ref }}" ]]; then
                     REF="${{ github.event.inputs.ref }}"
-                  elif [ -n "${{ github.head_ref }}" ]; then
+                  elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
                     REF="${{ github.head_ref }}"
                   else
-                    REF="${{ github.ref }}"
+                    REF="${{ github.ref_name }}"
                   fi
                   echo "Using ref: $REF"
                   echo "ref_to_use=$REF" >> $GITHUB_OUTPUT
@@ -56,7 +64,7 @@ jobs:
 
             - name: Build ${{ steps.constants.outputs.short_name }} - ${{ matrix.flavor }} kernel
               run: |
-                  BRANCH=${GITHUB_REF##*/}
+                  BRANCH=${{ steps.set-ref.outputs.ref_to_use }}
                   make -f Makefile.eve \
                     KERNEL_CONFIG_FLAVOR=${{ matrix.flavor }} \
                     BRANCH=$BRANCH \
@@ -72,7 +80,7 @@ jobs:
             - name: Push ${{ matrix.flavor }} image for ${{ steps.constants.outputs.short_name }}
               if: ${{ github.ref == steps.constants.outputs.base_branch }}
               run: |
-                  BRANCH=${GITHUB_REF##*/}
+                  BRANCH=${{ steps.set-ref.outputs.ref_to_use }}
                   make -f Makefile.eve \
                     KERNEL_CONFIG_FLAVOR=${{ matrix.flavor }} \
                     BRANCH=$BRANCH \
