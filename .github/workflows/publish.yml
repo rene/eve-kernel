@@ -10,9 +10,6 @@ on:
     push:
         branches:
             - "eve-kernel-amd64-v6.1.112-generic"
-    # Uncomment to enable trigger on PR approval (note: noisy)
-    # pull_request_review:
-    #   types: [submitted]
 
 env:
     BASE_REF: "eve-kernel-amd64-v6.1.112-generic" # no refs/heads/ prefix
@@ -35,8 +32,6 @@ jobs:
             github.event_name == 'workflow_dispatch' ||
             github.event_name == 'push' ||
             github.event_name == 'pull_request'
-            # Uncomment to react to approvals only
-            # || (github.event_name == 'pull_request_review' && github.event.review.state == 'approved')
 
         steps:
             - name: Debug GitHub refs
