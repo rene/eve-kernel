@@ -1,3 +1,26 @@
+linux-qcom (6.8.0-1047.47) noble; urgency=medium
+
+  * noble/linux-qcom: 6.8.0-1047.47 -proposed tracker (LP: #2115413)
+
+  * [RB3] ucsi_glink.pmic_glink_ucsi pmic_glink.ucsi.0: PPM init failed, stop
+    trying
+    - SAUCE: usb: dwc3: make sure reset is deasserted before enabling clocks
+
+  * [RB8][x03] qcom-sa8775p-lpass-lpi-pinctrl errors found in dmesg
+    - QCLINUX: arm64: dts: qcom: update lpi-quad pin functions for qcs9075-rb8
+
+  * [qcom] Qcom kernel crashes in virtual machine
+    - SAUCE: gunyah_qcom: check qcom,msm-id property before HW access
+
+  * [5430][x03] SoC id not known by qcom/socinfo.c kernel driver Edit
+    - QCLINUX: soc: qcom: socinfo: add QCS5430 SoC ID
+    - QCLINUX: dt-bindings: arm: qcom,ids: add SoC ID for QCS5430
+
+  * [RB3] Enable sound-dais in our kernel for ALSA
+    - ASoC: qcom: topology: validate the max_op_port value
+
+ -- Masahiro Yamada <masahiro.yamada@canonical.com>  Thu, 26 Jun 2025 21:07:26 +0900
+
 linux-qcom (6.8.0-1046.46) noble; urgency=medium
 
   * noble/linux-qcom: 6.8.0-1046.46 -proposed tracker (LP: #2114979)

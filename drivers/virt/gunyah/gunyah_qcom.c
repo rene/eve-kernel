@@ -123,7 +123,7 @@ static bool gh_has_qcom_extensions(void)
 	uuid_t uuid;
 	u32 *up;
 
-	arm_smccc_1_1_smc(GH_QCOM_EXT_CALL_UUID_ID, &res);
+	arm_smccc_1_1_invoke(GH_QCOM_EXT_CALL_UUID_ID, &res);
 
 	up = (u32 *)&uuid.b[0];
 	up[0] = lower_32_bits(res.a0);
@@ -136,12 +136,6 @@ static bool gh_has_qcom_extensions(void)
 
 static int __init qcom_gh_platform_hooks_register(void)
 {
-	struct property *prop;
-
-	prop = of_find_property(of_root, "qcom,msm-id", NULL);
-	if (!prop)
-		return -ENODEV;
-
 	if (!gh_has_qcom_extensions())
 		return -ENODEV;
 
