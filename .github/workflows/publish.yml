@@ -61,6 +61,18 @@ jobs:
                   echo "Using ref: $REF"
                   echo "ref_to_use=$REF" >> $GITHUB_OUTPUT
 
+            - name: Set BRANCH variable
+              run: |
+                  if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+                    BR="${{ github.head_ref }}"
+                  else
+                    BR="${{ github.ref_name }}"
+                  fi
+                  # Sanitize for Docker tag: replace slashes with dashes
+                  SAFE_BRANCH="${BR//\//-}"
+                  echo "BRANCH=$SAFE_BRANCH" >> $GITHUB_ENV
+              shell: bash
+
             - name: Checkout code
               uses: actions/checkout@v4
               with:
@@ -70,7 +82,7 @@ jobs:
               run: |
                   make -f Makefile.eve \
                     KERNEL_CONFIG_FLAVOR=${{ matrix.flavor }} \
-                    BRANCH="${GITHUB_REF##*/}" \
+                    BRANCH=$BRANCH \
                     kernel-gcc
 
             - name: Log in to Docker Hub
@@ -85,5 +97,5 @@ jobs:
               run: |
                   make -f Makefile.eve \
                     KERNEL_CONFIG_FLAVOR=${{ matrix.flavor }} \
-                    BRANCH="${GITHUB_REF##*/}" \
+                    BRANCH=$BRANCH \
                     push-gcc
