@@ -62,7 +62,7 @@ jobs:
                   echo "ref_to_use=$REF" >> $GITHUB_OUTPUT
 
             - name: Checkout code
-              uses: actions/checkout@v3
+              uses: actions/checkout@v4
               with:
                   ref: ${{ steps.set-ref.outputs.ref_to_use }}
 
