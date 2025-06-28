@@ -38,6 +38,7 @@ jobs:
               run: |
                   echo "event_name: ${{ github.event_name }}"
                   echo "github.ref: ${{ github.ref }}"
+                  echo "github.ref_name: ${{ github.ref_name }}"
                   echo "github.head_ref: ${{ github.head_ref }}"
                   echo "event.inputs.ref: ${{ github.event.inputs.ref }}"
 
@@ -73,14 +74,14 @@ jobs:
                     kernel-gcc
 
             - name: Log in to Docker Hub
-              if: ${{ github.ref == 'refs/heads/' && github.ref_name == env.BASE_REF }}
+              if: github.ref == format('refs/heads/{0}', env.BASE_REF)
               uses: docker/login-action@v3
               with:
                   username: ${{ secrets.RELEASE_DOCKERHUB_ACCOUNT }}
                   password: ${{ secrets.RELEASE_DOCKERHUB_TOKEN }}
 
             - name: Push ${{ matrix.flavor }} image
-              if: ${{ github.ref == 'refs/heads/' && github.ref_name == env.BASE_REF }}
+              if: github.ref == format('refs/heads/{0}', env.BASE_REF)
               run: |
                   make -f Makefile.eve \
                     KERNEL_CONFIG_FLAVOR=${{ matrix.flavor }} \
