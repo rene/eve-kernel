@@ -1,6 +1,10 @@
 # Title: Dockerfile for building the EVE kernel
+
+KERNEL_CONFIG_FLAVOR?=core
+
 VERSION=$(shell git rev-parse --short=12 HEAD)
 DIRTY=$(shell git diff --quiet || echo '-dirty')
+EVE_KERNEL_CONFIG=eve-$(KERNEL_CONFIG_FLAVOR)_defconfig
 EVE_FLAVOR=generic
 ARCHITECTURE=amd64
 KERNEL_TAG=v6.1.112
@@ -61,16 +65,24 @@ linuxkit: $(LK)
 $(LK):
 	GOBIN=$(GOBIN) go install github.com/linuxkit/linuxkit/src/cmd/linuxkit@$(LINUXKIT_VERSION)
 
+# Image tag with KERNEL_CONFIG_FLAVOR (always used for builds and push)
+IMAGE_TAG_WITH_FLAVOR := $(IMAGE_REPOSITORY):$(BRANCH)-$(KERNEL_CONFIG_FLAVOR)-$(VERSION)$(DIRTY)
+
+# Image tag without KERNEL_CONFIG_FLAVOR (only used if FLAVOR == core)
+# used for backwards compatibility with old EVE versions before KERNEL_CONFIG_FLAVOR was introduced
+IMAGE_TAG_NO_FLAVOR := $(IMAGE_REPOSITORY):$(BRANCH)-$(VERSION)$(DIRTY)
+
 KERNEL_OCI_FILE:=$(shell mktemp -u)-kernel.tar
 
 kernel-build-%: Makefile.eve linuxkit | ensure-builder
-	@echo "Building kernel version $(BRANCH):$(VERSION)-$* with compiler $*"
+	@echo "Building kernel version $(BRANCH):$(KERNEL_CONFIG_FLAVOR)-$(VERSION)-$* with compiler $*"
 	docker buildx build \
 	--builder=$(BUILD_KIT_BUILDER) \
 	--build-arg="SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH)" \
 	--build-arg="KBUILD_BUILD_TIMESTAMP=$(KBUILD_BUILD_TIMESTAMP)" \
-	--build-arg="LOCALVERSION=$(VERSION)$(DIRTY)" \
-	--platform $(PLATFORM) -t $(IMAGE_REPOSITORY):$(BRANCH)-$(VERSION)$(DIRTY)-$* \
+	--build-arg="LOCALVERSION=$(KERNEL_CONFIG_FLAVOR)-$(VERSION)$(DIRTY)" \
+	--build-arg="KERNEL_CONFIG=$(EVE_KERNEL_CONFIG)" \
+	--platform $(PLATFORM) -t $(IMAGE_TAG_WITH_FLAVOR)-$* \
 	--sbom=true --output=type=oci,dest=$(KERNEL_OCI_FILE) -f Dockerfile.$* .
 	$(LK) cache import $(KERNEL_OCI_FILE)
 	rm -f $(KERNEL_OCI_FILE)
@@ -87,12 +99,15 @@ push-clang: push-image-clang
 .PHONY: kernel-gcc kernel-clang docker-tag-gcc docker-tag-clang push-gcc push-clang
 
 docker-tag-generate-%:
-	@echo "docker.io/$(IMAGE_REPOSITORY):$(BRANCH)-$(VERSION)$(DIRTY)-$*"
+	@echo "docker.io/$(IMAGE_TAG_WITH_FLAVOR)-$*"
 
 push-image-%:
 	$(if $(DIRTY), $(error "Not pushing since the repo is dirty"))
-	$(LK) cache push $(IMAGE_REPOSITORY):$(BRANCH)-$(VERSION)-$*
-
+	$(LK) cache push $(IMAGE_TAG_WITH_FLAVOR)-$*
+	$(if $(filter core,$(KERNEL_CONFIG_FLAVOR)), \
+	  $(LK) pkg remote-tag \
+	    $(IMAGE_TAG_WITH_FLAVOR)-$* \
+	    $(IMAGE_TAG_NO_FLAVOR)-$*,)
 .PHONY: clean
 clean:
 	echo "Cleaning"
