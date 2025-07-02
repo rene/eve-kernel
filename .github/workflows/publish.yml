@@ -81,7 +81,7 @@ jobs:
               with:
                   ref: ${{ steps.set-ref.outputs.ref_to_use }}
                   repository: ${{ github.event.pull_request.head.repo.full_name }}
-                  fetch-depth: 0
+                  fetch-depth: 1
 
             - name: Login to Docker Hub
               if: ${{ github.event.repository.full_name }}== 'lf-edge/eve-kernel'
