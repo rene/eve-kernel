@@ -6,7 +6,7 @@ on:
             ref:
                 description: "Branch or tag to build"
                 required: false
-    pull_request: {}
+    pull_request_target: {}
     push:
         branches:
             - "eve-kernel-amd64-v6.1.112-generic"
@@ -31,7 +31,7 @@ jobs:
         if: >
             github.event_name == 'workflow_dispatch' ||
             github.event_name == 'push' ||
-            github.event_name == 'pull_request'
+            github.event_name == 'pull_request_target'
 
         steps:
             - name: Debug GitHub refs
@@ -41,6 +41,8 @@ jobs:
                   echo "github.ref_name: ${{ github.ref_name }}"
                   echo "github.head_ref: ${{ github.head_ref }}"
                   echo "event.inputs.ref: ${{ github.event.inputs.ref }}"
+                  echo "event.repository.full_name: ${{ github.event.repository.full_name }}"
+                  echo "github.event.pull_request.head.ref: ${{ github.event.pull_request.head.ref }}"
 
             - name: Set checkout reference
               id: set-ref
@@ -51,9 +53,9 @@ jobs:
                     if [[ "$REF" != refs/* ]]; then
                       REF="refs/heads/$REF"
                     fi
-                  elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+                  elif [[ "${{ github.event_name }}" == "pull_request_target" ]]; then
                     # Use GitHub's generated merge ref for PRs
-                    REF="${{ github.ref }}"
+                    REF="${{ github.event.pull_request.head.ref }}"
                   else
                     REF="${{ github.ref }}"
                   fi
@@ -63,8 +65,8 @@ jobs:
 
             - name: Set BRANCH variable
               run: |
-                  if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-                    BR="${{ github.head_ref }}"
+                  if [[ "${{ github.event_name }}" == "pull_request_target" ]]; then
+                    BR="${{ github.event.pull_request.head.ref }}"
                   else
                     BR="${{ github.ref_name }}"
                   fi
