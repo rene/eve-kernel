@@ -1,3 +1,15 @@
+linux-qcom (6.8.0-1048.48) noble; urgency=medium
+
+  * noble/linux-qcom: 6.8.0-1048.48 -proposed tracker (LP: #2116048)
+
+  * INVALID or PRIVATE BUG (LP: #2115967)
+    - SAUCE: camera_kt: fix double locking in cleanup function
+
+  * CONFIG_MMAP_MIN_ADDR should 32768
+    - UBUNTU [Config] set CONFIG_DEFAULT_MMAP_MIN_ADDR=32768
+
+ -- Masahiro Yamada <masahiro.yamada@canonical.com>  Mon, 07 Jul 2025 17:13:59 +0900
+
 linux-qcom (6.8.0-1047.47) noble; urgency=medium
 
   * noble/linux-qcom: 6.8.0-1047.47 -proposed tracker (LP: #2115413)
