@@ -1,14 +1,41 @@
+linux-qcom (6.8.0-1050.50) noble; urgency=medium
+
+  * noble/linux-qcom: 6.8.0-1050.50 -proposed tracker (LP: #2116573)
+
+  * Incorrect graphics dtbo file used in case of qcs5430-fp(2p5|3)-addons-
+    rb3gen2-vision-mezz-ovl.dtb
+    - SAUCE: fix graphics DTBO for qcs5430-{fp2p5,fp3}-addons-rb3gen2-vision-
+      mezz
+
+  * [linux-libc-dev-qcom] Requires smcinvoke.h for securemsm build
+    - SAUCE: include linux/smcinvoke.h in linux-libc-dev-qcom package
+
+  * [QC] Kernel crash from libgbm - followup
+    - QCLINUX: iommu/arm-smmu: qcom: Fix arm_smmu_domain usage in fault
+      handler
+
+ -- Masahiro Yamada <masahiro.yamada@canonical.com>  Fri, 11 Jul 2025 20:30:43 +0900
+
+linux-qcom (6.8.0-1049.49) noble; urgency=medium
+
+  * noble/linux-qcom: 6.8.0-1049.49 -proposed tracker (LP: #2116298)
+
+  * [RB3] miscellanea/check_prerelease test failed
+    - [Packaging] remove uefi_signed=true
+
+ -- Masahiro Yamada <masahiro.yamada@canonical.com>  Thu, 10 Jul 2025 10:20:07 +0900
+
 linux-qcom (6.8.0-1048.48) noble; urgency=medium
 
   * noble/linux-qcom: 6.8.0-1048.48 -proposed tracker (LP: #2116048)
 
-  * INVALID or PRIVATE BUG (LP: #2115967)
+  * [RB3] [x04] deadlock in cam_mem_mgr_cleanup_table
     - SAUCE: camera_kt: fix double locking in cleanup function
 
   * CONFIG_MMAP_MIN_ADDR should 32768
     - UBUNTU [Config] set CONFIG_DEFAULT_MMAP_MIN_ADDR=32768
 
- -- Masahiro Yamada <masahiro.yamada@canonical.com>  Mon, 07 Jul 2025 17:13:59 +0900
+ -- Masahiro Yamada <masahiro.yamada@canonical.com>  Mon, 07 Jul 2025 17:39:47 +0900
 
 linux-qcom (6.8.0-1047.47) noble; urgency=medium
 
