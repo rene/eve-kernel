@@ -62,7 +62,7 @@ Vcs-Git: git://git.launchpad.net/~canonical-kernel/ubuntu/+source/linux-qcom/+gi
 XS-Testsuite: autopkgtest
 #XS-Testsuite-Depends: gcc-4.7 binutils
 
-Package: linux-qcom-headers-6.8.0-1048
+Package: linux-qcom-headers-6.8.0-1050
 Build-Profiles: <!stage1>
 Architecture: all
 Multi-Arch: foreign
@@ -72,20 +72,20 @@ Depends: ${misc:Depends}, coreutils
 Description: Header files related to Linux kernel version 6.8.0
  This package provides kernel header files for version 6.8.0, for sites
  that want the latest kernel headers. Please read
- /usr/share/doc/linux-qcom-headers-6.8.0-1048/debian.README.gz for details
+ /usr/share/doc/linux-qcom-headers-6.8.0-1050/debian.README.gz for details
 
-Package: linux-qcom-tools-6.8.0-1048
+Package: linux-qcom-tools-6.8.0-1050
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: devel
 Priority: optional
 Depends: ${misc:Depends}, ${shlibs:Depends}, linux-tools-common
-Description: Linux kernel version specific tools for version 6.8.0-1048
+Description: Linux kernel version specific tools for version 6.8.0-1050
  This package provides the architecture dependant parts for kernel
  version locked tools (such as perf and x86_energy_perf_policy) for
- version 6.8.0-1048 on
+ version 6.8.0-1050 on
  .
- You probably want to install linux-tools-6.8.0-1048-<flavour>.
+ You probably want to install linux-tools-6.8.0-1050-<flavour>.
 
 Package: linux-libc-dev-qcom
 Architecture: all
@@ -97,17 +97,17 @@ Description: Linux Kernel Headers for development
  your kernel. Use linux-qcom-headers-* packages for that.
 
 
-Package: linux-image-6.8.0-1048-qcom
+Package: linux-image-6.8.0-1050-qcom
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: kernel
 Priority: optional
 Provides: linux-image, fuse-module, kvm-api-4, redhat-cluster-modules, ivtv-modules, virtualbox-guest-modules [amd64], ${linux:rprovides}
-Depends: ${misc:Depends}, ${shlibs:Depends}, kmod, linux-base (>= 4.5ubuntu1~16.04.1), linux-modules-6.8.0-1048-qcom
+Depends: ${misc:Depends}, ${shlibs:Depends}, kmod, linux-base (>= 4.5ubuntu1~16.04.1), linux-modules-6.8.0-1050-qcom
 Recommends: grub-pc [amd64] | grub-efi-amd64 [amd64] | grub-efi-ia32 [amd64] | grub [amd64] | lilo [amd64] | flash-kernel [armhf arm64] | grub-efi-arm64 [arm64] | grub-efi-arm [armhf] | grub-ieee1275 [ppc64el], initramfs-tools | linux-initramfs-tool
 Breaks: flash-kernel (<< 3.90ubuntu2) [arm64 armhf], s390-tools (<< 2.3.0-0ubuntu3) [s390x]
-Conflicts: linux-image-unsigned-6.8.0-1048-qcom
-Suggests: fdutils, linux-qcom-tools, linux-headers-6.8.0-1048-qcom
+Conflicts: linux-image-unsigned-6.8.0-1050-qcom
+Suggests: fdutils, linux-qcom-tools, linux-headers-6.8.0-1050-qcom
 Description: Linux kernel image for version 6.8.0 on  SMP
  This package contains the Linux kernel image for version 6.8.0 on
   SMP.
@@ -120,7 +120,7 @@ Description: Linux kernel image for version 6.8.0 on  SMP
  the linux-qcom meta-package, which will ensure that upgrades work
  correctly, and that supporting packages are also installed.
 
-Package: linux-modules-6.8.0-1048-qcom
+Package: linux-modules-6.8.0-1050-qcom
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: kernel
@@ -140,21 +140,21 @@ Description: Linux kernel modules for version 6.8.0 on  SMP
  the linux-qcom meta-package, which will ensure that upgrades work
  correctly, and that supporting packages are also installed.
 
-Package: linux-headers-6.8.0-1048-qcom
+Package: linux-headers-6.8.0-1050-qcom
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: devel
 Priority: optional
-Depends: ${misc:Depends}, linux-qcom-headers-6.8.0-1048, ${shlibs:Depends}
+Depends: ${misc:Depends}, linux-qcom-headers-6.8.0-1050, ${shlibs:Depends}
 Provides: linux-headers, linux-headers-3.0
 Description: Linux kernel headers for version 6.8.0 on  SMP
  This package provides kernel header files for version 6.8.0 on
   SMP.
  .
  This is for sites that want the latest kernel headers.  Please read
- /usr/share/doc/linux-headers-6.8.0-1048/debian.README.gz for details.
+ /usr/share/doc/linux-headers-6.8.0-1050/debian.README.gz for details.
 
-Package: linux-qcom-lib-rust-6.8.0-1048-qcom
+Package: linux-qcom-lib-rust-6.8.0-1050-qcom
 Build-Profiles: <!stage1>
 Architecture: arm64
 Multi-Arch: foreign
@@ -165,7 +165,7 @@ Description: Rust library files related to Linux kernel version 6.8.0
  This package provides kernel library files for version 6.8.0, that allow to
  compile out-of-tree kernel modules written in Rust.
 
-Package: linux-image-6.8.0-1048-qcom-dbgsym
+Package: linux-image-6.8.0-1050-qcom-dbgsym
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: devel
@@ -182,20 +182,20 @@ Description: Linux kernel debug image for version 6.8.0 on  SMP
  is uncompressed, and unstripped. This package also includes the
  unstripped modules.
 
-Package: linux-tools-6.8.0-1048-qcom
+Package: linux-tools-6.8.0-1050-qcom
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: devel
 Priority: optional
-Depends: ${misc:Depends}, linux-qcom-tools-6.8.0-1048
-Description: Linux kernel version specific tools for version 6.8.0-1048
+Depends: ${misc:Depends}, linux-qcom-tools-6.8.0-1050
+Description: Linux kernel version specific tools for version 6.8.0-1050
  This package provides the architecture dependant parts for kernel
  version locked tools (such as perf and x86_energy_perf_policy) for
- version 6.8.0-1048 on
+ version 6.8.0-1050 on
  .
 
 
-Package: linux-buildinfo-6.8.0-1048-qcom
+Package: linux-buildinfo-6.8.0-1050-qcom
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: kernel
@@ -209,18 +209,18 @@ Description: Linux kernel buildinfo for version 6.8.0 on  SMP
  You likely do not want to install this package.
 
 
-Package: linux-modules-iwlwifi-6.8.0-1048-qcom
+Package: linux-modules-iwlwifi-6.8.0-1050-qcom
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: kernel
 Priority: optional
 Depends:
  ${misc:Depends},
- linux-image-6.8.0-1048-qcom | linux-image-unsigned-6.8.0-1048-qcom,
+ linux-image-6.8.0-1050-qcom | linux-image-unsigned-6.8.0-1050-qcom,
 Built-Using: ${linux:BuiltUsing}
-Description: Linux kernel iwlwifi modules for version 6.8.0-1048
+Description: Linux kernel iwlwifi modules for version 6.8.0-1050
  This package provides the Linux kernel iwlwifi modules for version
- 6.8.0-1048.
+ 6.8.0-1050.
  .
  You likely do not want to install this package directly. Instead, install the
  one of the linux-modules-iwlwifi-qcom* meta-packages,
