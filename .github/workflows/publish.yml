@@ -6,7 +6,10 @@ on:
             ref:
                 description: "Branch or tag to build"
                 required: false
-    pull_request_target: {}
+    pull_request_target:
+        branches:
+            - "eve-kernel-next"
+            - "eve-kernel-*-v[0-9]+.[0-9]+.[0-9]+-*"
     push:
         branches:
             - "eve-kernel-amd64-v6.1.112-generic"
@@ -15,7 +18,11 @@ env:
     BASE_REF: "eve-kernel-amd64-v6.1.112-generic" # no refs/heads/ prefix
 
 concurrency:
-    group: ${{ github.workflow }}-${{ github.ref }}
+    group: ${{ github.workflow }}-${{ github.event_name }}-${{
+        github.event.pull_request.number ||
+        (github.event_name == 'push' && github.ref) ||
+        github.ref_name
+        }}
     cancel-in-progress: true
 
 jobs:
