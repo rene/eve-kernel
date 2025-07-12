@@ -1,0 +1,24 @@
+.git/
+Makefile.eve
+Dockerfile.gcc
+Dockerfile.clang
+
+# Ignore kernel build artifacts
+**/*.o
+**/*.o.cmd
+**/.*.cmd
+**/*.ko
+**/*.a
+**/*.so
+**/*.order
+**/*.tmp
+**/*.mod
+**/*.mod.c
+**/*.symtypes
+**/*.d
+**/*.dwo
+**/*.dtb
+**/*.dtbo
+
+# Ignore build directories
+**/.tmp_versions/

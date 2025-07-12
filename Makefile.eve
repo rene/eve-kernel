@@ -1,0 +1,115 @@
+# Title: Dockerfile for building the EVE kernel
+
+KERNEL_CONFIG_FLAVOR?=core
+
+VERSION=$(shell git rev-parse --short=12 HEAD)
+DIRTY=$(shell git diff --quiet || echo '-dirty')
+EVE_KERNEL_CONFIG=eve-$(KERNEL_CONFIG_FLAVOR)_defconfig
+EVE_FLAVOR=generic
+ARCHITECTURE=amd64
+KERNEL_TAG=v6.1.112
+PLATFORM=linux/$(ARCHITECTURE)
+BUILD_USER:=$(shell id -un)
+
+IMAGE_REPOSITORY?=lfedge/eve-kernel
+
+HOSTARCH:=$(subst aarch64,arm64,$(subst x86_64,amd64,$(shell uname -m)))
+UNAME_OS_LCASE:=$(shell uname -s | tr '[A-Z]' '[a-z]')
+LINUXKIT_VERSION=v1.7.0
+LINUXKIT_SOURCE=https://github.com/linuxkit/linuxkit
+LK=/tmp/linuxkit-$(LINUXKIT_VERSION)
+
+BUILD_KIT_VERSION=v0.23.1
+BUILD_KIT_BUILDER=eve-kernel-builder-$(BUILD_KIT_VERSION)
+
+SOURCE_DATE_EPOCH=$(shell git log -1 --format=%ct)
+BRANCH=eve-kernel-$(ARCHITECTURE)-$(KERNEL_TAG)-$(EVE_FLAVOR)
+# make sure we get a date in correct format, otherwise initramfs cpio mtime will be variable
+KBUILD_BUILD_TIMESTAMP=$(shell git log -1 --format=%cd | cut -f1 -d"+")
+
+ifeq ($(BUILDKIT_PROGRESS),)
+    export BUILDKIT_PROGRESS := plain
+endif
+
+# if BRANCH is defined on a command line we are running under CI
+# we add user name to DIRTY to avoid docker tag conflicts
+# when building on a shared machine with shared docker cache
+ifeq ($(origin BRANCH), file)
+	DIRTY:=-$(BUILD_USER)$(DIRTY)
+endif
+
+.PHONY: all help
+
+all: kernel-gcc
+
+help: Makefile
+	@echo
+	@echo "Makefile to build EVE kernel"
+	@echo "Usage: make [target]"
+	@echo "Targets:"
+	@echo "  kernel-gcc: build kernel with gcc"
+	@echo "  kernel-clang: build kernel with clang"
+	@echo "  docker-tag-gcc: print docker tag for gcc kernel"
+	@echo "  docker-tag-clang: print docker tag for clang kernel"
+	@echo "  push-gcc: push gcc kernel to docker.io"
+	@echo "  push-clang: push clang kernel to docker.io"
+	@echo "  clean: remove generated files"
+	@echo
+
+.PHONY: ensure-builder
+ensure-builder:
+	docker buildx inspect $(BUILD_KIT_BUILDER) 2>/dev/null || \
+	docker buildx create --name $(BUILD_KIT_BUILDER) \
+	--driver docker-container --bootstrap --driver-opt=image=moby/buildkit:$(BUILD_KIT_VERSION)
+
+.PHONY: linuxkit
+linuxkit: $(LK)
+$(LK):
+	curl -L -o $@ $(LINUXKIT_SOURCE)/releases/download/$(LINUXKIT_VERSION)/linuxkit-$(UNAME_OS_LCASE)-$(HOSTARCH) && chmod +x $@
+
+# Image tag with KERNEL_CONFIG_FLAVOR (always used for builds and push)
+IMAGE_TAG_WITH_FLAVOR := $(IMAGE_REPOSITORY):$(BRANCH)-$(KERNEL_CONFIG_FLAVOR)-$(VERSION)$(DIRTY)
+
+# Image tag without KERNEL_CONFIG_FLAVOR (only used if FLAVOR == core)
+# used for backwards compatibility with old EVE versions before KERNEL_CONFIG_FLAVOR was introduced
+IMAGE_TAG_NO_FLAVOR := $(IMAGE_REPOSITORY):$(BRANCH)-$(VERSION)$(DIRTY)
+
+KERNEL_OCI_FILE:=$(shell mktemp -u)-kernel.tar
+
+kernel-build-%: Makefile.eve $(LK) | ensure-builder
+	@echo "Building kernel version $(BRANCH):$(KERNEL_CONFIG_FLAVOR)-$(VERSION)-$* with compiler $*"
+	docker buildx build \
+	--builder=$(BUILD_KIT_BUILDER) \
+	--build-arg="SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH)" \
+	--build-arg="KBUILD_BUILD_TIMESTAMP=$(KBUILD_BUILD_TIMESTAMP)" \
+	--build-arg="LOCALVERSION=$(KERNEL_CONFIG_FLAVOR)-$(VERSION)$(DIRTY)" \
+	--build-arg="KERNEL_CONFIG=$(EVE_KERNEL_CONFIG)" \
+	--platform $(PLATFORM) -t $(IMAGE_TAG_WITH_FLAVOR)-$* \
+	--sbom=true --output=type=oci,dest=$(KERNEL_OCI_FILE) -f Dockerfile.$* .
+	$(LK) cache import $(KERNEL_OCI_FILE)
+	rm -f $(KERNEL_OCI_FILE)
+
+
+# we need these intermediate targets to make .PHONY work for pattern rules
+kernel-gcc: kernel-build-gcc
+kernel-clang: kernel-build-clang
+docker-tag-gcc: docker-tag-generate-gcc
+docker-tag-clang: docker-tag-generate-clang
+push-gcc: push-image-gcc
+push-clang: push-image-clang
+
+.PHONY: kernel-gcc kernel-clang docker-tag-gcc docker-tag-clang push-gcc push-clang
+
+docker-tag-generate-%:
+	@echo "docker.io/$(IMAGE_TAG_WITH_FLAVOR)-$*"
+
+push-image-%:
+	$(if $(DIRTY), $(error "Not pushing since the repo is dirty"))
+	$(LK) cache push $(IMAGE_TAG_WITH_FLAVOR)-$*
+	$(if $(filter core,$(KERNEL_CONFIG_FLAVOR)), \
+	  $(LK) pkg remote-tag \
+	    $(IMAGE_TAG_WITH_FLAVOR)-$* \
+	    $(IMAGE_TAG_NO_FLAVOR)-$*,)
+.PHONY: clean
+clean:
+	echo "Cleaning"
