@@ -1,28 +1,14 @@
-name: eve-kernel build
+name: Building and pushing Eve kernel images
 
 on:
-    workflow_dispatch:
-        inputs:
-            ref:
-                description: "Branch or tag to build"
-                required: false
-    pull_request_target:
-        branches:
-            - "eve-kernel-next"
-            - "eve-kernel-*-v[0-9]+.[0-9]+.[0-9]+-*"
     push:
         branches:
-            - "eve-kernel-amd64-v6.1.112-generic"
-
-env:
-    BASE_REF: "eve-kernel-amd64-v6.1.112-generic" # no refs/heads/ prefix
+            - "gha-test-rebase"
+            - "eve-kernel-next-*"
+            - "eve-kernel-*"
 
 concurrency:
-    group: ${{ github.workflow }}-${{ github.event_name }}-${{
-        github.event.pull_request.number ||
-        (github.event_name == 'push' && github.ref) ||
-        github.ref_name
-        }}
+    group: main-build-${{ github.ref }}
     cancel-in-progress: true
 
 jobs:
@@ -35,86 +21,35 @@ jobs:
 
         runs-on: [runner-xl, X64, Linux]
 
-        if: >
-            github.event_name == 'workflow_dispatch' ||
-            github.event_name == 'push' ||
-            github.event_name == 'pull_request_target'
-
         steps:
-            - name: Debug GitHub refs
-              run: |
-                  echo "event_name: ${{ github.event_name }}"
-                  echo "github.ref: ${{ github.ref }}"
-                  echo "github.ref_name: ${{ github.ref_name }}"
-                  echo "github.head_ref: ${{ github.head_ref }}"
-                  echo "event.inputs.ref: ${{ github.event.inputs.ref }}"
-                  echo "event.repository.full_name: ${{ github.event.pull_request.head.repo.full_name }}"
-                  echo "github.event.pull_request.head.ref: ${{ github.event.pull_request.head.ref }}"
-                  echo "github.event.pull_request.head.sha: ${{ github.event.pull_request.head.sha }}"
-
-            - name: Set checkout reference
-              id: set-ref
-              run: |
-                  if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.ref }}" ]]; then
-                    REF="${{ github.event.inputs.ref }}"
-                    # Normalize input to full ref
-                    if [[ "$REF" != refs/* ]]; then
-                      REF="refs/heads/$REF"
-                    fi
-                  elif [[ "${{ github.event_name }}" == "pull_request_target" ]]; then
-                    # Use GitHub's generated merge ref for PRs
-                    REF="${{ github.event.pull_request.head.sha }}"
-                  else
-                    REF="${{ github.ref }}"
-                  fi
-
-                  echo "Using ref: $REF"
-                  echo "ref_to_use=$REF" >> $GITHUB_OUTPUT
-
-            - name: Set BRANCH variable
-              run: |
-                  if [[ "${{ github.event_name }}" == "pull_request_target" ]]; then
-                    BR="${{ github.event.pull_request.head.ref }}"
-                  else
-                    BR="${{ github.ref_name }}"
-                  fi
-                  # Sanitize for Docker tag: replace slashes with dashes
-                  SAFE_BRANCH="${BR//\//-}"
-                  echo "BRANCH=$SAFE_BRANCH" >> $GITHUB_ENV
-              shell: bash
-
             - name: Checkout code
               uses: actions/checkout@v4
               with:
-                  ref: ${{ steps.set-ref.outputs.ref_to_use }}
-                  repository: ${{ github.event.pull_request.head.repo.full_name }}
+                  ref: ${{ github.ref }}
                   fetch-depth: 1
 
-            - name: Login to Docker Hub
-              if: ${{ github.event.repository.full_name }}== 'lf-edge/eve-kernel'
+            - name: Login to Docker Hub (pull)
               uses: docker/login-action@v3
               with:
                   username: ${{ secrets.DOCKERHUB_PULL_USER }}
                   password: ${{ secrets.DOCKERHUB_PULL_TOKEN }}
 
-            - name: Build kernel flavor ${{ matrix.flavor }}
+            - name: Build kernel flavor ${{ matrix.flavor }} from ${{ github.ref_name }}
               run: |
                   make -f Makefile.eve \
                     KERNEL_CONFIG_FLAVOR=${{ matrix.flavor }} \
-                    BRANCH=$BRANCH \
+                    BRANCH=${{ github.ref_name }} \
                     kernel-gcc
 
-            - name: Log in to Docker Hub
-              if: github.ref == format('refs/heads/{0}', env.BASE_REF)
+            - name: Login to Docker Hub (push)
               uses: docker/login-action@v3
               with:
                   username: ${{ secrets.RELEASE_DOCKERHUB_ACCOUNT }}
                   password: ${{ secrets.RELEASE_DOCKERHUB_TOKEN }}
 
-            - name: Push ${{ matrix.flavor }} image
-              if: github.ref == format('refs/heads/{0}', env.BASE_REF)
+            - name: Push ${{ matrix.flavor }} from ${{ github.ref_name }}
               run: |
                   make -f Makefile.eve \
                     KERNEL_CONFIG_FLAVOR=${{ matrix.flavor }} \
-                    BRANCH=$BRANCH \
+                    BRANCH=${{ github.ref_name }} \
                     push-gcc
