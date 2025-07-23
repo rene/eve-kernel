@@ -1,3 +1,12 @@
+linux-qcom (6.8.0-1051.51) noble; urgency=medium
+
+  * noble/linux-qcom: 6.8.0-1051.51 -proposed tracker (LP: #2117724)
+
+  * [RB3][x04] alsa playback/record test failed
+    - ASoC: qcom: qdsp6: q6apm: fix capture pipeline overruns
+
+ -- Masahiro Yamada <masahiro.yamada@canonical.com>  Wed, 23 Jul 2025 23:29:48 +0900
+
 linux-qcom (6.8.0-1050.50) noble; urgency=medium
 
   * noble/linux-qcom: 6.8.0-1050.50 -proposed tracker (LP: #2116573)
