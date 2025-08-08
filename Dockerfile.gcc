@@ -21,6 +21,7 @@ RUN apk add make flex bison elfutils-dev openssl-dev findutils diffutils perl cc
     linux-headers \
     rsync \
     xxd \
+    xz \
     kmod
 
 ARG TARGETARCH
