@@ -74,6 +74,41 @@ IMAGE_TAG_WITH_FLAVOR := $(IMAGE_REPOSITORY):$(BRANCH)-$(KERNEL_CONFIG_FLAVOR)-$
 # used for backwards compatibility with old EVE versions before KERNEL_CONFIG_FLAVOR was introduced
 IMAGE_TAG_NO_FLAVOR := $(IMAGE_REPOSITORY):$(BRANCH)-$(VERSION)$(DIRTY)
 
+RT_BASE_DEFCONFIG := eve-core_defconfig
+RT_FRAGMENT       := arch/x86/configs/rt.fragment
+RT_STAMP          := .rt-merged.stamp
+
+.PHONY: rt-config gen-rt-fragment
+
+# 1) Merge RT fragment onto base -> write ./.config
+#    We build a STAMP, not ".config" as a target, to avoid a cycle.
+rt-config: $(RT_STAMP)
+$(RT_STAMP): $(RT_FRAGMENT) arch/x86/configs/$(RT_BASE_DEFCONFIG)
+	@echo "Merging $(RT_FRAGMENT) onto $(RT_BASE_DEFCONFIG) -> write ./.config"
+	@mv -f .config .config.bak 2>/dev/null || true
+	KCONFIG_CONFIG=.config $(MAKE) -s $(RT_BASE_DEFCONFIG)
+	@test -s $(RT_FRAGMENT) || { echo "ERROR: missing or empty $(RT_FRAGMENT)"; exit 1; }
+	# merge only (-m); don't let merge_config.sh run 'make' internally
+	KCONFIG_CONFIG=.config scripts/kconfig/merge_config.sh -m -Q .config $(RT_FRAGMENT)
+	$(MAKE) -s olddefconfig
+	@grep -q '^CONFIG_PREEMPT_RT=y$$' .config || { echo "ERROR: CONFIG_PREEMPT_RT not enabled after merge"; exit 1; }
+	@touch $(RT_STAMP)
+	@echo "OK: wrote merged RT config to ./.config (backup: .config.bak)"
+
+# 2) After you've edited ./.config (e.g. via 'make menuconfig'),
+#    regenerate the minimal fragment as delta vs the base defconfig.
+gen-rt-fragment: $(RT_FRAGMENT)
+$(RT_FRAGMENT): .config arch/x86/configs/$(RT_BASE_DEFCONFIG)
+	@echo "Generating $(RT_FRAGMENT) as delta of current ./.config vs $(RT_BASE_DEFCONFIG)"
+	@tmpdir=$$(mktemp -d); \
+	  KCONFIG_CONFIG=$$tmpdir/base.config $(MAKE) -s $(RT_BASE_DEFCONFIG); \
+	  KCONFIG_CONFIG=$$tmpdir/base.config $(MAKE) -s olddefconfig; \
+	  scripts/diffconfig -m $$tmpdir/base.config .config > $(RT_FRAGMENT).tmp; \
+	  mv $(RT_FRAGMENT).tmp $(RT_FRAGMENT); \
+	  wc -l < $(RT_FRAGMENT) | xargs printf "Wrote %s lines to %s\n" - "$(RT_FRAGMENT)"; \
+	  rm -rf "$$tmpdir"
+
+
 KERNEL_OCI_FILE:=$(shell mktemp -u)-kernel.tar
 
 kernel-build-%: Makefile.eve $(LK) | ensure-builder
