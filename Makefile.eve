@@ -7,7 +7,7 @@ DIRTY=$(shell git diff --quiet || echo '-dirty')
 EVE_KERNEL_CONFIG=eve-$(KERNEL_CONFIG_FLAVOR)_defconfig
 EVE_FLAVOR=generic
 ARCHITECTURE=amd64
-KERNEL_TAG=v6.1.112
+KERNEL_TAG=v6.12.49
 PLATFORM=linux/$(ARCHITECTURE)
 BUILD_USER:=$(shell id -un)
 
