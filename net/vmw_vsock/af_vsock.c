@@ -1188,6 +1188,9 @@ static int vsock_read_skb(struct sock *sk, skb_read_actor_t read_actor)
 {
 	struct vsock_sock *vsk = vsock_sk(sk);
 
+	if (WARN_ON_ONCE(!vsk->transport))
+		return -ENODEV;
+
 	return vsk->transport->read_skb(vsk, read_actor);
 }
 
@@ -1476,6 +1479,11 @@ static int vsock_connect(struct socket *sock, struct sockaddr *addr,
 		err = transport->connect(vsk);
 		if (err < 0)
 			goto out;
+
+		/* sk_err might have been set as a result of an earlier
+		 * (failed) connect attempt.
+		 */
+		sk->sk_err = 0;
 
 		/* Mark sock as connecting and set the error code to in
 		 * progress in case this is a non-blocking connect.
