@@ -8,9 +8,13 @@
 #include <linux/phy.h>
 #include <linux/phy/phy.h>
 #include <linux/pcs-xpcs-qcom.h>
+#include <linux/i2c.h>
 
 #include "stmmac.h"
 #include "stmmac_platform.h"
+
+#define EEPROM_STMMAC_READ_BYTE	17
+#define EEPROM_STMMAC_WRITE_OFFSET_BYTE	2
 
 #define RGMII_IO_MACRO_CONFIG		0x0
 #define SDCC_HC_REG_DLL_CONFIG		0x4
@@ -110,8 +114,6 @@
 #define RGMII_SCRATCH2_MAX_SPD_PRG_6		GENMASK(13, 10)
 
 #define SGMII_10M_RX_CLK_DVDR			0x31
-
-static u32 bus_id;
 
 struct ethqos_emac_por {
 	unsigned int offset;
@@ -341,13 +343,13 @@ static const struct ethqos_emac_por emac_v4_0_0_por[] = {
 };
 
 static const struct ethqos_emac_por emac_v6_6_0_por[] = {
-	{ .offset = RGMII_IO_MACRO_CONFIG,	.value = 0x40c04c03 },
-	{ .offset = SDCC_HC_REG_DLL_CONFIG,	.value = 0xd642c },
-	{ .offset = SDCC_HC_REG_DDR_CONFIG,	.value = 0x80040868 },
-	{ .offset = SDCC_HC_REG_DLL_CONFIG2,	.value = 0xa001 },
-	{ .offset = SDCC_USR_CTL,		.value = 0x90106c0 },
-	{ .offset = RGMII_IO_MACRO_CONFIG2,	.value = 0x2200a0 },
-	{ .offset = SDCC_TEST_CTL, .value = 0x90106c0 },
+	{ .offset = RGMII_IO_MACRO_CONFIG,	.value = 0xC04D03 },
+	{ .offset = SDCC_HC_REG_DLL_CONFIG,	.value = 0x2004642C },
+	{ .offset = SDCC_HC_REG_DDR_CONFIG,	.value = 0x80040800 },
+	{ .offset = SDCC_HC_REG_DLL_CONFIG2,	.value = 0x00200000 },
+	{ .offset = SDCC_USR_CTL,		.value = 0x00010800 },
+	{ .offset = RGMII_IO_MACRO_CONFIG2,	.value = 0x222060},
+	{ .offset = RGMII_IO_MACRO_SCRATCH_2, .value = 0x4c },
 };
 
 static const struct ethqos_emac_driver_data emac_v4_0_0_data = {
@@ -809,6 +811,13 @@ static int  ethqos_configure_5gbaser(struct qcom_ethqos *ethqos)
 
 static int ethqos_configure_usxgmii(struct qcom_ethqos *ethqos)
 {
+	unsigned int i;
+
+	/* Reset to POR values */
+	for (i = 0; i < ethqos->num_por; i++)
+		rgmii_writel(ethqos, ethqos->por[i].value,
+			     ethqos->por[i].offset);
+
 	ethqos_set_func_clk_en(ethqos);
 
 	rgmii_updatel(ethqos, RGMII_BYPASS_EN, RGMII_BYPASS_EN, RGMII_IO_MACRO_BYPASS);
@@ -866,7 +875,7 @@ static int ethqos_configure_usxgmii(struct qcom_ethqos *ethqos)
 			      RGMII_IO_MACRO_CONFIG);
 		rgmii_updatel(ethqos, RGMII_CONFIG2_MAX_SPD_PRG_3, BIT(20),
 			      RGMII_IO_MACRO_CONFIG2);
-		rgmii_updatel(ethqos, RGMII_SCRATCH2_MAX_SPD_PRG_6, BIT(1),
+		rgmii_updatel(ethqos, RGMII_SCRATCH2_MAX_SPD_PRG_6, BIT(10),
 			      RGMII_IO_MACRO_SCRATCH_2);
 		break;
 
@@ -889,6 +898,16 @@ static int ethqos_configure(struct qcom_ethqos *ethqos)
 	return ethqos->configure_func(ethqos);
 }
 
+static void ethqos_safety_feature(struct stmmac_priv *priv, bool en)
+{
+	if (priv->sfty_irq > 0) {
+		if (en)
+			enable_irq(priv->sfty_irq);
+		else
+			disable_irq(priv->sfty_irq);
+	}
+}
+
 static void ethqos_fix_mac_speed(void *priv_n, unsigned int speed, unsigned int mode)
 {
 	struct qcom_ethqos *ethqos = priv_n;
@@ -899,8 +918,8 @@ static void ethqos_fix_mac_speed(void *priv_n, unsigned int speed, unsigned int 
 	ethqos->speed = speed;
 	ethqos_update_link_clk(ethqos, speed);
 	ethqos_configure(ethqos);
-	if (priv->plat->qcom_pcs)
-		qcom_xpcs_link_up(priv->plat->qcom_pcs, mode,
+	if (priv->hw->phylink_pcs)
+		qcom_xpcs_link_up(priv->hw->phylink_pcs, mode,
 				  priv->plat->phy_interface, speed,
 				  DUPLEX_FULL);
 }
@@ -1014,10 +1033,91 @@ static void qcom_ethqos_hdma_cfg(struct plat_stmmacenet_data *plat)
 	plat->dma_cfg->rx_pdma_map[11] = 7;
 }
 
+static int ethqos_xpcs_init(struct stmmac_priv *priv)
+{
+	struct device_node *xpcs_node;
+
+	xpcs_node = of_parse_phandle(priv->device->of_node, "qcom-xpcs-handle", 0);
+
+	priv->hw->phylink_pcs = qcom_xpcs_create(xpcs_node, priv->plat->phy_interface);
+	if (IS_ERR_OR_NULL(priv->hw->phylink_pcs))
+		return -ENODEV;
+
+	return 0;
+}
+
+static void ethqos_xpcs_exit(struct stmmac_priv *priv)
+{
+	qcom_xpcs_destroy(priv->hw->phylink_pcs);
+}
+
+static void ethqos_xpcs_safety_stats(struct stmmac_priv *priv, unsigned long *ptr)
+{
+	if (priv->sfty_irq > 0)
+		qcom_xpcs_get_err_stats(priv->hw->phylink_pcs, ptr);
+}
+
+static int ethqos_eeprom_readmac(struct plat_stmmacenet_data *plat_dat, struct device *dev,
+	 u8 *mac_addr)
+{
+	u8 wr_data[EEPROM_STMMAC_WRITE_OFFSET_BYTE] = {0, 0};
+	u8 rd_data[EEPROM_STMMAC_READ_BYTE];
+	struct i2c_adapter *adapter;
+	int mac_id = 0, j = 0, ret;
+	struct i2c_msg msg[2];
+	char *token = NULL;
+	u8 addr[ETH_ALEN];
+	char *temp_mac_addr;
+
+	adapter = i2c_get_adapter(plat_dat->i2c_id);
+	if (!adapter) {
+		/* error, no such I2C adaptor. */
+		dev_err(dev, "Chip at i2c Invalid i2c adapter %d\n", plat_dat->i2c_id);
+		return -ENODEV;
+	}
+
+	msg[0].addr = plat_dat->eeprom_reg;
+	msg[0].len = EEPROM_STMMAC_WRITE_OFFSET_BYTE;
+	msg[0].flags = 0;
+	msg[0].buf = wr_data;
+
+	msg[1].addr = plat_dat->eeprom_reg;
+	msg[1].len = EEPROM_STMMAC_READ_BYTE;
+	msg[1].flags = I2C_M_RD;
+	msg[1].buf = rd_data;
+
+	ret = i2c_transfer(adapter, msg, 2);
+	if (ret != 2) {
+		dev_err(dev, "EEPROM I2C wrong response\n");
+		return ret;
+	} else {
+		temp_mac_addr = kmalloc(EEPROM_STMMAC_READ_BYTE, GFP_KERNEL);
+		if (!temp_mac_addr) {
+			dev_err(dev, "Memory allocation failed\n");
+			return -ENOMEM;
+		}
+
+		memcpy(temp_mac_addr, rd_data, EEPROM_STMMAC_READ_BYTE);
+		token = strsep(&temp_mac_addr, ":");
+		while (token) {
+			sscanf(token, "%x", &mac_id);
+			addr[j++] = mac_id;
+			token = strsep(&temp_mac_addr, ":");
+		}
+
+		if (is_valid_ether_addr(addr))
+			memcpy(mac_addr, addr, ETH_ALEN);
+		else
+			dev_err(dev, "invalid mac address from EEPROM\n");
+
+		kfree(temp_mac_addr);
+	}
+	return 0;
+}
+
 static int qcom_ethqos_probe(struct platform_device *pdev)
 {
 	struct device_node *np = pdev->dev.of_node, *root;
-	struct device_node *pcs_node;
 	const struct ethqos_emac_driver_data *data;
 	struct plat_stmmacenet_data *plat_dat;
 	struct stmmac_resources stmmac_res;
@@ -1132,9 +1232,14 @@ static int qcom_ethqos_probe(struct platform_device *pdev)
 		plat_dat->dwxgmac_addrs = &data->dwxgmac_addrs;
 		plat_dat->has_hdma = data->has_hdma;
 		plat_dat->insert_ts_pktid = true;
-		plat_dat->bus_id = bus_id++;
 		if (plat_dat->has_hdma)
 			qcom_ethqos_hdma_cfg(plat_dat);
+	}
+	if (of_property_present(dev->of_node, "qcom-xpcs-handle")) {
+		plat_dat->pcs_init = ethqos_xpcs_init;
+		plat_dat->pcs_exit = ethqos_xpcs_exit;
+		plat_dat->safety_irq = ethqos_safety_feature;
+		plat_dat->safety_pcs_stats = ethqos_xpcs_safety_stats;
 	}
 	if (of_property_read_bool(np, "snps,tso"))
 		plat_dat->flags |= STMMAC_FLAG_TSO_EN;
@@ -1150,14 +1255,8 @@ static int qcom_ethqos_probe(struct platform_device *pdev)
 		plat_dat->serdes_powerdown  = qcom_ethqos_serdes_powerdown;
 	}
 
-	if (of_property_present(dev->of_node, "qcom-xpcs-handle")) {
-		pcs_node = of_parse_phandle(dev->of_node, "qcom-xpcs-handle", 0);
-		plat_dat->qcom_pcs = qcom_xpcs_create(pcs_node, plat_dat->phy_interface);
-		if (IS_ERR_OR_NULL(plat_dat->qcom_pcs)) {
-			dev_warn(dev, "Qcom Xpcs not found\n");
-			return -ENODEV;
-		}
-	}
+	if (plat_dat->eeprom_reg)
+		ethqos_eeprom_readmac(plat_dat, dev, stmmac_res.mac);
 
 	/* Enable TSO on queue0 and enable TBS on rest of the queues */
 	for (i = 1; i < plat_dat->tx_queues_to_use; i++)
