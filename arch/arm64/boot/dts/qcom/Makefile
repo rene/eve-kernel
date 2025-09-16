@@ -330,6 +330,7 @@ dtb-$(CONFIG_ARCH_QCOM)	+= x1e80100-addons-crd.dtb
 dtb-$(CONFIG_ARCH_QCOM)	+= x1e80100-crd.dtb
 dtb-$(CONFIG_ARCH_QCOM)	+= x1e80100-addons-qcp.dtb
 dtb-$(CONFIG_ARCH_QCOM)	+= x1e80100-qcp.dtb
+dtb-$(CONFIG_ARCH_QCOM) += qcs6490-thundercomm-rubikpi3.dtb
 
 # External overlays
 dtb-$(CONFIG_ARCH_QCOM) += qcs6490-addons-rb3gen2-video-mezz-ovl.dtb
@@ -399,6 +400,23 @@ qcs9075-addons-iq-9075-evk-ovl-dtbs := \
     sa8775p-video.dtbo \
     qcs9100-graphics.dtbo \
     qcs9075-camera-iq-9075-evk.dtbo
+
+dtb-$(CONFIG_ARCH_QCOM) += qcs8275-addons-iq-8275-evk-ovl.dtb
+qcs8275-addons-iq-8275-evk-ovl-dtbs := \
+    qcs8275-addons-iq-8275-evk.dtb \
+    qcs8275-camera-iq-8275-evk.dtbo
+
+dtb-$(CONFIG_ARCH_QCOM) += qcs8275-addons-iq-8275-evk-pro-sku-ovl.dtb
+qcs8275-addons-iq-8275-evk-pro-sku-ovl-dtbs := \
+    qcs8275-addons-iq-8275-evk-pro-sku.dtb \
+    qcs8275-camera-iq-8275-evk-pro-sku.dtbo
+
+dtb-$(CONFIG_ARCH_QCOM) += qcs6490-thundercomm-rubikpi3-ovl.dtb
+qcs6490-thundercomm-rubikpi3-ovl-dtbs := \
+    qcs6490-thundercomm-rubikpi3.dtb \
+    qcm6490-graphics.dtbo \
+    qcm6490-camera-rubikpi3.dtbo \
+    qcm6490-video.dtbo
 
 dtb-$(CONFIG_ARCH_QCOM)	+= combined-dtb.dtb
 
