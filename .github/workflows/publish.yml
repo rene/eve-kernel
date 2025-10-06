@@ -1,48 +1,45 @@
-name: eve-kernel build
+name: Building and pushing Eve kernel images
 
 on:
-  workflow_dispatch:
-  pull_request_review:
-    types: [ submitted ]
-  push:
-    branches:
-      - "eve-kernel-arm64-v6.1.155-generic"
-env:
-  branch_name: "refs/heads/eve-kernel-arm64-v6.1.155-generic"
+    push:
+        branches:
+            - "eve-kernel-*"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+    group: main-build-${{ github.ref }}
+    cancel-in-progress: true
 
 jobs:
-  packages:
-    runs-on: self-hosted
-    if: ${{ github.event.review.state == 'approved' }} || github.ref == env.branch_name
-    steps:
-      - name: Get eve-kernel
-        uses: actions/checkout@v3
-        with:
-          ref: ${{ github.head_ref }}
+    build:
+        strategy:
+            fail-fast: false
+            max-parallel: 3
 
-      - name: Login to Docker Hub
-        if: ${{ github.event.repository.full_name }}== 'lf-edge/eve-kernel'
-        uses: docker/login-action@v3
-        with:
-            username: ${{ secrets.DOCKERHUB_PULL_USER }}
-            password: ${{ secrets.DOCKERHUB_PULL_TOKEN }}
+        runs-on: [runner-xl, X64, Linux]
 
-      - name: Build eve-kernel-arm64
-        run: |
-          make -f Makefile.eve BRANCH?=${GITHUB_REF##*/} kernel-gcc
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+              with:
+                  ref: ${{ github.ref }}
+                  fetch-depth: 1
 
-      - name: Log in to Docker Hub
-        if: ${{ github.ref == env.branch_name }}
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.RELEASE_DOCKERHUB_ACCOUNT }}
-          password: ${{ secrets.RELEASE_DOCKERHUB_TOKEN }}
+            - name: Login to Docker Hub (pull)
+              uses: docker/login-action@v3
+              with:
+                  username: ${{ secrets.DOCKERHUB_PULL_USER }}
+                  password: ${{ secrets.DOCKERHUB_PULL_TOKEN }}
 
-      - name: Push eve-kernel-arm64-v6.1.112-generic if PR approved or pushed
-        if: ${{ github.ref == env.branch_name }}
-        run: |
-          make -f Makefile.eve BRANCH?=${GITHUB_REF##*/} push-gcc
+            - name: Build kernel flavor ${{ matrix.flavor }} from ${{ github.ref_name }}
+              run: |
+                  make -f Makefile.eve kernel-gcc
+
+            - name: Login to Docker Hub (push)
+              uses: docker/login-action@v3
+              with:
+                  username: ${{ secrets.RELEASE_DOCKERHUB_ACCOUNT }}
+                  password: ${{ secrets.RELEASE_DOCKERHUB_TOKEN }}
+
+            - name: Push ${{ matrix.flavor }} from ${{ github.ref_name }}
+              run: |
+                  make -f Makefile.eve push-gcc
