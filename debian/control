@@ -1,0 +1,335 @@
+Source: linux-nvidia-6.17
+Section: devel
+Priority: optional
+Maintainer: Ubuntu Kernel Team <kernel-team@lists.ubuntu.com>
+XSC-Ubuntu-Compatible-Signing: ubuntu/4 pro/3
+Rules-Requires-Root: no
+Standards-Version: 3.9.4.0
+Build-Depends:
+ gcc-13:native, gcc-13-aarch64-linux-gnu [arm64] <cross>, gcc-13-arm-linux-gnueabihf [armhf] <cross>, gcc-13-powerpc64le-linux-gnu [ppc64el] <cross>, gcc-13-riscv64-linux-gnu [riscv64] <cross>, gcc-13-s390x-linux-gnu [s390x] <cross>, gcc-13-x86-64-linux-gnu [amd64] <cross>,
+ autoconf <!stage1>,
+ automake <!stage1>,
+ bc <!stage1>,
+ bindgen-0.65 [amd64 arm64],
+ bison <!stage1>,
+ clang-18:native [amd64 arm64],
+ cpio,
+ curl <!stage1>,
+ debhelper-compat (= 10),
+ default-jdk-headless:native <!stage1>,
+ dkms <!stage1>,
+ flex <!stage1>,
+ gawk <!stage1>,
+ java-common <!stage1>,
+ kmod <!stage1>,
+ libaudit-dev <!stage1>,
+ libcap-dev <!stage1>,
+ libdebuginfod-dev [amd64 arm64] <!stage1>,
+ libdw-dev <!stage1>,
+ libelf-dev <!stage1>,
+ libiberty-dev <!stage1>,
+ liblzma-dev <!stage1>,
+ libnewt-dev <!stage1>,
+ libnuma-dev [amd64 arm64] <!stage1>,
+ libpci-dev <!stage1>,
+ libssl-dev <!stage1>,
+ libstdc++-13-dev,
+ libtool <!stage1>,
+ libtraceevent-dev [amd64 arm64] <!stage1>,
+ libtracefs-dev [amd64 arm64] <!stage1>,
+ libudev-dev <!stage1>,
+ libunwind8-dev [amd64 arm64] <!stage1>,
+ makedumpfile:native [amd64] <!stage1>,
+ openssl <!stage1>,
+ pahole [amd64 arm64] | dwarves (>= 1.21) [amd64 arm64] <!stage1>,
+ pkg-config <!stage1>,
+ python3:native <!stage1>,
+ python3-dev:native <!stage1>,
+ libpython3-dev <!stage1> <cross>,
+ python3-setuptools,
+ rsync [!i386] <!stage1>,
+ rust-1.80-src [amd64 arm64],
+ rustc-1.80 [amd64 arm64],
+ rustfmt-1.80 [amd64 arm64],
+ uuid-dev <!stage1>,
+ zstd <!stage1>,
+ bpftool:native [amd64 arm64] <!stage1 cross>,
+Build-Depends-Indep:
+ asciidoc <!stage1>,
+ bzip2 <!stage1>,
+ python3-docutils <!stage1>,
+ sharutils <!stage1>,
+ xmlto <!stage1>,
+Vcs-Git: git://git.launchpad.net/~canonical-kernel/ubuntu/+source/linux-nvidia/+git/noble
+XS-Testsuite: autopkgtest
+#XS-Testsuite-Depends: gcc-4.7 binutils
+
+Package: linux-nvidia-6.17-headers-6.17.0-1002
+Build-Profiles: <!stage1>
+Architecture: all
+Multi-Arch: foreign
+Section: devel
+Priority: optional
+Depends: ${misc:Depends}, coreutils
+Description: Header files related to Linux kernel version 6.17.0
+ This package provides kernel header files for version 6.17.0, for sites
+ that want the latest kernel headers. Please read
+ /usr/share/doc/linux-nvidia-6.17-headers-6.17.0-1002/debian.README.gz for details
+
+Package: linux-nvidia-6.17-tools-6.17.0-1002
+Build-Profiles: <!stage1>
+Architecture: amd64 arm64
+Section: devel
+Priority: optional
+Depends: ${misc:Depends}, ${shlibs:Depends}, linux-tools-common
+Description: Linux kernel version specific tools for version 6.17.0-1002
+ This package provides the architecture dependant parts for kernel
+ version locked tools (such as perf and x86_energy_perf_policy) for
+ version 6.17.0-1002.
+ You probably want to install linux-tools-6.17.0-1002-<flavour>.
+
+Package: linux-nvidia-6.17-cloud-tools-6.17.0-1002
+Build-Profiles: <!stage1>
+Architecture: amd64
+Section: devel
+Priority: optional
+Depends: ${misc:Depends}, ${shlibs:Depends}, linux-cloud-tools-common
+Description: Linux kernel version specific cloud tools for version 6.17.0-1002
+ This package provides the architecture dependant parts for kernel
+ version locked tools for cloud tools for version 6.17.0-1002.
+ You probably want to install linux-cloud-tools-6.17.0-1002-<flavour>.
+
+Package: linux-image-unsigned-6.17.0-1002-nvidia
+Build-Profiles: <!stage1>
+Architecture: amd64 arm64
+Section: kernel
+Priority: optional
+Provides: linux-image, fuse-module, kvm-api-4, redhat-cluster-modules, ivtv-modules, virtualbox-guest-modules [amd64], ${linux:rprovides}
+Depends: ${misc:Depends}, ${shlibs:Depends}, kmod, linux-base (>= 4.5ubuntu1~16.04.1), linux-modules-6.17.0-1002-nvidia
+Recommends: grub-pc [amd64] | grub-efi-amd64 [amd64] | grub-efi-ia32 [amd64] | grub [amd64] | lilo [amd64] | flash-kernel [arm64] | grub-efi-arm64 [arm64], initramfs-tools | linux-initramfs-tool
+Breaks: flash-kernel (<< 3.90ubuntu2) [arm64 armhf], s390-tools (<< 2.3.0-0ubuntu3) [s390x]
+Conflicts: linux-image-6.17.0-1002-nvidia
+Suggests: bpftool, linux-perf, linux-nvidia-6.17-tools, linux-headers-6.17.0-1002-nvidia
+Description: Linux kernel image for version 6.17.0
+ This package contains the unsigned Linux kernel image for version 6.17.0.
+ .
+ Supports NVIDIA processors.
+ .
+ Intended for NVIDIA platforms
+ .
+ You likely do not want to install this package directly. Instead, install
+ the linux-nvidia meta-package, which will ensure that upgrades work
+ correctly, and that supporting packages are also installed.
+
+Package: linux-image-unsigned-6.17.0-1002-nvidia-dbgsym
+Build-Profiles: <!stage1>
+Architecture: amd64 arm64
+Section: devel
+Priority: optional
+Depends: ${misc:Depends}
+Provides: linux-debug
+Description: Linux kernel debug image for version 6.17.0
+ This package provides the unsigned kernel debug image for version 6.17.0.
+ .
+ This is for sites that wish to debug the kernel.
+ .
+ The kernel image contained in this package is NOT meant to boot from. It
+ is uncompressed, and unstripped. This package also includes the
+ unstripped modules.
+
+
+Package: linux-modules-6.17.0-1002-nvidia
+Build-Profiles: <!stage1>
+Architecture: amd64 arm64
+Section: kernel
+Priority: optional
+Depends: ${misc:Depends}, ${shlibs:Depends}, wireless-regdb
+Built-Using: ${linux:BuiltUsing}
+Description: Linux kernel modules for version 6.17.0
+ Contains the corresponding System.map file, the modules built by the
+ packager, and scripts that try to ensure that the system is not left in an
+ unbootable state after an update.
+ .
+ Supports NVIDIA processors.
+ .
+ Intended for NVIDIA platforms
+ .
+ You likely do not want to install this package directly. Instead, install
+ the linux-nvidia meta-package, which will ensure that upgrades work
+ correctly, and that supporting packages are also installed.
+
+Package: linux-headers-6.17.0-1002-nvidia
+Build-Profiles: <!stage1>
+Architecture: amd64 arm64
+Section: devel
+Priority: optional
+Depends: ${misc:Depends}, linux-nvidia-6.17-headers-6.17.0-1002, ${shlibs:Depends}
+Provides: linux-headers, linux-headers-3.0
+Description: Linux kernel headers for version 6.17.0
+ This package provides kernel header files for version 6.17.0.
+ .
+ This is for sites that want the latest kernel headers.  Please read
+ /usr/share/doc/linux-headers-6.17.0-1002/debian.README.gz for details.
+
+Package: linux-lib-rust-6.17.0-1002-nvidia
+Build-Profiles: <!stage1>
+Architecture: amd64
+Multi-Arch: foreign
+Section: devel
+Priority: optional
+Depends: ${misc:Depends}, coreutils
+Description: Rust library files related to Linux kernel version 6.17.0
+ This package provides kernel library files for version 6.17.0, that allow to
+ compile out-of-tree kernel modules written in Rust.
+
+Package: linux-tools-6.17.0-1002-nvidia
+Build-Profiles: <!stage1>
+Architecture: amd64 arm64
+Section: devel
+Priority: optional
+Depends: ${misc:Depends}, linux-nvidia-6.17-tools-6.17.0-1002
+Description: Linux kernel version specific tools for version 6.17.0-1002
+ This package provides the architecture dependant parts for kernel
+ version locked tools (such as x86_energy_perf_policy) for
+ version 6.17.0-1002.
+
+Package: linux-cloud-tools-6.17.0-1002-nvidia
+Build-Profiles: <!stage1>
+Architecture: amd64 arm64
+Section: devel
+Priority: optional
+Depends: ${misc:Depends}, linux-nvidia-6.17-cloud-tools-6.17.0-1002
+Description: Linux kernel version specific cloud tools for version 6.17.0-1002
+ This package provides the architecture dependant parts for kernel
+ version locked tools for cloud for version 6.17.0-1002.
+
+
+Package: linux-buildinfo-6.17.0-1002-nvidia
+Build-Profiles: <!stage1>
+Architecture: amd64 arm64
+Section: kernel
+Priority: optional
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Built-Using: ${linux:BuiltUsing}
+Description: Linux kernel buildinfo for version 6.17.0
+ This package contains the Linux kernel buildinfo for version 6.17.0.
+ .
+ You likely do not want to install this package.
+
+Package: linux-image-unsigned-6.17.0-1002-nvidia-64k
+Build-Profiles: <!stage1>
+Architecture: arm64
+Section: kernel
+Priority: optional
+Provides: linux-image, fuse-module, kvm-api-4, redhat-cluster-modules, ivtv-modules, ${linux:rprovides}
+Depends: ${misc:Depends}, ${shlibs:Depends}, kmod, linux-base (>= 4.5ubuntu1~16.04.1), linux-modules-6.17.0-1002-nvidia-64k
+Recommends: grub-efi-arm64 [arm64] | flash-kernel [arm64], initramfs-tools | linux-initramfs-tool
+Breaks: flash-kernel (<< 3.90ubuntu2) [arm64 armhf], s390-tools (<< 2.3.0-0ubuntu3) [s390x]
+Conflicts: linux-image-6.17.0-1002-nvidia-64k
+Suggests: bpftool, linux-perf, linux-nvidia-6.17-tools, linux-headers-6.17.0-1002-nvidia-64k
+Description: Linux kernel image for version 6.17.0
+ This package contains the unsigned Linux kernel image for version 6.17.0.
+ .
+ Supports NVIDIA 64K pages processors.
+ .
+ Intended for NVIDIA platforms
+ .
+ You likely do not want to install this package directly. Instead, install
+ the linux-nvidia-64k meta-package, which will ensure that upgrades work
+ correctly, and that supporting packages are also installed.
+
+Package: linux-image-unsigned-6.17.0-1002-nvidia-64k-dbgsym
+Build-Profiles: <!stage1>
+Architecture: arm64
+Section: devel
+Priority: optional
+Depends: ${misc:Depends}
+Provides: linux-debug
+Description: Linux kernel debug image for version 6.17.0
+ This package provides the unsigned kernel debug image for version 6.17.0.
+ .
+ This is for sites that wish to debug the kernel.
+ .
+ The kernel image contained in this package is NOT meant to boot from. It
+ is uncompressed, and unstripped. This package also includes the
+ unstripped modules.
+
+
+Package: linux-modules-6.17.0-1002-nvidia-64k
+Build-Profiles: <!stage1>
+Architecture: arm64
+Section: kernel
+Priority: optional
+Depends: ${misc:Depends}, ${shlibs:Depends}, wireless-regdb
+Built-Using: ${linux:BuiltUsing}
+Description: Linux kernel modules for version 6.17.0
+ Contains the corresponding System.map file, the modules built by the
+ packager, and scripts that try to ensure that the system is not left in an
+ unbootable state after an update.
+ .
+ Supports NVIDIA 64K pages processors.
+ .
+ Intended for NVIDIA platforms
+ .
+ You likely do not want to install this package directly. Instead, install
+ the linux-nvidia-64k meta-package, which will ensure that upgrades work
+ correctly, and that supporting packages are also installed.
+
+Package: linux-headers-6.17.0-1002-nvidia-64k
+Build-Profiles: <!stage1>
+Architecture: arm64
+Section: devel
+Priority: optional
+Depends: ${misc:Depends}, linux-nvidia-6.17-headers-6.17.0-1002, ${shlibs:Depends}
+Provides: linux-headers, linux-headers-3.0
+Description: Linux kernel headers for version 6.17.0
+ This package provides kernel header files for version 6.17.0.
+ .
+ This is for sites that want the latest kernel headers.  Please read
+ /usr/share/doc/linux-headers-6.17.0-1002/debian.README.gz for details.
+
+Package: linux-lib-rust-6.17.0-1002-nvidia-64k
+Build-Profiles: <!stage1>
+Architecture: amd64
+Multi-Arch: foreign
+Section: devel
+Priority: optional
+Depends: ${misc:Depends}, coreutils
+Description: Rust library files related to Linux kernel version 6.17.0
+ This package provides kernel library files for version 6.17.0, that allow to
+ compile out-of-tree kernel modules written in Rust.
+
+Package: linux-tools-6.17.0-1002-nvidia-64k
+Build-Profiles: <!stage1>
+Architecture: arm64
+Section: devel
+Priority: optional
+Depends: ${misc:Depends}, linux-nvidia-6.17-tools-6.17.0-1002
+Description: Linux kernel version specific tools for version 6.17.0-1002
+ This package provides the architecture dependant parts for kernel
+ version locked tools (such as x86_energy_perf_policy) for
+ version 6.17.0-1002.
+
+Package: linux-cloud-tools-6.17.0-1002-nvidia-64k
+Build-Profiles: <!stage1>
+Architecture: arm64
+Section: devel
+Priority: optional
+Depends: ${misc:Depends}, linux-nvidia-6.17-cloud-tools-6.17.0-1002
+Description: Linux kernel version specific cloud tools for version 6.17.0-1002
+ This package provides the architecture dependant parts for kernel
+ version locked tools for cloud for version 6.17.0-1002.
+
+
+Package: linux-buildinfo-6.17.0-1002-nvidia-64k
+Build-Profiles: <!stage1>
+Architecture: arm64
+Section: kernel
+Priority: optional
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Built-Using: ${linux:BuiltUsing}
+Description: Linux kernel buildinfo for version 6.17.0
+ This package contains the Linux kernel buildinfo for version 6.17.0.
+ .
+ You likely do not want to install this package.
+
