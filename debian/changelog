@@ -1,3 +1,12 @@
+linux-qcom (6.8.0-1056.57) noble; urgency=medium
+
+  * noble/linux-qcom: 6.8.0-1056.57 -proposed tracker (LP: #2129199)
+
+  * [RB8][x05] dwc3-qcom errors found in dmesg
+    - SAUCE: arm64: dts: qcom: fix vbus_dwc3 issue for qcs9075
+
+ -- Hui Wang <hui.wang@canonical.com>  Tue, 21 Oct 2025 22:28:37 +0800
+
 linux-qcom (6.8.0-1056.56) noble; urgency=medium
 
   * noble/linux-qcom: 6.8.0-1056.56 -proposed tracker (LP: #2127954)
