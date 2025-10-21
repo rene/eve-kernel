@@ -53,6 +53,9 @@ help: Makefile
 	@echo "  docker-tag-clang: print docker tag for clang kernel"
 	@echo "  push-gcc: push gcc kernel to docker.io"
 	@echo "  push-clang: push clang kernel to docker.io"
+	@echo "  rt-config: download RT patch, apply it, and merge RT fragment to create .config"
+	@echo "  gen-rt-fragment: regenerate RT fragment from current .config"
+	@echo "  rt-clean: revert RT patch and remove RT stamp file"
 	@echo "  clean: remove generated files"
 	@echo
 
@@ -77,13 +80,15 @@ IMAGE_TAG_NO_FLAVOR := $(IMAGE_REPOSITORY):$(BRANCH)-$(VERSION)$(DIRTY)
 RT_BASE_DEFCONFIG := eve-core_defconfig
 RT_FRAGMENT       := arch/x86/configs/rt.fragment
 RT_STAMP          := .rt-merged.stamp
+RT_PATCH_URL      := https://cdn.kernel.org/pub/linux/kernel/projects/rt/6.12/older/patch-6.12.49-rt13.patch.gz
+RT_PATCH_FILE     := .rt-patch-applied.stamp
 
-.PHONY: rt-config gen-rt-fragment
+.PHONY: rt-config gen-rt-fragment rt-clean
 
-# 1) Merge RT fragment onto base -> write ./.config
+# 1) Download and apply RT patch, then merge RT fragment onto base -> write ./.config
 #    We build a STAMP, not ".config" as a target, to avoid a cycle.
 rt-config: $(RT_STAMP)
-$(RT_STAMP): $(RT_FRAGMENT) arch/x86/configs/$(RT_BASE_DEFCONFIG)
+$(RT_STAMP): $(RT_PATCH_FILE) $(RT_FRAGMENT) arch/x86/configs/$(RT_BASE_DEFCONFIG)
 	@echo "Merging $(RT_FRAGMENT) onto $(RT_BASE_DEFCONFIG) -> write ./.config"
 	@mv -f .config .config.bak 2>/dev/null || true
 	KCONFIG_CONFIG=.config $(MAKE) -s $(RT_BASE_DEFCONFIG)
@@ -94,6 +99,44 @@ $(RT_STAMP): $(RT_FRAGMENT) arch/x86/configs/$(RT_BASE_DEFCONFIG)
 	@grep -q '^CONFIG_PREEMPT_RT=y$$' .config || { echo "ERROR: CONFIG_PREEMPT_RT not enabled after merge"; exit 1; }
 	@touch $(RT_STAMP)
 	@echo "OK: wrote merged RT config to ./.config (backup: .config.bak)"
+
+# Download and apply RT patch
+$(RT_PATCH_FILE):
+	@if [ -f $(RT_PATCH_FILE) ]; then \
+		echo "RT patch already applied ($(RT_PATCH_FILE) exists)"; \
+	else \
+		echo "Downloading RT patch from $(RT_PATCH_URL)"; \
+		curl -fsSL $(RT_PATCH_URL) | gunzip > /tmp/rt-patch.patch; \
+		echo "Applying RT patch..."; \
+		if patch -p1 --dry-run -N -s < /tmp/rt-patch.patch > /dev/null 2>&1; then \
+			patch -p1 -N < /tmp/rt-patch.patch; \
+			touch $(RT_PATCH_FILE); \
+			echo "RT patch applied successfully"; \
+		else \
+			echo "ERROR: Failed to apply RT patch or already applied"; \
+			rm -f /tmp/rt-patch.patch; \
+			exit 1; \
+		fi; \
+		rm -f /tmp/rt-patch.patch; \
+	fi
+
+# Revert RT patch and clean RT configuration
+rt-clean:
+	@if [ -f $(RT_PATCH_FILE) ]; then \
+		echo "Reverting RT patch..."; \
+		curl -fsSL $(RT_PATCH_URL) | gunzip > /tmp/rt-patch.patch; \
+		if patch -p1 -R -N < /tmp/rt-patch.patch; then \
+			echo "RT patch reverted successfully"; \
+		else \
+			echo "WARNING: Failed to cleanly revert RT patch, you may need to check git status"; \
+		fi; \
+		rm -f /tmp/rt-patch.patch $(RT_PATCH_FILE); \
+	else \
+		echo "No RT patch to revert ($(RT_PATCH_FILE) does not exist)"; \
+	fi
+	@rm -f $(RT_STAMP)
+	@echo "Removed $(RT_STAMP)"
+	@echo "RT configuration cleaned"
 
 # 2) After you've edited ./.config (e.g. via 'make menuconfig'),
 #    regenerate the minimal fragment as delta vs the base defconfig.
