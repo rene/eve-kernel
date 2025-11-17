@@ -355,7 +355,7 @@ CONFIG_ISM                                      policy<{'s390x': 'm'}>
 CONFIG_ISM                                      note<'LP: #1789934'>
 
 CONFIG_KERNEL_ZSTD                              policy<{'amd64': 'y', 'arm64': 'y', 'riscv64': 'y', 's390x': 'y'}>
-CONFIG_KERNEL_ZSTD                              note<'LP: #193172'>
+CONFIG_KERNEL_ZSTD                              note<'LP: #1931725'>
 
 CONFIG_KEXEC_BZIMAGE_VERIFY_SIG                 policy<{'amd64': 'y'}>
 CONFIG_KEXEC_BZIMAGE_VERIFY_SIG                 note<'Q: check this is in sync with the kexec/kdump userspace'>
@@ -2699,7 +2699,7 @@ CONFIG_CC_NO_ARRAY_BOUNDS                       policy<{'amd64': 'y', 'arm64': '
 CONFIG_CC_NO_STRINGOP_OVERFLOW                  policy<{'amd64': 'y', 'arm64': 'y', 'armhf': 'y', 'ppc64el': 'y', 'riscv64': 'y', 's390x': 'y'}>
 CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE              policy<{'amd64': 'y', 'arm64': 'y', 'armhf': 'y', 'ppc64el': 'y', 'riscv64': 'y', 's390x': 'y'}>
 CONFIG_CC_OPTIMIZE_FOR_SIZE                     policy<{'amd64': 'n', 'arm64': 'n', 'armhf': 'n', 'ppc64el': 'n', 'riscv64': 'n', 's390x': 'n'}>
-CONFIG_CC_VERSION_TEXT                          policy<{'amd64': '"x86_64-linux-gnu-gcc (Ubuntu 15.2.0-2ubuntu2) 15.2.0"', 'arm64': '"aarch64-linux-gnu-gcc (Ubuntu 15.2.0-1ubuntu1) 15.2.0"', 'armhf': '"arm-linux-gnueabihf-gcc (Ubuntu 15.2.0-1ubuntu1) 15.2.0"', 'ppc64el': '"powerpc64le-linux-gnu-gcc (Ubuntu 15.2.0-1ubuntu1) 15.2.0"', 'riscv64': '"riscv64-linux-gnu-gcc (Ubuntu 15.2.0-1ubuntu1) 15.2.0"', 's390x': '"s390x-linux-gnu-gcc (Ubuntu 15.2.0-1ubuntu1) 15.2.0"'}>
+CONFIG_CC_VERSION_TEXT                          policy<{'amd64': '"x86_64-linux-gnu-gcc (Ubuntu 15.2.0-4ubuntu4) 15.2.0"', 'arm64': '"aarch64-linux-gnu-gcc (Ubuntu 15.2.0-4ubuntu4) 15.2.0"', 'armhf': '"arm-linux-gnueabihf-gcc (Ubuntu 15.2.0-4ubuntu4) 15.2.0"', 'ppc64el': '"powerpc64le-linux-gnu-gcc (Ubuntu 15.2.0-4ubuntu4) 15.2.0"', 'riscv64': '"riscv64-linux-gnu-gcc (Ubuntu 15.2.0-4ubuntu4) 15.2.0"', 's390x': '"s390x-linux-gnu-gcc (Ubuntu 15.2.0-4ubuntu4) 15.2.0"'}>
 CONFIG_CDNS_I3C_MASTER                          policy<{'amd64': 'm', 'arm64': 'm', 'armhf': 'm', 'ppc64el': 'm', 'riscv64': 'm'}>
 CONFIG_CDROM                                    policy<{'amd64': 'y', 'arm64': 'y', 'armhf': 'y', 'ppc64el': 'y', 'riscv64': 'y', 's390x': 'y'}>
 CONFIG_CDX_BUS                                  policy<{'arm64': 'y'}>
@@ -7004,8 +7004,8 @@ CONFIG_INTERCONNECT_MTK_DVFSRC_EMI              policy<{'arm64': 'm', 'armhf': '
 CONFIG_INTERCONNECT_MTK_MT8183                  policy<{'arm64': 'm', 'armhf': 'm'}>
 CONFIG_INTERCONNECT_MTK_MT8195                  policy<{'arm64': 'm', 'armhf': 'm'}>
 CONFIG_INTERCONNECT_QCOM                        policy<{'arm64': 'y', 'armhf': 'y'}>
-CONFIG_INTERCONNECT_QCOM_BCM_VOTER              policy<{'arm64': 'm', 'armhf': 'm'}>
-CONFIG_INTERCONNECT_QCOM_MILOS                  policy<{'arm64': 'm', 'armhf': 'm'}>
+CONFIG_INTERCONNECT_QCOM_BCM_VOTER              policy<{'arm64': 'y', 'armhf': 'm'}>
+CONFIG_INTERCONNECT_QCOM_MILOS                  policy<{'arm64': 'y', 'armhf': 'm'}>
 CONFIG_INTERCONNECT_QCOM_MSM8909                policy<{'arm64': 'm', 'armhf': 'm'}>
 CONFIG_INTERCONNECT_QCOM_MSM8916                policy<{'arm64': 'm', 'armhf': 'm'}>
 CONFIG_INTERCONNECT_QCOM_MSM8937                policy<{'arm64': 'm', 'armhf': 'm'}>
@@ -7020,14 +7020,14 @@ CONFIG_INTERCONNECT_QCOM_QCS404                 policy<{'arm64': 'm', 'armhf': '
 CONFIG_INTERCONNECT_QCOM_QCS615                 policy<{'arm64': 'm', 'armhf': 'm'}>
 CONFIG_INTERCONNECT_QCOM_QCS8300                policy<{'arm64': 'm', 'armhf': 'm'}>
 CONFIG_INTERCONNECT_QCOM_QDU1000                policy<{'arm64': 'm', 'armhf': 'm'}>
-CONFIG_INTERCONNECT_QCOM_RPMH                   policy<{'arm64': 'm', 'armhf': 'm'}>
+CONFIG_INTERCONNECT_QCOM_RPMH                   policy<{'arm64': 'y', 'armhf': 'm'}>
 CONFIG_INTERCONNECT_QCOM_RPMH_POSSIBLE          policy<{'arm64': 'y', 'armhf': 'y'}>
-CONFIG_INTERCONNECT_QCOM_SA8775P                policy<{'arm64': 'm', 'armhf': 'm'}>
+CONFIG_INTERCONNECT_QCOM_SA8775P                policy<{'arm64': 'y', 'armhf': 'm'}>
 CONFIG_INTERCONNECT_QCOM_SAR2130P               policy<{'arm64': 'm', 'armhf': 'm'}>
-CONFIG_INTERCONNECT_QCOM_SC7180                 policy<{'arm64': 'm', 'armhf': 'm'}>
-CONFIG_INTERCONNECT_QCOM_SC7280                 policy<{'arm64': 'm', 'armhf': 'm'}>
-CONFIG_INTERCONNECT_QCOM_SC8180X                policy<{'arm64': 'm', 'armhf': 'm'}>
-CONFIG_INTERCONNECT_QCOM_SC8280XP               policy<{'arm64': 'm', 'armhf': 'm'}>
+CONFIG_INTERCONNECT_QCOM_SC7180                 policy<{'arm64': 'y', 'armhf': 'm'}>
+CONFIG_INTERCONNECT_QCOM_SC7280                 policy<{'arm64': 'y', 'armhf': 'm'}>
+CONFIG_INTERCONNECT_QCOM_SC8180X                policy<{'arm64': 'y', 'armhf': 'm'}>
+CONFIG_INTERCONNECT_QCOM_SC8280XP               policy<{'arm64': 'y', 'armhf': 'm'}>
 CONFIG_INTERCONNECT_QCOM_SDM660                 policy<{'arm64': 'm', 'armhf': 'm'}>
 CONFIG_INTERCONNECT_QCOM_SDM670                 policy<{'arm64': 'm', 'armhf': 'm'}>
 CONFIG_INTERCONNECT_QCOM_SDM845                 policy<{'arm64': 'm', 'armhf': 'm'}>
@@ -10602,14 +10602,14 @@ CONFIG_PINCTRL_S32G2                            policy<{'arm64': 'y'}>
 CONFIG_PINCTRL_S500                             policy<{'armhf': 'y'}>
 CONFIG_PINCTRL_S700                             policy<{'arm64': 'y'}>
 CONFIG_PINCTRL_S900                             policy<{'arm64': 'y'}>
-CONFIG_PINCTRL_SA8775P                          policy<{'arm64': 'm'}>
+CONFIG_PINCTRL_SA8775P                          policy<{'arm64': 'y'}>
 CONFIG_PINCTRL_SAMSUNG                          policy<{'armhf': 'y'}>
 CONFIG_PINCTRL_SAR2130P                         policy<{'arm64': 'm'}>
-CONFIG_PINCTRL_SC7180                           policy<{'arm64': 'm'}>
-CONFIG_PINCTRL_SC7280                           policy<{'arm64': 'm'}>
+CONFIG_PINCTRL_SC7180                           policy<{'arm64': 'y'}>
+CONFIG_PINCTRL_SC7280                           policy<{'arm64': 'y'}>
 CONFIG_PINCTRL_SC7280_LPASS_LPI                 policy<{'arm64': 'm'}>
-CONFIG_PINCTRL_SC8180X                          policy<{'arm64': 'm'}>
-CONFIG_PINCTRL_SC8280XP                         policy<{'arm64': 'm'}>
+CONFIG_PINCTRL_SC8180X                          policy<{'arm64': 'y'}>
+CONFIG_PINCTRL_SC8280XP                         policy<{'arm64': 'y'}>
 CONFIG_PINCTRL_SC8280XP_LPASS_LPI               policy<{'arm64': 'm'}>
 CONFIG_PINCTRL_SCMI                             policy<{'arm64': 'm', 'armhf': 'm'}>
 CONFIG_PINCTRL_SDM660                           policy<{'arm64': 'm'}>
@@ -12134,7 +12134,7 @@ CONFIG_SATA_VITESSE                             policy<{'amd64': 'm', 'arm64': '
 CONFIG_SATA_ZPODD                               policy<{'amd64': 'y', 'arm64': 'y', 'riscv64': 'y'}>
 CONFIG_SA_CAMCC_8775P                           policy<{'arm64': 'm'}>
 CONFIG_SA_DISPCC_8775P                          policy<{'arm64': 'm'}>
-CONFIG_SA_GCC_8775P                             policy<{'arm64': 'm', 'armhf': 'm'}>
+CONFIG_SA_GCC_8775P                             policy<{'arm64': 'y', 'armhf': 'm'}>
 CONFIG_SA_GPUCC_8775P                           policy<{'arm64': 'm', 'armhf': 'm'}>
 CONFIG_SA_VIDEOCC_8775P                         policy<{'arm64': 'm'}>
 CONFIG_SBC_EPX_C3_WATCHDOG                      policy<{'amd64': 'm'}>
@@ -12301,10 +12301,10 @@ CONFIG_SC_CAMCC_8280XP                          policy<{'arm64': 'm', 'armhf': '
 CONFIG_SC_DISPCC_7180                           policy<{'arm64': 'm', 'armhf': '-'}>
 CONFIG_SC_DISPCC_7280                           policy<{'arm64': 'm', 'armhf': '-'}>
 CONFIG_SC_DISPCC_8280XP                         policy<{'arm64': 'm', 'armhf': '-'}>
-CONFIG_SC_GCC_7180                              policy<{'arm64': 'm', 'armhf': '-'}>
+CONFIG_SC_GCC_7180                              policy<{'arm64': 'y', 'armhf': '-'}>
 CONFIG_SC_GCC_7280                              policy<{'arm64': 'y', 'armhf': '-'}>
-CONFIG_SC_GCC_8180X                             policy<{'arm64': 'm', 'armhf': '-'}>
-CONFIG_SC_GCC_8280XP                            policy<{'arm64': 'm', 'armhf': '-'}>
+CONFIG_SC_GCC_8180X                             policy<{'arm64': 'y', 'armhf': '-'}>
+CONFIG_SC_GCC_8280XP                            policy<{'arm64': 'y', 'armhf': '-'}>
 CONFIG_SC_GPUCC_7180                            policy<{'arm64': 'm', 'armhf': '-'}>
 CONFIG_SC_GPUCC_7280                            policy<{'arm64': 'm', 'armhf': '-'}>
 CONFIG_SC_GPUCC_8280XP                          policy<{'arm64': 'm', 'armhf': '-'}>
@@ -12805,6 +12805,7 @@ CONFIG_SERIAL_SIFIVE                            policy<{'arm64': 'm', 'armhf': '
 CONFIG_SERIAL_SIFIVE_CONSOLE                    policy<{'riscv64': 'y'}>
 CONFIG_SERIAL_SPRD                              policy<{'amd64': 'm', 'arm64': 'm', 'armhf': 'm', 'ppc64el': 'm', 'riscv64': 'm', 's390x': '-'}>
 CONFIG_SERIAL_STM32                             policy<{'arm64': 'm'}>
+CONFIG_SERIAL_STM32_CONSOLE                     policy<{'arm64': 'n'}>
 CONFIG_SERIAL_ST_ASC                            policy<{'armhf': 'm'}>
 CONFIG_SERIAL_SUNPLUS                           policy<{'armhf': 'y'}>
 CONFIG_SERIAL_SUNPLUS_CONSOLE                   policy<{'armhf': 'y'}>
