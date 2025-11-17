@@ -1,2 +1,2 @@
-linux:rprovides=spl-modules, spl-dkms, zfs-modules, zfs-dkms, v4l2loopback-modules, v4l2loopback-dkms,
+linux:rprovides=spl-modules, spl-dkms, zfs-modules, zfs-dkms, v4l2loopback-modules, v4l2loopback-dkms, mstflint-modules, mstflint-dkms,
 
