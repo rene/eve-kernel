@@ -214,13 +214,6 @@ static int smc_chan_free(int id, void *p, void *data)
 	struct scmi_chan_info *cinfo = p;
 	struct scmi_smc *scmi_info = cinfo->transport_info;
 
-	/*
-	 * Different protocols might share the same chan info, so a previous
-	 * smc_chan_free call might have already freed the structure.
-	 */
-	if (!scmi_info)
-		return 0;
-
 	/* Ignore any possible further reception on the IRQ path */
 	if (scmi_info->irq > 0)
 		free_irq(scmi_info->irq, scmi_info);
@@ -300,15 +293,6 @@ const struct scmi_desc scmi_smc_desc = {
 	 * for the issued command will be immmediately ready to be fetched
 	 * from the shared memory area.
 	 */
-	.sync_cmds_completed_on_ret = true,
-	.atomic_enabled = IS_ENABLED(CONFIG_ARM_SCMI_TRANSPORT_SMC_ATOMIC_ENABLE),
-};
-
-const struct scmi_desc scmi_qcom_smc_desc = {
-	.ops = &scmi_smc_ops,
-	.max_rx_timeout_ms = 3000,
-	.max_msg = 10,
-	.max_msg_size = 256,
 	.sync_cmds_completed_on_ret = true,
 	.atomic_enabled = IS_ENABLED(CONFIG_ARM_SCMI_TRANSPORT_SMC_ATOMIC_ENABLE),
 };
