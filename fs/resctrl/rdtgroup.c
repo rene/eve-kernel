@@ -16,8 +16,10 @@
 #include <linux/debugfs.h>
 #include <linux/fs.h>
 #include <linux/fs_parser.h>
+#include <linux/iommu.h>
 #include <linux/sysfs.h>
 #include <linux/kernfs.h>
+#include <linux/memory_hotplug.h>
 #include <linux/resctrl.h>
 #include <linux/seq_buf.h>
 #include <linux/seq_file.h>
@@ -86,6 +88,9 @@ enum resctrl_event_id mba_mbps_default_event;
 
 static bool resctrl_debug;
 
+/* Enable wacky behaviour that is not supported upstream. */
+DEFINE_STATIC_KEY_FALSE(resctrl_abi_playground);
+
 void rdt_last_cmd_clear(void)
 {
 	lockdep_assert_held(&rdtgroup_mutex);
@@ -123,14 +128,8 @@ void rdt_staged_configs_clear(void)
 
 static bool resctrl_is_mbm_enabled(void)
 {
-	return (resctrl_arch_is_mbm_total_enabled() ||
-		resctrl_arch_is_mbm_local_enabled());
-}
-
-static bool resctrl_is_mbm_event(int e)
-{
-	return (e >= QOS_L3_MBM_TOTAL_EVENT_ID &&
-		e <= QOS_L3_MBM_LOCAL_EVENT_ID);
+	return (resctrl_is_mon_event_enabled(QOS_L3_MBM_TOTAL_EVENT_ID) ||
+		resctrl_is_mon_event_enabled(QOS_L3_MBM_LOCAL_EVENT_ID));
 }
 
 /*
@@ -196,7 +195,7 @@ static int closid_alloc(void)
 	lockdep_assert_held(&rdtgroup_mutex);
 
 	if (IS_ENABLED(CONFIG_RESCTRL_RMID_DEPENDS_ON_CLOSID) &&
-	    resctrl_arch_is_llc_occupancy_enabled()) {
+	    resctrl_is_mon_event_enabled(QOS_L3_OCCUP_EVENT_ID)) {
 		cleanest_closid = resctrl_find_cleanest_closid();
 		if (cleanest_closid < 0)
 			return cleanest_closid;
@@ -766,10 +765,65 @@ static int rdtgroup_move_task(pid_t pid, struct rdtgroup *rdtgrp,
 	return ret;
 }
 
+static int rdtgroup_move_iommu(int iommu_group_id, struct rdtgroup *rdtgrp,
+			       struct kernfs_open_file *of)
+{
+	const struct cred *cred = current_cred();
+	struct iommu_group *iommu_group;
+	int err;
+
+	if (!uid_eq(cred->euid, GLOBAL_ROOT_UID)) {
+		rdt_last_cmd_printf("No permission to move iommu_group %d\n",
+				    iommu_group_id);
+		return -EPERM;
+	}
+
+	iommu_group = iommu_group_get_by_id(iommu_group_id);
+	if (!iommu_group) {
+		rdt_last_cmd_printf("No matching iommu_group %d\n",
+				    iommu_group_id);
+		return -ESRCH;
+	}
+
+	if (rdtgrp->type == RDTMON_GROUP &&
+	    !resctrl_arch_match_iommu_closid(iommu_group,
+					     rdtgrp->mon.parent->closid)) {
+		rdt_last_cmd_puts("Can't move iommu_group to different control group\n");
+		err = -EINVAL;
+	} else {
+		err = resctrl_arch_set_iommu_closid_rmid(iommu_group,
+							 rdtgrp->closid,
+							 rdtgrp->mon.rmid);
+	}
+
+	iommu_group_put(iommu_group);
+
+	return err;
+}
+
+static bool string_is_iommu_group(char *buf, int *val)
+{
+	if (!IS_ENABLED(CONFIG_RESCTRL_IOMMU) ||
+	    !static_branch_unlikely(&resctrl_abi_playground))
+		return false;
+
+	if (strlen(buf) <= strlen("iommu_group:"))
+		return false;
+
+	if (strncmp(buf, "iommu_group:", strlen("iommu_group:")))
+		return false;
+
+	buf += strlen("iommu_group:");
+
+	return !kstrtoint(buf, 0, val);
+}
+
 static ssize_t rdtgroup_tasks_write(struct kernfs_open_file *of,
 				    char *buf, size_t nbytes, loff_t off)
 {
 	struct rdtgroup *rdtgrp;
+	int iommu_group_id;
+	bool is_iommu;
 	char *pid_str;
 	int ret = 0;
 	pid_t pid;
@@ -791,7 +845,10 @@ static ssize_t rdtgroup_tasks_write(struct kernfs_open_file *of,
 	while (buf && buf[0] != '\0' && buf[0] != '\n') {
 		pid_str = strim(strsep(&buf, ","));
 
-		if (kstrtoint(pid_str, 0, &pid)) {
+		is_iommu = string_is_iommu_group(pid_str, &iommu_group_id);
+		if (is_iommu)
+			ret = rdtgroup_move_iommu(iommu_group_id, rdtgrp, of);
+		else if (kstrtoint(pid_str, 0, &pid)) {
 			rdt_last_cmd_printf("Task list parsing error pid %s\n", pid_str);
 			ret = -EINVAL;
 			break;
@@ -816,6 +873,42 @@ unlock:
 	return ret ?: nbytes;
 }
 
+static bool iommu_matches_rdtgroup(struct iommu_group *group, struct rdtgroup *r)
+{
+	if (r->type == RDTCTRL_GROUP)
+		return resctrl_arch_match_iommu_closid(group, r->closid);
+
+	return resctrl_arch_match_iommu_closid_rmid(group, r->closid,
+						    r->mon.rmid);
+}
+
+static void show_rdt_iommu(struct rdtgroup *r, struct seq_file *s)
+{
+	struct kset *iommu_groups;
+	struct iommu_group *group;
+	struct kobject *group_kobj = NULL;
+
+	if (!IS_ENABLED(CONFIG_RESCTRL_IOMMU) ||
+	    !static_branch_unlikely(&resctrl_abi_playground))
+		return;
+
+	iommu_groups = iommu_get_group_kset();
+
+	while ((group_kobj = kset_get_next_obj(iommu_groups, group_kobj))) {
+		/* iommu_group_get_from_kobj() wants to drop a reference */
+		kobject_get(group_kobj);
+
+		group = iommu_group_get_from_kobj(group_kobj);
+		if (!group)
+			continue;
+
+		if (iommu_matches_rdtgroup(group, r))
+			seq_printf(s, "iommu_group:%s\n", group_kobj->name);
+	}
+
+	kset_put(iommu_groups);
+}
+
 static void show_rdt_tasks(struct rdtgroup *r, struct seq_file *s)
 {
 	struct task_struct *p, *t;
@@ -830,6 +923,8 @@ static void show_rdt_tasks(struct rdtgroup *r, struct seq_file *s)
 		}
 	}
 	rcu_read_unlock();
+
+	show_rdt_iommu(r, s);
 }
 
 static int rdtgroup_tasks_show(struct kernfs_open_file *of,
@@ -981,7 +1076,7 @@ static int rdt_last_cmd_status_show(struct kernfs_open_file *of,
 	return 0;
 }
 
-static void *rdt_kn_parent_priv(struct kernfs_node *kn)
+void *rdt_kn_parent_priv(struct kernfs_node *kn)
 {
 	/*
 	 * The parent pointer is only valid within RCU section since it can be
@@ -1004,9 +1099,8 @@ static int rdt_default_ctrl_show(struct kernfs_open_file *of,
 				 struct seq_file *seq, void *v)
 {
 	struct resctrl_schema *s = rdt_kn_parent_priv(of->kn);
-	struct rdt_resource *r = s->res;
 
-	seq_printf(seq, "%x\n", resctrl_get_default_ctrl(r));
+	seq_printf(seq, "%x\n", resctrl_get_schema_default_ctrl(s));
 	return 0;
 }
 
@@ -1062,6 +1156,7 @@ static int rdt_bit_usage_show(struct kernfs_open_file *of,
 	u32 ctrl_val;
 
 	cpus_read_lock();
+	get_online_mems();
 	mutex_lock(&rdtgroup_mutex);
 	hw_shareable = r->cache.shareable_bits;
 	list_for_each_entry(dom, &r->ctrl_domains, hdr.list) {
@@ -1122,6 +1217,7 @@ static int rdt_bit_usage_show(struct kernfs_open_file *of,
 	}
 	seq_putc(seq, '\n');
 	mutex_unlock(&rdtgroup_mutex);
+	put_online_mems();
 	cpus_read_unlock();
 	return 0;
 }
@@ -1130,9 +1226,8 @@ static int rdt_min_bw_show(struct kernfs_open_file *of,
 			   struct seq_file *seq, void *v)
 {
 	struct resctrl_schema *s = rdt_kn_parent_priv(of->kn);
-	struct rdt_resource *r = s->res;
 
-	seq_printf(seq, "%u\n", r->membw.min_bw);
+	seq_printf(seq, "%u\n", s->membw.min_bw);
 	return 0;
 }
 
@@ -1141,7 +1236,7 @@ static int rdt_num_rmids_show(struct kernfs_open_file *of,
 {
 	struct rdt_resource *r = rdt_kn_parent_priv(of->kn);
 
-	seq_printf(seq, "%d\n", r->num_rmid);
+	seq_printf(seq, "%d\n", r->mon.num_rmid);
 
 	return 0;
 }
@@ -1152,9 +1247,12 @@ static int rdt_mon_features_show(struct kernfs_open_file *of,
 	struct rdt_resource *r = rdt_kn_parent_priv(of->kn);
 	struct mon_evt *mevt;
 
-	list_for_each_entry(mevt, &r->evt_list, list) {
+	for_each_mon_event(mevt) {
+		if (mevt->rid != r->rid || !mevt->enabled)
+			continue;
 		seq_printf(seq, "%s\n", mevt->name);
-		if (mevt->configurable)
+		if (mevt->configurable &&
+		    !resctrl_arch_mbm_cntr_assign_enabled(r))
 			seq_printf(seq, "%s_config\n", mevt->name);
 	}
 
@@ -1165,9 +1263,8 @@ static int rdt_bw_gran_show(struct kernfs_open_file *of,
 			    struct seq_file *seq, void *v)
 {
 	struct resctrl_schema *s = rdt_kn_parent_priv(of->kn);
-	struct rdt_resource *r = s->res;
 
-	seq_printf(seq, "%u\n", r->membw.bw_gran);
+	seq_printf(seq, "%u\n", s->membw.bw_gran);
 	return 0;
 }
 
@@ -1177,7 +1274,7 @@ static int rdt_delay_linear_show(struct kernfs_open_file *of,
 	struct resctrl_schema *s = rdt_kn_parent_priv(of->kn);
 	struct rdt_resource *r = s->res;
 
-	seq_printf(seq, "%u\n", r->membw.delay_linear);
+	seq_printf(seq, "%u\n", r->mba.delay_linear);
 	return 0;
 }
 
@@ -1195,7 +1292,7 @@ static int rdt_thread_throttle_mode_show(struct kernfs_open_file *of,
 	struct resctrl_schema *s = rdt_kn_parent_priv(of->kn);
 	struct rdt_resource *r = s->res;
 
-	switch (r->membw.throttle_mode) {
+	switch (r->mba.throttle_mode) {
 	case THREAD_THROTTLE_PER_THREAD:
 		seq_puts(seq, "per-thread\n");
 		return 0;
@@ -1507,7 +1604,7 @@ unsigned int rdtgroup_cbm_to_size(struct rdt_resource *r,
 	struct cacheinfo *ci;
 	int num_b;
 
-	if (WARN_ON_ONCE(r->ctrl_scope != RESCTRL_L2_CACHE && r->ctrl_scope != RESCTRL_L3_CACHE))
+	if (WARN_ON_ONCE(r->schema_fmt != RESCTRL_SCHEMA_BITMAP))
 		return size;
 
 	num_b = bitmap_weight(&cbm, r->cache.cbm_len);
@@ -1530,7 +1627,7 @@ bool is_mba_sc(struct rdt_resource *r)
 	if (r->rid != RDT_RESOURCE_MBA)
 		return false;
 
-	return r->membw.mba_sc;
+	return r->mba.mba_sc;
 }
 
 /*
@@ -1594,11 +1691,11 @@ static int rdtgroup_size_show(struct kernfs_open_file *of,
 					ctrl = resctrl_arch_get_config(r, d,
 								       closid,
 								       type);
-				if (r->rid == RDT_RESOURCE_MBA ||
-				    r->rid == RDT_RESOURCE_SMBA)
-					size = ctrl;
-				else
+
+				if (schema->schema_fmt == RESCTRL_SCHEMA_BITMAP)
 					size = rdtgroup_cbm_to_size(r, d, ctrl);
+				else
+					size = ctrl;
 			}
 			seq_printf(s, "%d=%u", d->hdr.id, size);
 			sep = true;
@@ -1625,6 +1722,7 @@ static int mbm_config_show(struct seq_file *s, struct rdt_resource *r, u32 evtid
 	bool sep = false;
 
 	cpus_read_lock();
+	get_online_mems();
 	mutex_lock(&rdtgroup_mutex);
 
 	list_for_each_entry(dom, &r->mon_domains, hdr.list) {
@@ -1643,6 +1741,7 @@ static int mbm_config_show(struct seq_file *s, struct rdt_resource *r, u32 evtid
 	seq_puts(s, "\n");
 
 	mutex_unlock(&rdtgroup_mutex);
+	put_online_mems();
 	cpus_read_unlock();
 
 	return 0;
@@ -1664,6 +1763,30 @@ static int mbm_local_bytes_config_show(struct kernfs_open_file *of,
 	struct rdt_resource *r = rdt_kn_parent_priv(of->kn);
 
 	mbm_config_show(seq, r, QOS_L3_MBM_LOCAL_EVENT_ID);
+
+	return 0;
+}
+
+static int resctrl_schema_format_show(struct kernfs_open_file *of,
+				      struct seq_file *seq, void *v)
+{
+	struct resctrl_schema *s = rdt_kn_parent_priv(of->kn);
+
+	switch (s->schema_fmt) {
+	case RESCTRL_SCHEMA_BITMAP:
+		seq_puts(seq, "bitmap\n");
+		break;
+	case RESCTRL_SCHEMA_PERCENT:
+		seq_puts(seq, "percentage\n");
+		break;
+	case RESCTRL_SCHEMA_MBPS:
+		seq_puts(seq, "mbps\n");
+		break;
+	/* The way these schema behave isn't discoverable from resctrl */
+	case RESCTRL_SCHEMA__AMD_MBA:
+		seq_puts(seq, "platform\n");
+		break;
+	}
 
 	return 0;
 }
@@ -1735,9 +1858,9 @@ next:
 	}
 
 	/* Value from user cannot be more than the supported set of events */
-	if ((val & r->mbm_cfg_mask) != val) {
+	if ((val & r->mon.mbm_cfg_mask) != val) {
 		rdt_last_cmd_printf("Invalid event configuration: max valid mask is 0x%02x\n",
-				    r->mbm_cfg_mask);
+				    r->mon.mbm_cfg_mask);
 		return -EINVAL;
 	}
 
@@ -1763,6 +1886,7 @@ static ssize_t mbm_total_bytes_config_write(struct kernfs_open_file *of,
 		return -EINVAL;
 
 	cpus_read_lock();
+	get_online_mems();
 	mutex_lock(&rdtgroup_mutex);
 
 	rdt_last_cmd_clear();
@@ -1772,6 +1896,7 @@ static ssize_t mbm_total_bytes_config_write(struct kernfs_open_file *of,
 	ret = mon_config_write(r, buf, QOS_L3_MBM_TOTAL_EVENT_ID);
 
 	mutex_unlock(&rdtgroup_mutex);
+	put_online_mems();
 	cpus_read_unlock();
 
 	return ret ?: nbytes;
@@ -1789,6 +1914,7 @@ static ssize_t mbm_local_bytes_config_write(struct kernfs_open_file *of,
 		return -EINVAL;
 
 	cpus_read_lock();
+	get_online_mems();
 	mutex_lock(&rdtgroup_mutex);
 
 	rdt_last_cmd_clear();
@@ -1798,9 +1924,48 @@ static ssize_t mbm_local_bytes_config_write(struct kernfs_open_file *of,
 	ret = mon_config_write(r, buf, QOS_L3_MBM_LOCAL_EVENT_ID);
 
 	mutex_unlock(&rdtgroup_mutex);
+	put_online_mems();
 	cpus_read_unlock();
 
 	return ret ?: nbytes;
+}
+
+/*
+ * resctrl_bmec_files_show() — Controls the visibility of BMEC-related resctrl
+ * files. When @show is true, the files are displayed; when false, the files
+ * are hidden.
+ * Don't treat kernfs_find_and_get failure as an error, since this function may
+ * be called regardless of whether BMEC is supported or the event is enabled.
+ */
+void resctrl_bmec_files_show(struct rdt_resource *r, struct kernfs_node *l3_mon_kn,
+			     bool show)
+{
+	struct kernfs_node *kn_config, *mon_kn = NULL;
+	char name[32];
+
+	if (!l3_mon_kn) {
+		sprintf(name, "%s_MON", r->name);
+		mon_kn = kernfs_find_and_get(kn_info, name);
+		if (!mon_kn)
+			return;
+		l3_mon_kn = mon_kn;
+	}
+
+	kn_config = kernfs_find_and_get(l3_mon_kn, "mbm_total_bytes_config");
+	if (kn_config) {
+		kernfs_show(kn_config, show);
+		kernfs_put(kn_config);
+	}
+
+	kn_config = kernfs_find_and_get(l3_mon_kn, "mbm_local_bytes_config");
+	if (kn_config) {
+		kernfs_show(kn_config, show);
+		kernfs_put(kn_config);
+	}
+
+	/* Release the reference only if it was acquired */
+	if (mon_kn)
+		kernfs_put(mon_kn);
 }
 
 /* rdtgroup information files for one cache resource. */
@@ -1811,6 +1976,13 @@ static struct rftype res_common_files[] = {
 		.kf_ops		= &rdtgroup_kf_single_ops,
 		.seq_show	= rdt_last_cmd_status_show,
 		.fflags		= RFTYPE_TOP_INFO,
+	},
+	{
+		.name		= "mbm_assign_on_mkdir",
+		.mode		= 0644,
+		.kf_ops		= &rdtgroup_kf_single_ops,
+		.seq_show	= resctrl_mbm_assign_on_mkdir_show,
+		.write		= resctrl_mbm_assign_on_mkdir_write,
 	},
 	{
 		.name		= "num_closids",
@@ -1827,6 +1999,12 @@ static struct rftype res_common_files[] = {
 		.fflags		= RFTYPE_MON_INFO,
 	},
 	{
+		.name		= "available_mbm_cntrs",
+		.mode		= 0444,
+		.kf_ops		= &rdtgroup_kf_single_ops,
+		.seq_show	= resctrl_available_mbm_cntrs_show,
+	},
+	{
 		.name		= "num_rmids",
 		.mode		= 0444,
 		.kf_ops		= &rdtgroup_kf_single_ops,
@@ -1841,11 +2019,31 @@ static struct rftype res_common_files[] = {
 		.fflags		= RFTYPE_CTRL_INFO | RFTYPE_RES_CACHE,
 	},
 	{
+		.name		= "num_mbm_cntrs",
+		.mode		= 0444,
+		.kf_ops		= &rdtgroup_kf_single_ops,
+		.seq_show	= resctrl_num_mbm_cntrs_show,
+	},
+	{
+		.name		= "bitmap_mask",
+		.mode		= 0444,
+		.kf_ops		= &rdtgroup_kf_single_ops,
+		.seq_show	= rdt_default_ctrl_show,
+		.fflags		= RFTYPE_CTRL_INFO | RFTYPE_SCHEMA_BITMAP,
+	},
+	{
 		.name		= "min_cbm_bits",
 		.mode		= 0444,
 		.kf_ops		= &rdtgroup_kf_single_ops,
 		.seq_show	= rdt_min_cbm_bits_show,
 		.fflags		= RFTYPE_CTRL_INFO | RFTYPE_RES_CACHE,
+	},
+	{
+		.name		= "bitmaps_min_bits",
+		.mode		= 0444,
+		.kf_ops		= &rdtgroup_kf_single_ops,
+		.seq_show	= rdt_min_cbm_bits_show,
+		.fflags		= RFTYPE_CTRL_INFO | RFTYPE_SCHEMA_BITMAP,
 	},
 	{
 		.name		= "shareable_bits",
@@ -1869,11 +2067,25 @@ static struct rftype res_common_files[] = {
 		.fflags		= RFTYPE_CTRL_INFO | RFTYPE_RES_MB,
 	},
 	{
+		.name		= "percent_min",
+		.mode		= 0444,
+		.kf_ops		= &rdtgroup_kf_single_ops,
+		.seq_show	= rdt_min_bw_show,
+		.fflags		= RFTYPE_CTRL_INFO | RFTYPE_SCHEMA_PERCENT,
+	},
+	{
 		.name		= "bandwidth_gran",
 		.mode		= 0444,
 		.kf_ops		= &rdtgroup_kf_single_ops,
 		.seq_show	= rdt_bw_gran_show,
 		.fflags		= RFTYPE_CTRL_INFO | RFTYPE_RES_MB,
+	},
+	{
+		.name		= "percent_gran",
+		.mode		= 0444,
+		.kf_ops		= &rdtgroup_kf_single_ops,
+		.seq_show	= rdt_bw_gran_show,
+		.fflags		= RFTYPE_CTRL_INFO | RFTYPE_SCHEMA_PERCENT,
 	},
 	{
 		.name		= "delay_linear",
@@ -1914,6 +2126,28 @@ static struct rftype res_common_files[] = {
 		.kf_ops		= &rdtgroup_kf_single_ops,
 		.seq_show	= mbm_local_bytes_config_show,
 		.write		= mbm_local_bytes_config_write,
+	},
+	{
+		.name		= "event_filter",
+		.mode		= 0644,
+		.kf_ops		= &rdtgroup_kf_single_ops,
+		.seq_show	= event_filter_show,
+		.write		= event_filter_write,
+	},
+	{
+		.name		= "mbm_L3_assignments",
+		.mode		= 0644,
+		.kf_ops		= &rdtgroup_kf_single_ops,
+		.seq_show	= mbm_L3_assignments_show,
+		.write		= mbm_L3_assignments_write,
+	},
+	{
+		.name		= "mbm_assign_mode",
+		.mode		= 0644,
+		.kf_ops		= &rdtgroup_kf_single_ops,
+		.seq_show	= resctrl_mbm_assign_mode_show,
+		.write		= resctrl_mbm_assign_mode_write,
+		.fflags		= RFTYPE_MON_INFO | RFTYPE_RES_CACHE,
 	},
 	{
 		.name		= "cpus",
@@ -1991,6 +2225,14 @@ static struct rftype res_common_files[] = {
 		.seq_show	= rdtgroup_closid_show,
 		.fflags		= RFTYPE_CTRL_BASE | RFTYPE_DEBUG,
 	},
+	{
+		.name		= "schema_format",
+		.mode		= 0444,
+		.kf_ops		= &rdtgroup_kf_single_ops,
+		.seq_show	= resctrl_schema_format_show,
+		.fflags		= RFTYPE_CTRL_INFO,
+	},
+
 };
 
 static int rdtgroup_add_files(struct kernfs_node *kn, unsigned long fflags)
@@ -2047,13 +2289,13 @@ static void thread_throttle_mode_init(void)
 
 	r_mba = resctrl_arch_get_resource(RDT_RESOURCE_MBA);
 	if (r_mba->alloc_capable &&
-	    r_mba->membw.throttle_mode != THREAD_THROTTLE_UNDEFINED)
-		throttle_mode = r_mba->membw.throttle_mode;
+	    r_mba->mba.throttle_mode != THREAD_THROTTLE_UNDEFINED)
+		throttle_mode = r_mba->mba.throttle_mode;
 
 	r_smba = resctrl_arch_get_resource(RDT_RESOURCE_SMBA);
 	if (r_smba->alloc_capable &&
-	    r_smba->membw.throttle_mode != THREAD_THROTTLE_UNDEFINED)
-		throttle_mode = r_smba->membw.throttle_mode;
+	    r_smba->mba.throttle_mode != THREAD_THROTTLE_UNDEFINED)
+		throttle_mode = r_smba->mba.throttle_mode;
 
 	if (throttle_mode == THREAD_THROTTLE_UNDEFINED)
 		return;
@@ -2168,10 +2410,48 @@ int rdtgroup_kn_mode_restore(struct rdtgroup *r, const char *name,
 	return ret;
 }
 
+static int resctrl_mkdir_event_configs(struct rdt_resource *r, struct kernfs_node *l3_mon_kn)
+{
+	struct kernfs_node *kn_subdir, *kn_subdir2;
+	struct mon_evt *mevt;
+	int ret;
+
+	kn_subdir = kernfs_create_dir(l3_mon_kn, "event_configs", l3_mon_kn->mode, NULL);
+	if (IS_ERR(kn_subdir))
+		return PTR_ERR(kn_subdir);
+
+	ret = rdtgroup_kn_set_ugid(kn_subdir);
+	if (ret)
+		return ret;
+
+	for_each_mon_event(mevt) {
+		if (mevt->rid != r->rid || !mevt->enabled || !resctrl_is_mbm_event(mevt->evtid))
+			continue;
+
+		kn_subdir2 = kernfs_create_dir(kn_subdir, mevt->name, kn_subdir->mode, mevt);
+		if (IS_ERR(kn_subdir2)) {
+			ret = PTR_ERR(kn_subdir2);
+			goto out;
+		}
+
+		ret = rdtgroup_kn_set_ugid(kn_subdir2);
+		if (ret)
+			goto out;
+
+		ret = rdtgroup_add_files(kn_subdir2, RFTYPE_ASSIGN_CONFIG);
+		if (ret)
+			break;
+	}
+
+out:
+	return ret;
+}
+
 static int rdtgroup_mkdir_info_resdir(void *priv, char *name,
 				      unsigned long fflags)
 {
 	struct kernfs_node *kn_subdir;
+	struct rdt_resource *r;
 	int ret;
 
 	kn_subdir = kernfs_create_dir(kn_info, name,
@@ -2184,8 +2464,25 @@ static int rdtgroup_mkdir_info_resdir(void *priv, char *name,
 		return ret;
 
 	ret = rdtgroup_add_files(kn_subdir, fflags);
-	if (!ret)
-		kernfs_activate(kn_subdir);
+	if (ret)
+		return ret;
+
+	if ((fflags & RFTYPE_MON_INFO) == RFTYPE_MON_INFO) {
+		r = priv;
+		if (r->mon.mbm_cntr_assignable) {
+			ret = resctrl_mkdir_event_configs(r, kn_subdir);
+			if (ret)
+				return ret;
+			/*
+			 * Hide BMEC related files if mbm_event mode
+			 * is enabled.
+			 */
+			if (resctrl_arch_mbm_cntr_assign_enabled(r))
+				resctrl_bmec_files_show(r, kn_subdir, false);
+		}
+	}
+
+	kernfs_activate(kn_subdir);
 
 	return ret;
 }
@@ -2201,7 +2498,35 @@ static unsigned long fflags_from_resource(struct rdt_resource *r)
 		return RFTYPE_RES_MB;
 	}
 
-	return WARN_ON_ONCE(1);
+	return 0;
+}
+
+static u32 fflags_from_schema(struct resctrl_schema *s)
+{
+	struct rdt_resource *r = s->res;
+	u32 fflags = 0;
+
+	/* Some resources are configured purely from their rid */
+	fflags |= fflags_from_resource(r);
+	if (fflags)
+		return fflags;
+
+	switch (s->schema_fmt) {
+	case RESCTRL_SCHEMA_BITMAP:
+		fflags |= RFTYPE_SCHEMA_BITMAP;
+		break;
+	case RESCTRL_SCHEMA_PERCENT:
+		fflags |= RFTYPE_SCHEMA_PERCENT;
+		break;
+	case RESCTRL_SCHEMA_MBPS:
+		fflags |= RFTYPE_SCHEMA_MBPS;
+		break;
+	case RESCTRL_SCHEMA__AMD_MBA:
+		/* No standard files are exposed */
+		break;
+	}
+
+	return fflags;
 }
 
 static int rdtgroup_create_info_dir(struct kernfs_node *parent_kn)
@@ -2224,7 +2549,7 @@ static int rdtgroup_create_info_dir(struct kernfs_node *parent_kn)
 	/* loop over enabled controls, these are all alloc_capable */
 	list_for_each_entry(s, &resctrl_schema_all, list) {
 		r = s->res;
-		fflags = fflags_from_resource(r) | RFTYPE_CTRL_INFO;
+		fflags = fflags_from_schema(s) | RFTYPE_CTRL_INFO;
 		ret = rdtgroup_mkdir_info_resdir(s, s->name, fflags);
 		if (ret)
 			goto out_destroy;
@@ -2281,7 +2606,7 @@ out_destroy:
 
 static inline bool is_mba_linear(void)
 {
-	return resctrl_arch_get_resource(RDT_RESOURCE_MBA)->membw.delay_linear;
+	return resctrl_arch_get_resource(RDT_RESOURCE_MBA)->mba.delay_linear;
 }
 
 static int mba_sc_domain_allocate(struct rdt_resource *r, struct rdt_ctrl_domain *d)
@@ -2339,7 +2664,7 @@ static int set_mba_sc(bool mba_sc)
 	if (!supports_mba_mbps() || mba_sc == is_mba_sc(r))
 		return -EINVAL;
 
-	r->membw.mba_sc = mba_sc;
+	r->mba.mba_sc = mba_sc;
 
 	rdtgroup_default.mba_mbps_event = mba_mbps_default_event;
 
@@ -2411,6 +2736,7 @@ struct rdtgroup *rdtgroup_kn_lock_live(struct kernfs_node *kn)
 	rdtgroup_kn_get(rdtgrp, kn);
 
 	cpus_read_lock();
+	get_online_mems();
 	mutex_lock(&rdtgroup_mutex);
 
 	/* Was this group deleted while we waited? */
@@ -2428,6 +2754,7 @@ void rdtgroup_kn_unlock(struct kernfs_node *kn)
 		return;
 
 	mutex_unlock(&rdtgroup_mutex);
+	put_online_mems();
 	cpus_read_unlock();
 
 	rdtgroup_kn_put(rdtgrp, kn);
@@ -2441,6 +2768,7 @@ static void rdt_disable_ctx(void)
 {
 	resctrl_arch_set_cdp_enabled(RDT_RESOURCE_L3, false);
 	resctrl_arch_set_cdp_enabled(RDT_RESOURCE_L2, false);
+	resctrl_arch_set_mb_uses_numa_nid(false);
 	set_mba_sc(false);
 
 	resctrl_debug = false;
@@ -2471,8 +2799,17 @@ static int rdt_enable_ctx(struct rdt_fs_context *ctx)
 	if (ctx->enable_debug)
 		resctrl_debug = true;
 
+	if (ctx->mb_uses_numa_nid) {
+		ret = resctrl_arch_set_mb_uses_numa_nid(true);
+		if (ret)
+			goto out_debug;
+	}
+
 	return 0;
 
+out_debug:
+	resctrl_debug = false;
+	set_mba_sc(false);
 out_cdpl3:
 	resctrl_arch_set_cdp_enabled(RDT_RESOURCE_L3, false);
 out_cdpl2:
@@ -2528,11 +2865,28 @@ static int schemata_list_add(struct rdt_resource *r, enum resctrl_conf_type type
 	if (cl > max_name_width)
 		max_name_width = cl;
 
-	switch (r->schema_fmt) {
+	s->schema_fmt = r->schema_fmt;
+	s->membw = r->membw;
+
+	/*
+	 * When mba_sc() is enabled the format used by user space is different
+	 * to that expected by hardware. The conversion is done by
+	 * update_mba_bw().
+	 */
+	if (is_mba_sc(r)) {
+		s->schema_fmt = RESCTRL_SCHEMA_MBPS;
+		s->membw.min_bw = 0;
+		s->membw.max_bw = MBA_MAX_MBPS;
+		s->membw.bw_gran = 1;
+	}
+
+	switch (s->schema_fmt) {
 	case RESCTRL_SCHEMA_BITMAP:
 		s->fmt_str = "%d=%x";
 		break;
-	case RESCTRL_SCHEMA_RANGE:
+	case RESCTRL_SCHEMA_PERCENT:
+	case RESCTRL_SCHEMA_MBPS:
+	case RESCTRL_SCHEMA__AMD_MBA:
 		s->fmt_str = "%d=%u";
 		break;
 	}
@@ -2581,6 +2935,42 @@ static void schemata_list_destroy(void)
 	}
 }
 
+static void hack_file_mode(const char *name, u16 mode)
+{
+	struct rftype *rfts, *rft;
+	int len;
+
+	mutex_lock(&rdtgroup_mutex);
+
+	rfts = res_common_files;
+	len = ARRAY_SIZE(res_common_files);
+
+	for (rft = rfts; rft < rfts + len; rft++) {
+		if (!strcmp(rft->name, name))
+			rft->mode = mode;
+	}
+
+	mutex_unlock(&rdtgroup_mutex);
+}
+
+static void enable_abi_playground(void)
+{
+	static_key_enable(&resctrl_abi_playground.key);
+
+	/* Make the tasks file read only */
+	if (IS_ENABLED(CONFIG_CGROUP_RESCTRL))
+		hack_file_mode("tasks", 0444);
+}
+
+static void disable_abi_playground(void)
+{
+	static_key_disable(&resctrl_abi_playground.key);
+
+	/* Make the tasks file read/write only */
+	if (IS_ENABLED(CONFIG_CGROUP_RESCTRL))
+		hack_file_mode("tasks", 0644);
+}
+
 static int rdt_get_tree(struct fs_context *fc)
 {
 	struct rdt_fs_context *ctx = rdt_fc2context(fc);
@@ -2589,7 +2979,11 @@ static int rdt_get_tree(struct fs_context *fc)
 	struct rdt_resource *r;
 	int ret;
 
+	if (ctx->enable_abi_playground)
+		enable_abi_playground();
+
 	cpus_read_lock();
+	get_online_mems();
 	mutex_lock(&rdtgroup_mutex);
 	/*
 	 * resctrl file system can only be mounted once.
@@ -2637,6 +3031,8 @@ static int rdt_get_tree(struct fs_context *fc)
 		if (ret < 0)
 			goto out_info;
 
+		rdtgroup_assign_cntrs(&rdtgroup_default);
+
 		ret = mkdir_mondata_all(rdtgroup_default.kn,
 					&rdtgroup_default, &kn_mondata);
 		if (ret < 0)
@@ -2675,8 +3071,10 @@ out_mondata:
 	if (resctrl_arch_mon_capable())
 		kernfs_remove(kn_mondata);
 out_mongrp:
-	if (resctrl_arch_mon_capable())
+	if (resctrl_arch_mon_capable()) {
+		rdtgroup_unassign_cntrs(&rdtgroup_default);
 		kernfs_remove(kn_mongrp);
+	}
 out_info:
 	kernfs_remove(kn_info);
 out_closid_exit:
@@ -2690,6 +3088,7 @@ out_root:
 out:
 	rdt_last_cmd_clear();
 	mutex_unlock(&rdtgroup_mutex);
+	put_online_mems();
 	cpus_read_unlock();
 	return ret;
 }
@@ -2699,14 +3098,24 @@ enum rdt_param {
 	Opt_cdpl2,
 	Opt_mba_mbps,
 	Opt_debug,
+	Opt_mb_uses_numa_nid,
+	Opt_not_abi_playground,
 	nr__rdt_params
 };
 
 static const struct fs_parameter_spec rdt_fs_parameters[] = {
-	fsparam_flag("cdp",		Opt_cdp),
-	fsparam_flag("cdpl2",		Opt_cdpl2),
-	fsparam_flag("mba_MBps",	Opt_mba_mbps),
-	fsparam_flag("debug",		Opt_debug),
+	fsparam_flag("cdp",			Opt_cdp),
+	fsparam_flag("cdpl2",			Opt_cdpl2),
+	fsparam_flag("mba_MBps",		Opt_mba_mbps),
+	fsparam_flag("debug",			Opt_debug),
+	fsparam_flag("mb_uses_numa_nid",	Opt_mb_uses_numa_nid),
+
+	/*
+	 * Some of MPAM's out of tree code exposes things through resctrl
+	 * that need much more discussion before they are considered for
+	 * mainline. Add a mount option that can be used to hide these crimes.
+	 */
+	fsparam_flag("this_is_not_abi",	Opt_not_abi_playground),
 	{}
 };
 
@@ -2736,6 +3145,12 @@ static int rdt_parse_param(struct fs_context *fc, struct fs_parameter *param)
 		return 0;
 	case Opt_debug:
 		ctx->enable_debug = true;
+		return 0;
+	case Opt_mb_uses_numa_nid:
+		ctx->mb_uses_numa_nid = true;
+		return 0;
+	case Opt_not_abi_playground:
+		ctx->enable_abi_playground = true;
 		return 0;
 	}
 
@@ -2822,6 +3237,7 @@ static void free_all_child_rdtgrp(struct rdtgroup *rdtgrp)
 
 	head = &rdtgrp->mon.crdtgrp_list;
 	list_for_each_entry_safe(sentry, stmp, head, mon.crdtgrp_list) {
+		rdtgroup_unassign_cntrs(sentry);
 		free_rmid(sentry->closid, sentry->mon.rmid);
 		list_del(&sentry->mon.crdtgrp_list);
 
@@ -2861,6 +3277,8 @@ static void rmdir_all_sub(void)
 		 */
 		cpumask_or(&rdtgroup_default.cpu_mask,
 			   &rdtgroup_default.cpu_mask, &rdtgrp->cpu_mask);
+
+		rdtgroup_unassign_cntrs(rdtgrp);
 
 		free_rmid(rdtgrp->closid, rdtgrp->mon.rmid);
 
@@ -2946,6 +3364,7 @@ static void resctrl_fs_teardown(void)
 		return;
 
 	rmdir_all_sub();
+	rdtgroup_unassign_cntrs(&rdtgroup_default);
 	mon_put_kn_priv();
 	rdt_pseudo_lock_release();
 	rdtgroup_default.mode = RDT_MODE_SHAREABLE;
@@ -2959,6 +3378,7 @@ static void rdt_kill_sb(struct super_block *sb)
 	struct rdt_resource *r;
 
 	cpus_read_lock();
+	get_online_mems();
 	mutex_lock(&rdtgroup_mutex);
 
 	rdt_disable_ctx();
@@ -2975,7 +3395,11 @@ static void rdt_kill_sb(struct super_block *sb)
 	resctrl_mounted = false;
 	kernfs_kill_sb(sb);
 	mutex_unlock(&rdtgroup_mutex);
+	put_online_mems();
 	cpus_read_unlock();
+
+	if (static_branch_unlikely(&resctrl_abi_playground))
+		disable_abi_playground();
 }
 
 static struct file_system_type rdt_fs_type = {
@@ -3057,10 +3481,9 @@ static int mon_add_all_files(struct kernfs_node *kn, struct rdt_mon_domain *d,
 	struct mon_evt *mevt;
 	int ret, domid;
 
-	if (WARN_ON(list_empty(&r->evt_list)))
-		return -EPERM;
-
-	list_for_each_entry(mevt, &r->evt_list, list) {
+	for_each_mon_event(mevt) {
+		if (mevt->rid != r->rid || !mevt->enabled)
+			continue;
 		domid = do_sum ? d->ci_id : d->hdr.id;
 		priv = mon_get_kn_priv(r->rid, domid, mevt, do_sum);
 		if (WARN_ON_ONCE(!priv))
@@ -3372,7 +3795,7 @@ static void rdtgroup_init_mba(struct rdt_resource *r, u32 closid)
 		}
 
 		cfg = &d->staged_config[CDP_NONE];
-		cfg->new_ctrl = resctrl_get_default_ctrl(r);
+		cfg->new_ctrl = resctrl_get_resource_default_ctrl(r);
 		cfg->have_new_ctrl = true;
 	}
 }
@@ -3427,9 +3850,12 @@ static int mkdir_rdt_prepare_rmid_alloc(struct rdtgroup *rdtgrp)
 	}
 	rdtgrp->mon.rmid = ret;
 
+	rdtgroup_assign_cntrs(rdtgrp);
+
 	ret = mkdir_mondata_all(rdtgrp->kn, rdtgrp, &rdtgrp->mon.mon_data_kn);
 	if (ret) {
 		rdt_last_cmd_puts("kernfs subdir error\n");
+		rdtgroup_unassign_cntrs(rdtgrp);
 		free_rmid(rdtgrp->closid, rdtgrp->mon.rmid);
 		return ret;
 	}
@@ -3439,8 +3865,10 @@ static int mkdir_rdt_prepare_rmid_alloc(struct rdtgroup *rdtgrp)
 
 static void mkdir_rdt_prepare_rmid_free(struct rdtgroup *rgrp)
 {
-	if (resctrl_arch_mon_capable())
+	if (resctrl_arch_mon_capable()) {
+		rdtgroup_unassign_cntrs(rgrp);
 		free_rmid(rgrp->closid, rgrp->mon.rmid);
+	}
 }
 
 /*
@@ -3716,6 +4144,9 @@ static int rdtgroup_rmdir_mon(struct rdtgroup *rdtgrp, cpumask_var_t tmpmask)
 	update_closid_rmid(tmpmask, NULL);
 
 	rdtgrp->flags = RDT_DELETED;
+
+	rdtgroup_unassign_cntrs(rdtgrp);
+
 	free_rmid(rdtgrp->closid, rdtgrp->mon.rmid);
 
 	/*
@@ -3762,6 +4193,8 @@ static int rdtgroup_rmdir_ctrl(struct rdtgroup *rdtgrp, cpumask_var_t tmpmask)
 	 */
 	cpumask_or(tmpmask, tmpmask, &rdtgrp->cpu_mask);
 	update_closid_rmid(tmpmask, NULL);
+
+	rdtgroup_unassign_cntrs(rdtgrp);
 
 	free_rmid(rdtgrp->closid, rdtgrp->mon.rmid);
 	closid_free(rdtgrp->closid);
@@ -3973,6 +4406,12 @@ static int rdtgroup_show_options(struct seq_file *seq, struct kernfs_root *kf)
 	if (resctrl_debug)
 		seq_puts(seq, ",debug");
 
+	if (resctrl_arch_get_mb_uses_numa_nid())
+		seq_puts(seq, ",mb_uses_numa_nid");
+
+	if (static_branch_unlikely(&resctrl_abi_playground))
+		seq_puts(seq, ",this_is_not_abi");
+
 	return 0;
 }
 
@@ -4022,9 +4461,14 @@ static void rdtgroup_setup_default(void)
 
 static void domain_destroy_mon_state(struct rdt_mon_domain *d)
 {
+	int idx;
+
+	kfree(d->cntr_cfg);
 	bitmap_free(d->rmid_busy_llc);
-	kfree(d->mbm_total);
-	kfree(d->mbm_local);
+	for_each_mbm_idx(idx) {
+		kfree(d->mbm_states[idx]);
+		d->mbm_states[idx] = NULL;
+	}
 }
 
 void resctrl_offline_ctrl_domain(struct rdt_resource *r, struct rdt_ctrl_domain *d)
@@ -4050,7 +4494,7 @@ void resctrl_offline_mon_domain(struct rdt_resource *r, struct rdt_mon_domain *d
 
 	if (resctrl_is_mbm_enabled())
 		cancel_delayed_work(&d->mbm_over);
-	if (resctrl_arch_is_llc_occupancy_enabled() && has_busy_rmid(d)) {
+	if (resctrl_is_mon_event_enabled(QOS_L3_OCCUP_EVENT_ID) && has_busy_rmid(d)) {
 		/*
 		 * When a package is going down, forcefully
 		 * decrement rmid->ebusy. There is no way to know
@@ -4084,32 +4528,41 @@ void resctrl_offline_mon_domain(struct rdt_resource *r, struct rdt_mon_domain *d
 static int domain_setup_mon_state(struct rdt_resource *r, struct rdt_mon_domain *d)
 {
 	u32 idx_limit = resctrl_arch_system_num_rmid_idx();
-	size_t tsize;
+	size_t tsize = sizeof(*d->mbm_states[0]);
+	enum resctrl_event_id eventid;
+	int idx;
 
-	if (resctrl_arch_is_llc_occupancy_enabled()) {
+	if (resctrl_is_mon_event_enabled(QOS_L3_OCCUP_EVENT_ID)) {
 		d->rmid_busy_llc = bitmap_zalloc(idx_limit, GFP_KERNEL);
 		if (!d->rmid_busy_llc)
 			return -ENOMEM;
 	}
-	if (resctrl_arch_is_mbm_total_enabled()) {
-		tsize = sizeof(*d->mbm_total);
-		d->mbm_total = kcalloc(idx_limit, tsize, GFP_KERNEL);
-		if (!d->mbm_total) {
-			bitmap_free(d->rmid_busy_llc);
-			return -ENOMEM;
-		}
+
+	for_each_mbm_event_id(eventid) {
+		if (!resctrl_is_mon_event_enabled(eventid))
+			continue;
+		idx = MBM_STATE_IDX(eventid);
+		d->mbm_states[idx] = kcalloc(idx_limit, tsize, GFP_KERNEL);
+		if (!d->mbm_states[idx])
+			goto cleanup;
 	}
-	if (resctrl_arch_is_mbm_local_enabled()) {
-		tsize = sizeof(*d->mbm_local);
-		d->mbm_local = kcalloc(idx_limit, tsize, GFP_KERNEL);
-		if (!d->mbm_local) {
-			bitmap_free(d->rmid_busy_llc);
-			kfree(d->mbm_total);
-			return -ENOMEM;
-		}
+
+	if (resctrl_is_mbm_enabled() && r->mon.mbm_cntr_assignable) {
+		tsize = sizeof(*d->cntr_cfg);
+		d->cntr_cfg = kcalloc(r->mon.num_mbm_cntrs, tsize, GFP_KERNEL);
+		if (!d->cntr_cfg)
+			goto cleanup;
 	}
 
 	return 0;
+cleanup:
+	bitmap_free(d->rmid_busy_llc);
+	for_each_mbm_idx(idx) {
+		kfree(d->mbm_states[idx]);
+		d->mbm_states[idx] = NULL;
+	}
+
+	return -ENOMEM;
 }
 
 int resctrl_online_ctrl_domain(struct rdt_resource *r, struct rdt_ctrl_domain *d)
@@ -4144,7 +4597,7 @@ int resctrl_online_mon_domain(struct rdt_resource *r, struct rdt_mon_domain *d)
 					   RESCTRL_PICK_ANY_CPU);
 	}
 
-	if (resctrl_arch_is_llc_occupancy_enabled())
+	if (resctrl_is_mon_event_enabled(QOS_L3_OCCUP_EVENT_ID))
 		INIT_DELAYED_WORK(&d->cqm_limbo, cqm_handle_limbo);
 
 	/*
@@ -4219,7 +4672,7 @@ void resctrl_offline_cpu(unsigned int cpu)
 			cancel_delayed_work(&d->mbm_over);
 			mbm_setup_overflow_handler(d, 0, cpu);
 		}
-		if (resctrl_arch_is_llc_occupancy_enabled() &&
+		if (resctrl_is_mon_event_enabled(QOS_L3_OCCUP_EVENT_ID) &&
 		    cpu == d->cqm_work_cpu && has_busy_rmid(d)) {
 			cancel_delayed_work(&d->cqm_limbo);
 			cqm_setup_limbo_handler(d, 0, cpu);
@@ -4336,12 +4789,14 @@ static bool resctrl_online_domains_exist(void)
 void resctrl_exit(void)
 {
 	cpus_read_lock();
+	get_online_mems();
 	WARN_ON_ONCE(resctrl_online_domains_exist());
 
 	mutex_lock(&rdtgroup_mutex);
 	resctrl_fs_teardown();
 	mutex_unlock(&rdtgroup_mutex);
 
+	put_online_mems();
 	cpus_read_unlock();
 
 	debugfs_remove_recursive(debugfs_resctrl);

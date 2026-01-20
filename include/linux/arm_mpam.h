@@ -1,0 +1,107 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2025 Arm Ltd. */
+
+#ifndef __LINUX_ARM_MPAM_H
+#define __LINUX_ARM_MPAM_H
+
+#include <linux/acpi.h>
+#include <linux/compiler_attributes.h>
+#include <linux/resctrl_types.h>
+#include <linux/types.h>
+
+#define GLOBAL_AFFINITY		~0
+
+struct mpam_msc;
+
+enum mpam_msc_iface {
+	MPAM_IFACE_MMIO,	/* a real MPAM MSC */
+	MPAM_IFACE_PCC,		/* a fake MPAM MSC */
+	MPAM_IFACE_SCMI,	/* through a firmware interface */
+};
+
+enum mpam_class_types {
+	MPAM_CLASS_CACHE,       /* Well known caches, e.g. L2 */
+	MPAM_CLASS_MEMORY,      /* Main memory */
+	MPAM_CLASS_UNKNOWN,     /* Everything else, e.g. SMMU */
+};
+
+#ifdef CONFIG_ACPI_MPAM
+/* Parse the ACPI description of resources entries for this MSC. */
+int acpi_mpam_parse_resources(struct mpam_msc *msc,
+			      struct acpi_mpam_msc_node *tbl_msc);
+
+int acpi_mpam_count_msc(void);
+#else
+static inline int acpi_mpam_parse_resources(struct mpam_msc *msc,
+					    struct acpi_mpam_msc_node *tbl_msc)
+{
+	return -EINVAL;
+}
+
+static inline int acpi_mpam_count_msc(void) { return -EINVAL; }
+#endif
+
+int mpam_ris_create(struct mpam_msc *msc, u8 ris_idx,
+		    enum mpam_class_types type, u8 class_id, u32 component_id);
+
+struct resctrl_schema;
+static inline u32 resctrl_arch_round_bw(u32 val,
+					const struct resctrl_schema *s __always_unused)
+{
+	/*
+	 * Do nothing: for MPAM, resctrl_arch_update_one() has the necessary
+	 * context to round the incoming value correctly.
+	 */
+	return val;
+}
+
+static inline unsigned int resctrl_arch_round_mon_val(unsigned int val)
+{
+	return val;
+}
+
+bool resctrl_arch_alloc_capable(void);
+bool resctrl_arch_mon_capable(void);
+bool resctrl_arch_mon_can_overflow(void);
+
+void resctrl_arch_set_cpu_default_closid(int cpu, u32 closid);
+void resctrl_arch_set_closid_rmid(struct task_struct *tsk, u32 closid, u32 rmid);
+void resctrl_arch_set_cpu_default_closid_rmid(int cpu, u32 closid, u32 rmid);
+void resctrl_arch_sched_in(struct task_struct *tsk);
+bool resctrl_arch_match_closid(struct task_struct *tsk, u32 closid);
+bool resctrl_arch_match_rmid(struct task_struct *tsk, u32 closid, u32 rmid);
+u32 resctrl_arch_rmid_idx_encode(u32 closid, u32 rmid);
+void resctrl_arch_rmid_idx_decode(u32 idx, u32 *closid, u32 *rmid);
+u32 resctrl_arch_system_num_rmid_idx(void);
+
+struct rdt_resource;
+void *resctrl_arch_mon_ctx_alloc(struct rdt_resource *r, enum resctrl_event_id evtid);
+void resctrl_arch_mon_ctx_free(struct rdt_resource *r, enum resctrl_event_id evtid, void *ctx);
+
+bool resctrl_arch_get_mb_uses_numa_nid(void);
+int resctrl_arch_set_mb_uses_numa_nid(bool enabled);
+
+/*
+ * The CPU configuration for MPAM is cheap to write, and is only written if it
+ * has changed. No need for fine grained enables.
+ */
+static inline void resctrl_arch_enable_mon(void) { }
+static inline void resctrl_arch_disable_mon(void) { }
+static inline void resctrl_arch_enable_alloc(void) { }
+static inline void resctrl_arch_disable_alloc(void) { }
+
+/**
+ * mpam_register_requestor() - Register a requestor with the MPAM driver
+ * @partid_max:		The maximum PARTID value the requestor can generate.
+ * @pmg_max:		The maximum PMG value the requestor can generate.
+ *
+ * Registers a requestor with the MPAM driver to ensure the chosen system-wide
+ * minimum PARTID and PMG values will allow the requestors features to be used.
+ *
+ * Returns an error if the registration is too late, and a larger PARTID/PMG
+ * value has been advertised to user-space. In this case the requestor should
+ * not use its MPAM features. Returns 0 on success.
+ */
+int mpam_register_requestor(u16 partid_max, u8 pmg_max);
+
+#endif /* __LINUX_ARM_MPAM_H */
