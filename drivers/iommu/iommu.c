@@ -304,6 +304,7 @@ void iommu_device_unregister_bus(struct iommu_device *iommu,
 				 struct notifier_block *nb)
 {
 	bus_unregister_notifier(bus, nb);
+	fwnode_remove_software_node(iommu->fwnode);
 	iommu_device_unregister(iommu);
 }
 EXPORT_SYMBOL_GPL(iommu_device_unregister_bus);
@@ -326,6 +327,12 @@ int iommu_device_register_bus(struct iommu_device *iommu,
 	if (err)
 		return err;
 
+	iommu->fwnode = fwnode_create_software_node(NULL, NULL);
+	if (IS_ERR(iommu->fwnode)) {
+		bus_unregister_notifier(bus, nb);
+		return PTR_ERR(iommu->fwnode);
+	}
+
 	spin_lock(&iommu_device_lock);
 	list_add_tail(&iommu->list, &iommu_device_list);
 	spin_unlock(&iommu_device_lock);
@@ -335,9 +342,28 @@ int iommu_device_register_bus(struct iommu_device *iommu,
 		iommu_device_unregister_bus(iommu, bus, nb);
 		return err;
 	}
+	WRITE_ONCE(iommu->ready, true);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(iommu_device_register_bus);
+
+int iommu_mock_device_add(struct device *dev, struct iommu_device *iommu)
+{
+	int rc;
+
+	mutex_lock(&iommu_probe_device_lock);
+	rc = iommu_fwspec_init(dev, iommu->fwnode);
+	mutex_unlock(&iommu_probe_device_lock);
+
+	if (rc)
+		return rc;
+
+	rc = device_add(dev);
+	if (rc)
+		iommu_fwspec_free(dev);
+	return rc;
+}
+EXPORT_SYMBOL_GPL(iommu_mock_device_add);
 #endif
 
 static struct dev_iommu *dev_iommu_get(struct device *dev)
@@ -1060,6 +1086,45 @@ struct iommu_group *iommu_group_alloc(void)
 	return group;
 }
 EXPORT_SYMBOL_GPL(iommu_group_alloc);
+
+struct iommu_group *iommu_group_get_from_kobj(struct kobject *group_kobj)
+{
+	struct iommu_group *group;
+
+	if (!iommu_group_kset || !group_kobj)
+		return NULL;
+
+	group = container_of(group_kobj, struct iommu_group, kobj);
+
+	kobject_get(group->devices_kobj);
+	kobject_put(&group->kobj);
+
+	return group;
+}
+
+struct iommu_group *iommu_group_get_by_id(int id)
+{
+	struct kobject *group_kobj;
+	const char *name;
+
+	if (!iommu_group_kset)
+		return NULL;
+
+	name = kasprintf(GFP_KERNEL, "%d", id);
+	if (!name)
+		return NULL;
+
+	group_kobj = kset_find_obj(iommu_group_kset, name);
+	kfree(name);
+
+	return iommu_group_get_from_kobj(group_kobj);
+}
+EXPORT_SYMBOL_GPL(iommu_group_get_by_id);
+
+struct kset *iommu_get_group_kset(void)
+{
+	return kset_get(iommu_group_kset);
+}
 
 /**
  * iommu_group_get_iommudata - retrieve iommu_data registered for a group
@@ -2180,6 +2245,12 @@ struct iommu_domain *iommu_get_domain_for_dev(struct device *dev)
 	return group->domain;
 }
 EXPORT_SYMBOL_GPL(iommu_get_domain_for_dev);
+
+struct iommu_domain *iommu_get_domain_for_group(struct iommu_group *group)
+{
+	return group->domain;
+}
+EXPORT_SYMBOL_GPL(iommu_get_domain_for_group);
 
 /*
  * For IOMMU_DOMAIN_DMA implementations which already provide their own
@@ -3829,3 +3900,79 @@ int iommu_dma_prepare_msi(struct msi_desc *desc, phys_addr_t msi_addr)
 	return ret;
 }
 #endif /* CONFIG_IRQ_MSI_IOMMU */
+
+/*
+ * iommu_group_set_qos_params() - Set the QoS parameters for a group
+ * @group: the iommu group.
+ * @partition: the partition label all traffic from the group should use.
+ * @perf_mon_grp: the performance label all traffic from the group should use.
+ *
+ * Return: 0 on success, or an error.
+ */
+int iommu_group_set_qos_params(struct iommu_group *group,
+			       u16 partition, u8 perf_mon_grp)
+{
+	const struct iommu_ops *ops;
+	struct group_device *device;
+	int ret;
+
+	mutex_lock(&group->mutex);
+	device = list_first_entry_or_null(&group->devices, typeof(*device),
+					  list);
+	if (!device) {
+		ret = -ENODEV;
+		goto out_unlock;
+	}
+
+	ops = dev_iommu_ops(device->dev);
+	if (!ops->set_group_qos_params) {
+		ret = -EOPNOTSUPP;
+		goto out_unlock;
+	}
+
+	ret = ops->set_group_qos_params(group, partition, perf_mon_grp);
+
+out_unlock:
+	mutex_unlock(&group->mutex);
+
+	return ret;
+}
+EXPORT_SYMBOL_NS_GPL(iommu_group_set_qos_params, "IOMMUFD_INTERNAL");
+
+/*
+ * iommu_group_get_qos_params() - Get the QoS parameters for a group
+ * @group: the iommu group.
+ * @partition: the partition label all traffic from the group uses.
+ * @perf_mon_grp: the performance label all traffic from the group uses.
+ *
+ * Return: 0 on success, or an error.
+ */
+int iommu_group_get_qos_params(struct iommu_group *group,
+			       u16 *partition, u8 *perf_mon_grp)
+{
+	const struct iommu_ops *ops;
+	struct group_device *device;
+	int ret;
+
+	mutex_lock(&group->mutex);
+	device = list_first_entry_or_null(&group->devices, typeof(*device),
+					  list);
+	if (!device) {
+		ret = -ENODEV;
+		goto out_unlock;
+	}
+
+	ops = dev_iommu_ops(device->dev);
+	if (!ops->get_group_qos_params) {
+		ret = -EOPNOTSUPP;
+		goto out_unlock;
+	}
+
+	ret = ops->get_group_qos_params(group, partition, perf_mon_grp);
+
+out_unlock:
+	mutex_unlock(&group->mutex);
+
+	return ret;
+}
+EXPORT_SYMBOL_NS_GPL(iommu_group_get_qos_params, "IOMMUFD_INTERNAL");

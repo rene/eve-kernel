@@ -59,6 +59,7 @@ struct arm_vsmmu;
 #define IDR1_SIDSIZE			GENMASK(5, 0)
 
 #define ARM_SMMU_IDR3			0xc
+#define IDR3_MPAM			(1 << 7)
 #define IDR3_FWB			(1 << 8)
 #define IDR3_RIL			(1 << 10)
 #define IDR3_BBM			GENMASK(12, 11)
@@ -170,6 +171,10 @@ struct arm_vsmmu;
 #define ARM_SMMU_PRIQ_IRQ_CFG1		0xd8
 #define ARM_SMMU_PRIQ_IRQ_CFG2		0xdc
 
+#define ARM_SMMU_MPAMIDR		0x130
+#define SMMU_MPAMIDR_PARTID_MAX		GENMASK(15, 0)
+#define SMMU_MPAMIDR_PMG_MAX		GENMASK(23, 16)
+
 #define ARM_SMMU_REG_SZ			0xe00
 
 /* Common MSI config fields */
@@ -271,6 +276,7 @@ static inline u32 arm_smmu_strtab_l2_idx(u32 sid)
 #define STRTAB_STE_1_MEV		(1UL << 19)
 #define STRTAB_STE_1_S2FWB		(1UL << 25)
 #define STRTAB_STE_1_S1STALLD		(1UL << 27)
+#define STRTAB_STE_1_S1MPAM		(1UL << 26)
 
 #define STRTAB_STE_1_EATS		GENMASK_ULL(29, 28)
 #define STRTAB_STE_1_EATS_ABT		0UL
@@ -300,6 +306,10 @@ static inline u32 arm_smmu_strtab_l2_idx(u32 sid)
 #define STRTAB_STE_2_S2R		(1UL << 58)
 
 #define STRTAB_STE_3_S2TTB_MASK		GENMASK_ULL(51, 4)
+
+#define STRTAB_STE_4_PARTID		GENMASK_ULL(31, 16)
+
+#define STRTAB_STE_5_PMG		GENMASK_ULL(7, 0)
 
 /* These bits can be controlled by userspace for STRTAB_STE_0_CFG_NESTED */
 #define STRTAB_STE_0_NESTING_ALLOWED                                         \
@@ -768,6 +778,7 @@ struct arm_smmu_device {
 #define ARM_SMMU_FEAT_HD		(1 << 22)
 #define ARM_SMMU_FEAT_S2FWB		(1 << 23)
 #define ARM_SMMU_FEAT_BBML2		(1 << 24)
+#define ARM_SMMU_FEAT_MPAM		(1 << 25)
 	u32				features;
 
 #define ARM_SMMU_OPT_SKIP_PREFETCH	(1 << 0)
@@ -852,6 +863,8 @@ struct arm_smmu_master {
 	bool				stall_enabled;
 	unsigned int			ssid_bits;
 	unsigned int			iopf_refcount;
+	u16				partid;
+	u8				pmg;
 };
 
 /* SMMU private data for an IOMMU domain */

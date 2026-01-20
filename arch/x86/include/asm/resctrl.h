@@ -44,7 +44,6 @@ DECLARE_PER_CPU(struct resctrl_pqr_state, pqr_state);
 
 extern bool rdt_alloc_capable;
 extern bool rdt_mon_capable;
-extern unsigned int rdt_mon_features;
 
 DECLARE_STATIC_KEY_FALSE(rdt_enable_key);
 DECLARE_STATIC_KEY_FALSE(rdt_alloc_enable_key);
@@ -82,21 +81,6 @@ static inline void resctrl_arch_disable_mon(void)
 {
 	static_branch_disable_cpuslocked(&rdt_mon_enable_key);
 	static_branch_dec_cpuslocked(&rdt_enable_key);
-}
-
-static inline bool resctrl_arch_is_llc_occupancy_enabled(void)
-{
-	return (rdt_mon_features & (1 << QOS_L3_OCCUP_EVENT_ID));
-}
-
-static inline bool resctrl_arch_is_mbm_total_enabled(void)
-{
-	return (rdt_mon_features & (1 << QOS_L3_MBM_TOTAL_EVENT_ID));
-}
-
-static inline bool resctrl_arch_is_mbm_local_enabled(void)
-{
-	return (rdt_mon_features & (1 << QOS_L3_MBM_LOCAL_EVENT_ID));
 }
 
 /*
@@ -207,8 +191,22 @@ static inline void resctrl_arch_mon_ctx_free(struct rdt_resource *r,
 					     enum resctrl_event_id evtid,
 					     void *ctx) { }
 
+static inline bool resctrl_arch_mon_can_overflow(void)
+{
+	return true;
+}
+
 void resctrl_cpu_detect(struct cpuinfo_x86 *c);
 
+static inline bool resctrl_arch_get_mb_uses_numa_nid(void)
+{
+	return false;
+}
+
+static inline int resctrl_arch_set_mb_uses_numa_nid(bool enabled)
+{
+	return -EOPNOTSUPP;
+}
 #else
 
 static inline void resctrl_arch_sched_in(struct task_struct *tsk) {}

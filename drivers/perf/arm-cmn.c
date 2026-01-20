@@ -65,7 +65,7 @@
 /* PMU registers occupy the 3rd 4KB page of each node's region */
 #define CMN_PMU_OFFSET			0x2000
 /* ...except when they don't :( */
-#define CMN_S3_DTM_OFFSET		0xa000
+#define CMN_S3_R1_DTM_OFFSET		0xa000
 #define CMN_S3_PMU_OFFSET		0xd900
 
 /* For most nodes, this is all there is */
@@ -233,6 +233,9 @@ enum cmn_revision {
 	REV_CMN700_R1P0,
 	REV_CMN700_R2P0,
 	REV_CMN700_R3P0,
+	REV_CMNS3_R0P0 = 0,
+	REV_CMNS3_R0P1,
+	REV_CMNS3_R1P0,
 	REV_CI700_R0P0 = 0,
 	REV_CI700_R1P0,
 	REV_CI700_R2P0,
@@ -425,8 +428,8 @@ static enum cmn_model arm_cmn_model(const struct arm_cmn *cmn)
 static int arm_cmn_pmu_offset(const struct arm_cmn *cmn, const struct arm_cmn_node *dn)
 {
 	if (cmn->part == PART_CMN_S3) {
-		if (dn->type == CMN_TYPE_XP)
-			return CMN_S3_DTM_OFFSET;
+		if (cmn->rev >= REV_CMNS3_R1P0 && dn->type == CMN_TYPE_XP)
+			return CMN_S3_R1_DTM_OFFSET;
 		return CMN_S3_PMU_OFFSET;
 	}
 	return CMN_PMU_OFFSET;
@@ -2544,6 +2547,7 @@ static int arm_cmn_probe(struct platform_device *pdev)
 	struct arm_cmn *cmn;
 	const char *name;
 	static atomic_t id;
+	struct resource *cfg;
 	int err, rootnode, this_id;
 
 	cmn = devm_kzalloc(&pdev->dev, sizeof(*cmn), GFP_KERNEL);
@@ -2559,7 +2563,16 @@ static int arm_cmn_probe(struct platform_device *pdev)
 		rootnode = arm_cmn600_acpi_probe(pdev, cmn);
 	} else {
 		rootnode = 0;
-		cmn->base = devm_platform_ioremap_resource(pdev, 0);
+
+		/*
+		 * Avoid requesting resources as the PMUs registers are
+		 * scattered through CMN, and may appear either side of
+		 * registers for other 'devices'. (e.g. the MPAM MSC controls).
+		 */
+		cfg = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+		if (!cfg)
+			return -EINVAL;
+		cmn->base = devm_ioremap(&pdev->dev, cfg->start, resource_size(cfg));
 		if (IS_ERR(cmn->base))
 			return PTR_ERR(cmn->base);
 		if (cmn->part == PART_CMN600)
