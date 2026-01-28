@@ -913,7 +913,7 @@ struct phylink_pcs *qcom_xpcs_create(struct device_node *np, phy_interface_t int
 out:
 	XPCSERR("qxpcs creation failed\n");
 	kfree(qxpcs);
-	return ret;
+	return ERR_PTR(ret);
 }
 EXPORT_SYMBOL_GPL(qcom_xpcs_create);
 
@@ -1019,7 +1019,7 @@ static int qcom_xpcs_probe(struct platform_device *pdev)
 
 	qxpcs = kzalloc(sizeof(*qxpcs), GFP_KERNEL);
 	if (!qxpcs)
-		return ERR_PTR(-ENOMEM);
+		return -ENOMEM;
 
 	qxpcs->addr = devm_platform_ioremap_resource_byname(pdev, "qxpcs");
 	if (IS_ERR_OR_NULL(qxpcs->addr)) {
