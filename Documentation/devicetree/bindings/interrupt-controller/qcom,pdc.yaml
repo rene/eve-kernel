@@ -26,6 +26,8 @@ properties:
   compatible:
     items:
       - enum:
+          - qcom,qcs615-pdc
+          - qcom,qcs8300-pdc
           - qcom,qdu1000-pdc
           - qcom,sa8775p-pdc
           - qcom,sc7180-pdc

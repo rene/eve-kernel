@@ -67,6 +67,7 @@ properties:
         - loongson,ls2k-dwmac
         - loongson,ls7a-dwmac
         - qcom,qcs404-ethqos
+        - qcom,qcs615-ethqos
         - qcom,sa8775p-ethqos
         - qcom,sc8280xp-ethqos
         - qcom,sm8150-ethqos
@@ -588,6 +589,7 @@ allOf:
               - ingenic,x1600-mac
               - ingenic,x1830-mac
               - ingenic,x2000-mac
+              - qcom,qcs615-ethqos
               - qcom,sa8775p-ethqos
               - qcom,sc8280xp-ethqos
               - snps,dwmac-3.50a
@@ -620,6 +622,12 @@ allOf:
           $ref: /schemas/types.yaml#/definitions/uint32
           enum: [1, 2, 4, 8, 16, 32]
 
+        snps,rx-prog-swap:
+          type: boolean
+          description:
+            Swap the sampling occasion on the RX side. This can be used for
+            tuning when connected to a third-party PHY.
+
         snps,no-pbl-x8:
           $ref: /schemas/types.yaml#/definitions/flag
           description:
@@ -645,6 +653,7 @@ allOf:
               - ingenic,x1830-mac
               - ingenic,x2000-mac
               - qcom,qcs404-ethqos
+              - qcom,qcs615-ethqos
               - qcom,sa8775p-ethqos
               - qcom,sc8280xp-ethqos
               - qcom,sm8150-ethqos

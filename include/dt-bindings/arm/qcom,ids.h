@@ -260,7 +260,9 @@
 #define QCOM_ID_IPQ5312			594
 #define QCOM_ID_IPQ5302			595
 #define QCOM_ID_IPQ5300			624
-
+#define QCOM_ID_QCS9100			667
+#define QCOM_ID_QCS9075			676
+#define QCOM_ID_QCS615			680
 /*
  * The board type and revision information, used by Qualcomm bootloaders and
  * DTS for older chipsets (qcom,board-id):

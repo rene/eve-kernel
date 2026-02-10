@@ -49,7 +49,12 @@ description: |
         msm8996
         msm8998
         qcs404
+        qcs615
+        qcs8300
         qcm2290
+        qcm6490
+        qcs9075
+        qcs9100
         qdu1000
         qrb2210
         qrb4210
@@ -390,6 +395,13 @@ properties:
               - qcom,qrb2210-rb1
           - const: qcom,qrb2210
           - const: qcom,qcm2290
+
+      - items:
+          - enum:
+              - fairphone,fp5
+              - qcom,qcm6490-idp
+              - qcom,qcs6490-rb3gen2
+          - const: qcom,qcm6490
 
       - description: Qualcomm Technologies, Inc. Distributed Unit 1000 platform
         items:
@@ -863,6 +875,16 @@ properties:
 
       - items:
           - enum:
+              - qcom,qcs615-ride
+          - const: qcom,qcs615
+
+      - items:
+          - enum:
+              - qcom,qcs8300-ride
+          - const: qcom,qcs8300
+
+      - items:
+          - enum:
               - qcom,sa8155p-adp
           - const: qcom,sa8155p
 
@@ -875,6 +897,22 @@ properties:
       - items:
           - enum:
               - qcom,sa8775p-ride
+              - qcom,sa8775p-ride-r3
+          - const: qcom,sa8775p
+
+      - items:
+          - enum:
+              - qcom,qcs9075-iq-9075-evk
+              - qcom,qcs9075-ride
+              - qcom,qcs9075-ride-r3
+          - const: qcom,qcs9075
+          - const: qcom,sa8775p
+
+      - items:
+          - enum:
+              - qcom,qcs9100-ride
+              - qcom,qcs9100-ride-r3
+          - const: qcom,qcs9100
           - const: qcom,sa8775p
 
       - items:
