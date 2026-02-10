@@ -270,6 +270,9 @@
 #define DWC3_GUCTL1_PARKMODE_DISABLE_HS		BIT(16)
 #define DWC3_GUCTL1_RESUME_OPMODE_HS_HOST	BIT(10)
 
+/* Global User Control Register */
+#define DWC3_GUCTL_RESBWHSEPS			BIT(16)
+
 /* Global Status Register */
 #define DWC3_GSTS_OTG_IP	BIT(10)
 #define DWC3_GSTS_BC_IP		BIT(9)
@@ -980,6 +983,28 @@ struct dwc3_scratchpad_array {
 	__le64	dma_adr[DWC3_MAX_HIBER_SCRATCHBUFS];
 };
 
+/*
+ * struct dwc3_glue_ops - The ops indicate the notifications that
+ *				need to be passed on to glue layer.
+ * @notify_cable_disconnect: Notify glue of cable removal
+ *				irrespective of host or device mode.
+ * @set_mode: Notify glue before mode change is about to happen.
+ * @mode_changed: Notify glue that mode change was done successfully
+ */
+struct dwc3_glue_ops {
+	int	(*notify_cable_disconnect)(void *glue_data);
+	void	(*set_mode)(void *glue_data, u32 desired_dr_role);
+	void	(*mode_changed)(void *glue_data, u32 current_dr_role);
+	void    (*notify_run_stop)(void *glue_data, bool enable);
+	void    (*post_conndone)(void *glue_data);
+};
+
+struct dwc3_glue_data {
+	void			*glue_data;
+	struct dwc3_glue_ops	*ops;
+	bool ignore_resets;
+};
+
 /**
  * struct dwc3 - representation of our controller
  * @drd_work: workqueue used for role swapping
@@ -1143,6 +1168,9 @@ struct dwc3_scratchpad_array {
  * @num_ep_resized: carries the current number endpoints which have had its tx
  *		    fifo resized.
  * @debug_root: root debugfs directory for this device to put its files in.
+ * @glue_data: Private data stored by core to be passed on to glue during
+ *		role switch notifications.
+ * @glue_ops: Store pointers to glue notifcation callbacks.
  */
 struct dwc3 {
 	struct work_struct	drd_work;
@@ -1367,6 +1395,12 @@ struct dwc3 {
 	int			last_fifo_depth;
 	int			num_ep_resized;
 	struct dentry		*debug_root;
+
+	void			*glue_data;
+	const struct dwc3_glue_ops *glue_ops;
+
+	bool			cable_disconnected;
+	bool			dwc3_guctl_resbwhseps_quirk;
 };
 
 #define INCRX_BURST_MODE 0
@@ -1577,9 +1611,54 @@ bool dwc3_has_imod(struct dwc3 *dwc);
 
 int dwc3_event_buffers_setup(struct dwc3 *dwc);
 void dwc3_event_buffers_cleanup(struct dwc3 *dwc);
-
+void dwc3_core_exit_mode(struct dwc3 *dwc);
+void dwc3_free_event_buffers(struct dwc3 *dwc);
 int dwc3_core_soft_reset(struct dwc3 *dwc);
 void dwc3_enable_susphy(struct dwc3 *dwc, bool enable);
+
+int dwc3_probe(struct dwc3 *dwc,
+			struct dwc3_glue_data *glue_data);
+void dwc3_remove(struct dwc3 *dwc);
+
+int dwc3_runtime_suspend(struct dwc3 *dwc);
+int dwc3_runtime_resume(struct dwc3 *dwc);
+int dwc3_runtime_idle(struct dwc3 *dwc);
+int dwc3_suspend(struct dwc3 *dwc);
+int dwc3_resume(struct dwc3 *dwc);
+void dwc3_complete(struct dwc3 *dwc);
+
+static inline int dwc3_notify_cable_disconnect(struct dwc3 *dwc)
+{
+	if (dwc->glue_ops && dwc->glue_ops->notify_cable_disconnect)
+		return dwc->glue_ops->notify_cable_disconnect(dwc->glue_data);
+	return 0;
+}
+
+static inline void dwc3_notify_set_mode(struct dwc3 *dwc,
+					u32 desired_dr_role)
+{
+	if (dwc->glue_ops && dwc->glue_ops->set_mode)
+		dwc->glue_ops->set_mode(dwc->glue_data, desired_dr_role);
+}
+
+static inline void dwc3_notify_mode_changed(struct dwc3 *dwc,
+					    u32 current_dr_role)
+{
+	if (dwc->glue_ops && dwc->glue_ops->mode_changed)
+		dwc->glue_ops->mode_changed(dwc->glue_data, current_dr_role);
+}
+
+static inline void dwc3_notify_run_stop(struct dwc3 *dwc, bool enable)
+{
+	if (dwc->glue_ops && dwc->glue_ops->notify_run_stop)
+		dwc->glue_ops->notify_run_stop(dwc->glue_data, enable);
+}
+
+static inline void dwc3_notify_post_conndone(struct dwc3 *dwc)
+{
+	if (dwc->glue_ops && dwc->glue_ops->post_conndone)
+		dwc->glue_ops->post_conndone(dwc->glue_data);
+}
 
 #if IS_ENABLED(CONFIG_USB_DWC3_HOST) || IS_ENABLED(CONFIG_USB_DWC3_DUAL_ROLE)
 int dwc3_host_init(struct dwc3 *dwc);

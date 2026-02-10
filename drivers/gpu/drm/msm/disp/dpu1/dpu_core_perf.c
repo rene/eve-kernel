@@ -32,6 +32,26 @@ enum dpu_perf_mode {
 };
 
 /**
+ * dpu_core_perf_adjusted_crtc_clk - Adjust given crtc clock rate according to
+ *   the perf clock factor.
+ * @crtc_clk_rate - Unadjusted crtc clock rate
+ * @perf_cfg: performance configuration
+ */
+u64 dpu_core_perf_adjusted_crtc_clk(u64 crtc_clk_rate,
+					const struct dpu_perf_cfg *perf_cfg)
+{
+	u32 clk_factor;
+
+	clk_factor = perf_cfg->clk_inefficiency_factor;
+	if (clk_factor) {
+		crtc_clk_rate *= clk_factor;
+		do_div(crtc_clk_rate, 100);
+	}
+
+	return crtc_clk_rate;
+}
+
+/**
  * _dpu_core_perf_calc_bw() - to calculate BW per crtc
  * @perf_cfg: performance configuration
  * @crtc: pointer to a crtc
@@ -76,7 +96,6 @@ static u64 _dpu_core_perf_calc_clk(const struct dpu_perf_cfg *perf_cfg,
 	struct dpu_plane_state *pstate;
 	struct drm_display_mode *mode;
 	u64 crtc_clk;
-	u32 clk_factor;
 
 	mode = &state->adjusted_mode;
 
@@ -90,13 +109,7 @@ static u64 _dpu_core_perf_calc_clk(const struct dpu_perf_cfg *perf_cfg,
 		crtc_clk = max(pstate->plane_clk, crtc_clk);
 	}
 
-	clk_factor = perf_cfg->clk_inefficiency_factor;
-	if (clk_factor) {
-		crtc_clk *= clk_factor;
-		do_div(crtc_clk, 100);
-	}
-
-	return crtc_clk;
+	return dpu_core_perf_adjusted_crtc_clk(crtc_clk, perf_cfg);
 }
 
 static struct dpu_kms *_dpu_crtc_get_kms(struct drm_crtc *crtc)

@@ -18,6 +18,7 @@
 #include <linux/sched/mm.h>
 #include <linux/slab.h>
 #include <linux/uio.h>
+#include <linux/version.h>
 
 #include "fscrypt_private.h"
 
@@ -94,6 +95,7 @@ int fscrypt_select_encryption_impl(struct fscrypt_info *ci)
 {
 	const struct inode *inode = ci->ci_inode;
 	struct super_block *sb = inode->i_sb;
+	unsigned int policy_flags = fscrypt_policy_flags(&ci->ci_policy);
 	struct blk_crypto_config crypto_cfg;
 	struct block_device **devs;
 	unsigned int num_devs;
@@ -119,8 +121,7 @@ int fscrypt_select_encryption_impl(struct fscrypt_info *ci)
 	 * doesn't work with IV_INO_LBLK_32. For now, simply exclude
 	 * IV_INO_LBLK_32 with blocksize != PAGE_SIZE from inline encryption.
 	 */
-	if ((fscrypt_policy_flags(&ci->ci_policy) &
-	     FSCRYPT_POLICY_FLAG_IV_INO_LBLK_32) &&
+	if ((policy_flags & FSCRYPT_POLICY_FLAG_IV_INO_LBLK_32) &&
 	    sb->s_blocksize != PAGE_SIZE)
 		return 0;
 
@@ -129,8 +130,15 @@ int fscrypt_select_encryption_impl(struct fscrypt_info *ci)
 	 * crypto configuration that the file would use.
 	 */
 	crypto_cfg.crypto_mode = ci->ci_mode->blk_crypto_mode;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+	crypto_cfg.data_unit_size = 1U << ci->ci_data_unit_bits;
+#else
 	crypto_cfg.data_unit_size = sb->s_blocksize;
+#endif
 	crypto_cfg.dun_bytes = fscrypt_get_dun_bytes(ci);
+	crypto_cfg.key_type =
+		(policy_flags & FSCRYPT_POLICY_FLAG_HW_WRAPPED_KEY) ?
+		BLK_CRYPTO_KEY_TYPE_HW_WRAPPED : BLK_CRYPTO_KEY_TYPE_STANDARD;
 
 	devs = fscrypt_get_devices(sb, &num_devs);
 	if (IS_ERR(devs))
@@ -151,12 +159,15 @@ out_free_devs:
 }
 
 int fscrypt_prepare_inline_crypt_key(struct fscrypt_prepared_key *prep_key,
-				     const u8 *raw_key,
+				     const u8 *raw_key, size_t raw_key_size,
+				     bool is_hw_wrapped,
 				     const struct fscrypt_info *ci)
 {
 	const struct inode *inode = ci->ci_inode;
 	struct super_block *sb = inode->i_sb;
 	enum blk_crypto_mode_num crypto_mode = ci->ci_mode->blk_crypto_mode;
+	enum blk_crypto_key_type key_type = is_hw_wrapped ?
+		BLK_CRYPTO_KEY_TYPE_HW_WRAPPED : BLK_CRYPTO_KEY_TYPE_STANDARD;
 	struct blk_crypto_key *blk_key;
 	struct block_device **devs;
 	unsigned int num_devs;
@@ -167,8 +178,14 @@ int fscrypt_prepare_inline_crypt_key(struct fscrypt_prepared_key *prep_key,
 	if (!blk_key)
 		return -ENOMEM;
 
-	err = blk_crypto_init_key(blk_key, raw_key, crypto_mode,
-				  fscrypt_get_dun_bytes(ci), sb->s_blocksize);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+	err = blk_crypto_init_key(blk_key, raw_key, raw_key_size, key_type,
+				  crypto_mode, fscrypt_get_dun_bytes(ci),
+				  1U << ci->ci_data_unit_bits);
+#else
+	err = blk_crypto_init_key(blk_key, raw_key, raw_key_size, key_type,
+				  crypto_mode, fscrypt_get_dun_bytes(ci), sb->s_blocksize);
+#endif
 	if (err) {
 		fscrypt_err(inode, "error %d initializing blk-crypto key", err);
 		goto fail;
@@ -224,6 +241,34 @@ void fscrypt_destroy_inline_crypt_key(struct super_block *sb,
 		kfree(devs);
 	}
 	kfree_sensitive(blk_key);
+}
+
+/*
+ * Ask the inline encryption hardware to derive the software secret from a
+ * hardware-wrapped key.  Returns -EOPNOTSUPP if hardware-wrapped keys aren't
+ * supported on this filesystem or hardware.
+ */
+int fscrypt_derive_sw_secret(struct super_block *sb,
+			     const u8 *wrapped_key, size_t wrapped_key_size,
+			     u8 sw_secret[BLK_CRYPTO_SW_SECRET_SIZE])
+{
+	int err;
+
+	/* The filesystem must be mounted with -o inlinecrypt. */
+	if (!(sb->s_flags & SB_INLINECRYPT)) {
+		fscrypt_warn(NULL,
+			     "%s: filesystem not mounted with inlinecrypt\n",
+			     sb->s_id);
+		return -EOPNOTSUPP;
+	}
+
+	err = blk_crypto_derive_sw_secret(sb->s_bdev, wrapped_key,
+					  wrapped_key_size, sw_secret);
+	if (err == -EOPNOTSUPP)
+		fscrypt_warn(NULL,
+			     "%s: block device doesn't support hardware-wrapped keys\n",
+			     sb->s_id);
+	return err;
 }
 
 bool __fscrypt_inode_uses_inline_crypto(const struct inode *inode)

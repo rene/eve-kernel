@@ -445,6 +445,9 @@ static int dwc3_usb_role_switch_set(struct usb_role_switch *sw,
 {
 	struct dwc3 *dwc = usb_role_switch_get_drvdata(sw);
 	u32 mode;
+	int ret = 0;
+
+	dwc->cable_disconnected = false;
 
 	switch (role) {
 	case USB_ROLE_HOST:
@@ -459,6 +462,19 @@ static int dwc3_usb_role_switch_set(struct usb_role_switch *sw,
 		else
 			mode = DWC3_GCTL_PRTCAP_DEVICE;
 		break;
+	}
+
+	/*
+	 * When cable is removed, the role changes to default mode.
+	 * In the case we are in device mode and removed the cable, the
+	 * glue needs to know that we are disconnected. It must not notify
+	 * the change of mode to default mode.
+	 */
+	if (role == USB_ROLE_NONE) {
+		dwc->cable_disconnected = true;
+		ret = dwc3_notify_cable_disconnect(dwc);
+		if (ret < 0)
+			return ret;
 	}
 
 	dwc3_set_mode(dwc, mode);

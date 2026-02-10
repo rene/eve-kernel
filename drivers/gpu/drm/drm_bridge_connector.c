@@ -113,15 +113,10 @@ static void drm_bridge_connector_hpd_cb(void *cb_data,
 	struct drm_bridge_connector *drm_bridge_connector = cb_data;
 	struct drm_connector *connector = &drm_bridge_connector->base;
 	struct drm_device *dev = connector->dev;
-	enum drm_connector_status old_status;
 
 	mutex_lock(&dev->mode_config.mutex);
-	old_status = connector->status;
 	connector->status = status;
 	mutex_unlock(&dev->mode_config.mutex);
-
-	if (old_status == status)
-		return;
 
 	drm_bridge_connector_hpd_notify(connector, status);
 
@@ -327,11 +322,11 @@ struct drm_connector *drm_bridge_connector_init(struct drm_device *drm,
 	bridge_connector->encoder = encoder;
 
 	/*
-	 * TODO: Handle doublescan_allowed, stereo_allowed and
-	 * ycbcr_420_allowed.
+	 * TODO: Handle doublescan_allowed and stereo_allowed.
 	 */
 	connector = &bridge_connector->base;
 	connector->interlace_allowed = true;
+	connector->ycbcr_420_allowed = true;
 
 	/*
 	 * Initialise connector status handling. First locate the furthest
@@ -344,6 +339,8 @@ struct drm_connector *drm_bridge_connector_init(struct drm_device *drm,
 	drm_for_each_bridge_in_chain(encoder, bridge) {
 		if (!bridge->interlace_allowed)
 			connector->interlace_allowed = false;
+		if (!bridge->ycbcr_420_allowed)
+			connector->ycbcr_420_allowed = false;
 
 		if (bridge->ops & DRM_BRIDGE_OP_EDID)
 			bridge_connector->bridge_edid = bridge;
