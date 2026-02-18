@@ -95,7 +95,7 @@ static const u16 pci_ext_cap_length[PCI_EXT_CAP_ID_MAX + 1] = {
 	[PCI_EXT_CAP_ID_LTR]	=	PCI_EXT_CAP_LTR_SIZEOF,
 	[PCI_EXT_CAP_ID_SECPCI]	=	0,	/* not yet */
 	[PCI_EXT_CAP_ID_PMUX]	=	0,	/* not yet */
-	[PCI_EXT_CAP_ID_PASID]	=	PCI_EXT_CAP_PASID_SIZEOF,	/* not yet */
+	[PCI_EXT_CAP_ID_PASID]	=	0,	/* not yet */
 	[PCI_EXT_CAP_ID_DVSEC]	=	0xFF,
 };
 
@@ -416,6 +416,7 @@ bool __vfio_pci_memory_enabled(struct vfio_pci_core_device *vdev)
 	return pdev->current_state < PCI_D3hot &&
 	       (pdev->no_command_memory || (cmd & PCI_COMMAND_MEMORY));
 }
+EXPORT_SYMBOL_GPL(__vfio_pci_memory_enabled);
 
 /*
  * Restore the *real* BARs after we detect a FLR or backdoor reset.
