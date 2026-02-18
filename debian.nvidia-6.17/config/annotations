@@ -30,6 +30,9 @@ CONFIG_ARM64_ERRATUM_2224489                    note<'Required for Grace enablem
 CONFIG_ARM64_ERRATUM_2253138                    policy<{'arm64': 'y'}>
 CONFIG_ARM64_ERRATUM_2253138                    note<'Required for Grace enablement'>
 
+CONFIG_ARM64_WORKAROUND_NC_TO_NGNRE             policy<{'arm64': 'y'}>
+CONFIG_ARM64_WORKAROUND_NC_TO_NGNRE             note<'Required for Vera enablement'>
+
 CONFIG_ARM64_WORKAROUND_TRBE_OVERWRITE_FILL_MODE policy<{'arm64': 'y'}>
 CONFIG_ARM64_WORKAROUND_TRBE_OVERWRITE_FILL_MODE note<'Required for Grace enablement'>
 
@@ -96,6 +99,9 @@ CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE         note<'LP: #2028576: Perf governo
 CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL           policy<{'amd64': 'n', 'arm64': 'n'}>
 CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL           note<'LP: #2028576: Perf governor required for NVIDIA workloads'>
 
+CONFIG_CXL_MEM_RAW_COMMANDS                     policy<{'amd64': 'n', 'arm64': 'y'}>
+CONFIG_CXL_MEM_RAW_COMMANDS                     note<'Enable CXL raw commands for memory devices'>
+
 CONFIG_DRM_NOUVEAU                              policy<{'amd64': 'n', 'arm64': 'n'}>
 CONFIG_DRM_NOUVEAU                              note<'Disable nouveau for NVIDIA kernels'>
 
@@ -110,6 +116,9 @@ CONFIG_DRM_NOUVEAU_SVM                          note<'Disable nouveau for NVIDIA
 
 CONFIG_EFI_CAPSULE_LOADER                       policy<{'amd64': 'm', 'arm64': 'y'}>
 CONFIG_EFI_CAPSULE_LOADER                       note<'LP: #2067111'>
+
+CONFIG_EFI_SECRET                               policy<{'amd64': 'm', 'arm64': 'm'}>
+CONFIG_EFI_SECRET                               note<'Required for confidential computing guest secrets'>
 
 CONFIG_ETM4X_IMPDEF_FEATURE                     policy<{'arm64': 'n'}>
 CONFIG_ETM4X_IMPDEF_FEATURE                     note<'Required for Grace enablement'>
@@ -206,6 +215,7 @@ CONFIG_ARM64_MPAM_DRIVER_DEBUG                  policy<{'amd64': '-', 'arm64': '
 CONFIG_ARM64_MPAM_RESCTRL_FS                    policy<{'arm64': 'y'}>
 CONFIG_ARM_CPU_RESCTRL                          policy<{'amd64': '-', 'arm64': '-'}>
 CONFIG_ARM_FFA_TRANSPORT                        policy<{'arm64': 'y'}>
+CONFIG_ARM_LFA                                  policy<{'arm64': 'y'}>
 CONFIG_ARM_SMMU_V3_IOMMUFD                      policy<{'arm64': 'y'}>
 CONFIG_AS_VERSION                               policy<{'amd64': '24200', 'arm64': '24200'}>
 CONFIG_AX88796B_RUST_PHY                        policy<{'amd64': '-', 'arm64': '-'}>
@@ -229,10 +239,15 @@ CONFIG_EC_HUAWEI_GAOKUN                         policy<{'arm64': 'n'}>
 CONFIG_GCC_VERSION                              policy<{'amd64': '130300', 'arm64': '130300'}>
 CONFIG_HAVE_RUST                                policy<{'amd64': 'y', 'arm64': '-'}>
 CONFIG_IOMMUFD_VFIO_CONTAINER                   policy<{'arm64': 'y'}>
+CONFIG_KVM_GENERIC_MEMORY_ATTRIBUTES            policy<{'amd64': 'y', 'arm64': 'y'}>
+CONFIG_KVM_GENERIC_PRIVATE_MEM                  policy<{'amd64': 'y', 'arm64': 'y'}>
+CONFIG_KVM_PRIVATE_MEM                          policy<{'amd64': 'y', 'arm64': 'y'}>
 CONFIG_LD_VERSION                               policy<{'amd64': '24200', 'arm64': '24200'}>
 CONFIG_MTD_NAND_CORE                            policy<{'amd64': 'm', 'arm64': 'y'}>
 CONFIG_NVGRACE_EGM                              policy<{'arm64': 'm'}>
 CONFIG_NVIDIA_FFA_EC                            policy<{'arm64': 'y'}>
+CONFIG_NVIDIA_TEGRA410_C2C_PMU                  policy<{'arm64': 'm'}>
+CONFIG_NVIDIA_TEGRA410_CMEM_LATENCY_PMU         policy<{'arm64': 'm'}>
 CONFIG_PAHOLE_VERSION                           policy<{'amd64': '125', 'arm64': '125'}>
 CONFIG_PINCTRL_MT8901                           policy<{'arm64': 'y'}>
 CONFIG_PROC_CPU_RESCTRL                         policy<{'amd64': 'y', 'arm64': 'y'}>

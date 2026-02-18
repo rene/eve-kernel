@@ -8,11 +8,7 @@
 #include <linux/egm.h>
 #include <linux/nvgrace-egm.h>
 #include <linux/vmalloc.h>
-
-#ifdef CONFIG_MEMORY_FAILURE
-#include <linux/bitmap.h>
 #include <linux/memory-failure.h>
-#endif
 
 #define MAX_EGM_NODES 256
 
@@ -31,10 +27,7 @@ struct egm_region {
 	struct cdev cdev;
 	struct list_head gpus;
 	DECLARE_HASHTABLE(htbl, 0x10);
-#ifdef CONFIG_MEMORY_FAILURE
 	struct pfn_address_space pfn_address_space;
-	bool pfn_space_registered;
-#endif
 };
 
 struct h_node {
@@ -46,77 +39,97 @@ static dev_t dev;
 static struct class *class;
 static struct list_head egm_list;
 
-#ifdef CONFIG_MEMORY_FAILURE
-static void
-nvgrace_egm_pfn_memory_failure(struct pfn_address_space *pfn_space,
-			       unsigned long pfn)
+static int pfn_memregion_offset(struct egm_region *region,
+				unsigned long pfn,
+				pgoff_t *pfn_offset_in_region)
 {
-	struct egm_region *region =
-		container_of(pfn_space, struct egm_region, pfn_address_space);
-	unsigned long mem_offset = PFN_PHYS(pfn - pfn_space->node.start);
-	struct h_node *ecc;
+	unsigned long start_pfn, num_pages;
 
-	if (mem_offset >= region->egmlength)
-		return;
+	start_pfn = PHYS_PFN(region->egmphys);
+	num_pages = region->egmlength >> PAGE_SHIFT;
 
-	/*
-	 * MM has called to notify a poisoned page. Track that in the hastable.
-	 */
-	ecc = (struct h_node *)(vzalloc(sizeof(struct h_node)));
-	if (!ecc)
-		return;  /* Silently fail on allocation error */
-	ecc->mem_offset = mem_offset;
-	hash_add(region->htbl, &ecc->node, ecc->mem_offset);
+	if (pfn < start_pfn || pfn >= start_pfn + num_pages)
+		return -EFAULT;
+
+	*pfn_offset_in_region = pfn - start_pfn;
+
+	return 0;
 }
 
-struct pfn_address_space_ops nvgrace_egm_pas_ops = {
-	.failure = nvgrace_egm_pfn_memory_failure,
-};
-
-static int
-nvgrace_egm_register_pfn_range(struct egm_region *region,
-			       struct vm_area_struct *vma)
+static int track_ecc_offset(struct egm_region *region,
+			    unsigned long mem_offset)
 {
-	unsigned long nr_pages = region->egmlength >> PAGE_SHIFT;
+	struct h_node *cur_page, *ecc_page;
+	unsigned long bkt;
 
-	region->pfn_address_space.node.start = vma->vm_pgoff;
-	region->pfn_address_space.node.last = vma->vm_pgoff + nr_pages - 1;
-	region->pfn_address_space.ops = &nvgrace_egm_pas_ops;
-	region->pfn_address_space.mapping = vma->vm_file->f_mapping;
-
-	return register_pfn_address_space(&region->pfn_address_space);
-}
-
-static vm_fault_t nvgrace_egm_fault(struct vm_fault *vmf)
-{
-	unsigned long mem_offset = PFN_PHYS(vmf->pgoff - vmf->vma->vm_pgoff);
-	struct egm_region *region = vmf->vma->vm_file->private_data;
-	struct h_node *cur;
-
-	/*
-	 * Check if the page is poisoned.
-	 */
-	if (mem_offset < region->egmlength) {
-		hash_for_each_possible(region->htbl, cur, node, mem_offset) {
-			if (cur->mem_offset == mem_offset)
-				return VM_FAULT_HWPOISON;
-		}
+	hash_for_each(region->htbl, bkt, cur_page, node) {
+		if (cur_page->mem_offset == mem_offset)
+			return 0;
 	}
 
-	return VM_FAULT_ERROR;
+	ecc_page = (struct h_node *)(vzalloc(sizeof(struct h_node)));
+	if (!ecc_page)
+		return -ENOMEM;
+
+	ecc_page->mem_offset = mem_offset;
+
+	hash_add(region->htbl, &ecc_page->node, ecc_page->mem_offset);
+
+	return 0;
 }
 
-static const struct vm_operations_struct nvgrace_egm_mmap_ops = {
-	 .fault = nvgrace_egm_fault,
-};
+static int nvgrace_egm_pfn_to_vma_pgoff(struct vm_area_struct *vma,
+					unsigned long pfn,
+					pgoff_t *pgoff)
+{
+	struct egm_region *region = vma->vm_file->private_data;
+	pgoff_t vma_offset_in_region = vma->vm_pgoff &
+		((1U << (VFIO_PCI_OFFSET_SHIFT - PAGE_SHIFT)) - 1);
+	pgoff_t pfn_offset_in_region;
+	int ret;
 
-#endif
+	ret = pfn_memregion_offset(region, pfn, &pfn_offset_in_region);
+	if (ret)
+		return ret;
+
+	/* Ensure PFN is not before VMA's start within the region */
+	if (pfn_offset_in_region < vma_offset_in_region)
+		return -EFAULT;
+
+	/* Calculate offset from VMA start */
+	*pgoff = vma->vm_pgoff +
+		 (pfn_offset_in_region - vma_offset_in_region);
+
+	/* Track and save the poisoned offset */
+	return track_ecc_offset(region, *pgoff << PAGE_SHIFT);
+}
+
+static int
+nvgrace_egm_vfio_pci_register_pfn_range(struct inode *inode,
+					struct egm_region *region)
+{
+	int ret;
+	unsigned long pfn, nr_pages;
+
+	pfn = PHYS_PFN(region->egmphys);
+	nr_pages = region->egmlength >> PAGE_SHIFT;
+
+	region->pfn_address_space.node.start = pfn;
+	region->pfn_address_space.node.last = pfn + nr_pages - 1;
+	region->pfn_address_space.mapping = inode->i_mapping;
+	region->pfn_address_space.pfn_to_vma_pgoff = nvgrace_egm_pfn_to_vma_pgoff;
+
+	ret = register_pfn_address_space(&region->pfn_address_space);
+
+	return ret;
+}
 
 static int nvgrace_egm_open(struct inode *inode, struct file *file)
 {
 	void *memaddr;
 	struct egm_region *region = container_of(inode->i_cdev,
 						 struct egm_region, cdev);
+	int ret;
 
 	if (atomic_inc_return(&region->open_count) > 1)
 		return 0;
@@ -131,6 +144,12 @@ static int nvgrace_egm_open(struct inode *inode, struct file *file)
 	memunmap(memaddr);
 	file->private_data = region;
 
+	ret = nvgrace_egm_vfio_pci_register_pfn_range(inode, region);
+	if (ret && ret != -EOPNOTSUPP) {
+		file->private_data = NULL;
+		return ret;
+	}
+
 	return 0;
 }
 
@@ -140,12 +159,8 @@ static int nvgrace_egm_release(struct inode *inode, struct file *file)
 						 struct egm_region, cdev);
 
 	if (atomic_dec_and_test(&region->open_count)) {
-#ifdef CONFIG_MEMORY_FAILURE
-		if (region->pfn_space_registered) {
-			unregister_pfn_address_space(&region->pfn_address_space);
-			region->pfn_space_registered = false;
-		}
-#endif
+		unregister_pfn_address_space(&region->pfn_address_space);
+
 		file->private_data = NULL;
 	}
 
@@ -164,19 +179,6 @@ static int nvgrace_egm_mmap(struct file *file, struct vm_area_struct *vma)
 			      PHYS_PFN(region->egmphys),
 			      (vma->vm_end - vma->vm_start),
 			      vma->vm_page_prot);
-	if (ret)
-		return ret;
-
-	vma->vm_pgoff = PHYS_PFN(region->egmphys);
-
-#ifdef CONFIG_MEMORY_FAILURE
-	vma->vm_ops = &nvgrace_egm_mmap_ops;
-
-	ret = nvgrace_egm_register_pfn_range(region, vma);
-	if (ret == 0)
-		region->pfn_space_registered = true;
-#endif
-
 	return ret;
 }
 
@@ -465,9 +467,6 @@ int register_egm_node(struct pci_dev *pdev)
 	region->egmpxm = egmpxm;
 
 	hash_init(region->htbl);
-#ifdef CONFIG_MEMORY_FAILURE
-	region->pfn_space_registered = false;
-#endif
 	INIT_LIST_HEAD(&region->gpus);
 
 	atomic_set(&region->open_count, 0);
