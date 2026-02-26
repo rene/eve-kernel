@@ -1773,3 +1773,8 @@
 &xo_board_clk {
 	clock-frequency = <38400000>;
 };
+
+&cryptobam {
+	num-channels = <31>;
+	qcom,num-ees = <4>;
+};
