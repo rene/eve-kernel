@@ -8,6 +8,7 @@
 #include <linux/ctype.h>
 #include <net/ipv6.h>
 #include "mt7925.h"
+#include "regd.h"
 #include "mcu.h"
 #include "mac.h"
 
@@ -312,7 +313,6 @@ void mt7925_set_stream_he_eht_caps(struct mt792x_phy *phy)
 int __mt7925_start(struct mt792x_phy *phy)
 {
 	struct mt76_phy *mphy = phy->mt76;
-	struct mt792x_dev *dev = phy->dev;
 	int err;
 
 	err = mt7925_mcu_set_channel_domain(mphy);
@@ -322,13 +322,6 @@ int __mt7925_start(struct mt792x_phy *phy)
 	err = mt7925_mcu_set_rts_thresh(phy, 0x92b);
 	if (err)
 		return err;
-
-	if (!dev->sar_inited) {
-		err = mt7925_set_tx_sar_pwr(mphy->hw, NULL);
-		if (err)
-			return err;
-		dev->sar_inited = true;
-	}
 
 	mt792x_mac_reset_counters(phy);
 	set_bit(MT76_STATE_RUNNING, &mphy->state);
@@ -1374,31 +1367,14 @@ void mt7925_mlo_pm_work(struct work_struct *work)
 					    mt7925_mlo_pm_iter, dev);
 }
 
-static bool is_valid_alpha2(const char *alpha2)
-{
-	if (!alpha2)
-		return false;
-
-	if (alpha2[0] == '0' && alpha2[1] == '0')
-		return true;
-
-	if (isalpha(alpha2[0]) && isalpha(alpha2[1]))
-		return true;
-
-	return false;
-}
-
 void mt7925_scan_work(struct work_struct *work)
 {
 	struct mt792x_phy *phy;
-	struct wiphy *wiphy;
 
 	phy = (struct mt792x_phy *)container_of(work, struct mt792x_phy,
 						scan_work.work);
-	wiphy = phy->mt76->hw->wiphy;
 
 	while (true) {
-		struct mt76_dev *mdev = &phy->dev->mt76;
 		struct sk_buff *skb;
 		struct tlv *tlv;
 		int tlv_len;
@@ -1429,15 +1405,7 @@ void mt7925_scan_work(struct work_struct *work)
 			case UNI_EVENT_SCAN_DONE_CHNLINFO:
 				evt = (struct mt7925_mcu_scan_chinfo_event *)tlv->data;
 
-				if (!is_valid_alpha2(evt->alpha2))
-					break;
-
-				mt7925_regd_be_ctrl(phy->dev, evt->alpha2);
-
-				if (!memcmp(mdev->alpha2, evt->alpha2, 2))
-					break;
-
-				regulatory_hint(wiphy, evt->alpha2);
+				mt7925_regd_change(phy, evt->alpha2);
 
 				break;
 			case UNI_EVENT_SCAN_DONE_NLO:
@@ -1738,13 +1706,7 @@ static int mt7925_set_sar_specs(struct ieee80211_hw *hw,
 	int err;
 
 	mt792x_mutex_acquire(dev);
-	err = mt7925_mcu_set_clc(dev, dev->mt76.alpha2,
-				 dev->country_ie_env);
-	if (err < 0)
-		goto out;
-
 	err = mt7925_set_tx_sar_pwr(hw, sar);
-out:
 	mt792x_mutex_release(dev);
 
 	return err;
