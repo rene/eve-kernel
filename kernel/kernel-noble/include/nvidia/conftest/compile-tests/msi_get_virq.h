@@ -1,0 +1,1 @@
+#define NV_MSI_GET_VIRQ_PRESENT

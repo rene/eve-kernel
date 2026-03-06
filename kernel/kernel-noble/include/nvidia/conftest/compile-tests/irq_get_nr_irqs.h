@@ -1,0 +1,1 @@
+#undef NV_IRQ_GET_NR_IRQS_PRESENT

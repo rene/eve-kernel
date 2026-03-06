@@ -1,0 +1,1 @@
+#undef NV_FILE_STRUCT_HAS_F_REF

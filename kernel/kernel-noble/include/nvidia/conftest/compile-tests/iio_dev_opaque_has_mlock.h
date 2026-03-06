@@ -1,0 +1,1 @@
+#define NV_IIO_DEV_OPAQUE_HAS_LOCK

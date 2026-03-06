@@ -1,0 +1,14 @@
+menuconfig NVIDIA_PCIE_TEGRA264_ST
+	bool "NVIDIA PCIe Tegra 264 external driver"
+	depends on PCI
+	select PCIE_TEGRA264
+	select PCIE_TEGRA264_EP
+	select PCIE_TEGRA194_EP
+	help
+	  Enable support for NVIDIA PCIe Tegra264 driver built-in in the kernel.
+
+config PCIE_TEGRA264
+	tristate "PCIE_TEGRA264"
+
+config PCIE_TEGRA264_EP
+	tristate "PCIE_TEGRA264_EP"

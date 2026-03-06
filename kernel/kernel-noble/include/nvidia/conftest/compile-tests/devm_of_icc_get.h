@@ -1,0 +1,1 @@
+#define NV_DEVM_ICC_GET_PRESENT

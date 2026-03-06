@@ -1,0 +1,1 @@
+#define NV_DEVFREQ_HAS_FREQ_TABLE

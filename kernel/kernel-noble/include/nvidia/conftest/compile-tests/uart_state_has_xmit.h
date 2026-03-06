@@ -1,0 +1,1 @@
+#define NV_UART_STATE_HAS_XMIT

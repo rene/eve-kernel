@@ -1,0 +1,1 @@
+#define NV_NO_LLSEEK_PRESENT

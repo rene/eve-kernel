@@ -1,0 +1,1 @@
+#undef NV___ASSIGN_STR_HAS_NO_SRC_ARG
