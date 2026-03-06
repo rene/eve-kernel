@@ -54,7 +54,9 @@ obj-m += nvpmodel/
 obj-m += nvtzvault/
 obj-m += nv-p2p/
 ifdef CONFIG_PCI
+ifndef CONFIG_EVEOS
 obj-m += pci/
+endif
 ifdef CONFIG_TTY
 obj-m += tty/
 endif
