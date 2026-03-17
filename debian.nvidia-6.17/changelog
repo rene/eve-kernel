@@ -1,3 +1,23 @@
+linux-nvidia-6.17 (6.17.0-1014.14) noble; urgency=medium
+
+  * noble/linux-nvidia-6.17: 6.17.0-1014.14 -proposed tracker (LP: #2144672)
+
+  * Miscellaneous upstream changes
+    - apparmor: validate DFA start states are in bounds in unpack_pdb
+    - apparmor: fix memory leak in verify_header
+    - apparmor: replace recursive profile removal with iterative approach
+    - apparmor: fix: limit the number of levels of policy namespaces
+    - apparmor: fix side-effect bug in match_char() macro usage
+    - apparmor: fix missing bounds check on DEFAULT table in verify_dfa()
+    - apparmor: Fix double free of ns_name in aa_replace_profiles()
+    - apparmor: fix unprivileged local user can do privileged policy
+      management
+    - apparmor: fix differential encoding verification
+    - apparmor: fix race on rawdata dereference
+    - apparmor: fix race between freeing data and fs accessing it
+
+ -- Jacob Martin <jacob.martin@canonical.com>  Tue, 17 Mar 2026 12:36:56 -0500
+
 linux-nvidia-6.17 (6.17.0-1012.12) noble; urgency=medium
 
   * noble/linux-nvidia-6.17: 6.17.0-1012.12 -proposed tracker (LP: #2142887)
