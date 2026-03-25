@@ -1253,10 +1253,6 @@ int msm_drv_probe(struct device *master_dev,
 			return ret;
 	}
 
-	ret = add_gpu_components(master_dev, &match);
-	if (ret)
-		return ret;
-
 	/* on all devices that I am aware of, iommu's which can map
 	 * any address the cpu can see are used:
 	 */
@@ -1325,7 +1321,6 @@ static int __init msm_drm_register(void)
 	msm_dsi_register();
 	msm_hdmi_register();
 	msm_dp_register();
-	adreno_register();
 	msm_mdp4_register();
 	msm_mdss_register();
 	return platform_driver_register(&msm_platform_driver);
@@ -1339,7 +1334,6 @@ static void __exit msm_drm_unregister(void)
 	msm_mdp4_unregister();
 	msm_dp_unregister();
 	msm_hdmi_unregister();
-	adreno_unregister();
 	msm_dsi_unregister();
 	msm_mdp_unregister();
 	msm_dpu_unregister();

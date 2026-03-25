@@ -147,4 +147,5 @@ msm-$(CONFIG_DRM_MSM_DSI_14NM_PHY) += dsi/phy/dsi_phy_14nm.o
 msm-$(CONFIG_DRM_MSM_DSI_10NM_PHY) += dsi/phy/dsi_phy_10nm.o
 msm-$(CONFIG_DRM_MSM_DSI_7NM_PHY) += dsi/phy/dsi_phy_7nm.o
 
-obj-$(CONFIG_DRM_MSM)	+= msm.o
+obj-$(CONFIG_DRM_MSM)	+= msm_display.o
+msm_display-y := $(msm-y)
