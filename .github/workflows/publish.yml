@@ -11,10 +11,6 @@ concurrency:
 
 jobs:
     build:
-        strategy:
-            fail-fast: false
-            max-parallel: 3
-
         runs-on: [runner-xl, X64, Linux]
 
         steps:
@@ -30,7 +26,7 @@ jobs:
                   username: ${{ secrets.DOCKERHUB_PULL_USER }}
                   password: ${{ secrets.DOCKERHUB_PULL_TOKEN }}
 
-            - name: Build kernel flavor ${{ matrix.flavor }} from ${{ github.ref_name }}
+            - name: Build kernel from ${{ github.ref_name }}
               run: |
                   make -f Makefile.eve \
                   BRANCH=${{ github.ref_name }} \
@@ -42,8 +38,25 @@ jobs:
                   username: ${{ secrets.RELEASE_DOCKERHUB_ACCOUNT }}
                   password: ${{ secrets.RELEASE_DOCKERHUB_TOKEN }}
 
-            - name: Push ${{ matrix.flavor }} from ${{ github.ref_name }}
+            - name: Push from ${{ github.ref_name }}
               run: |
                   make -f Makefile.eve \
-                  BRANCH=${{ github.ref_name }} \
-                  push-gcc
+                    BRANCH=${{ github.ref_name }} \
+                    push-gcc
+
+            - name: Clean
+              if: always()
+              run: |
+                  make -f Makefile.eve \
+                    BRANCH=${{ github.ref_name }} \
+                    clean-gcc
+                  if docker ps -q -f name=linuxkit-builder | grep -q .; then
+                      echo "=== BuildKit disk usage before prune ==="
+                      docker exec linuxkit-builder buildctl du | tail -n 2
+                      echo "=== Reclaiming ==="
+                      docker exec linuxkit-builder buildctl prune --keep-storage "${BUILDKIT_KEEP_STORAGE_MB:-32000}" | tail -n 1
+                      echo "=== BuildKit disk usage after prune ==="
+                      docker exec linuxkit-builder buildctl du | tail -n 2
+                  else
+                      echo "linuxkit-builder container not running; skipping BuildKit cleanup."
+                  fi
