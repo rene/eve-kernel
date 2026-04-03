@@ -28,6 +28,7 @@
 #include <linux/mm_inline.h>
 #include <linux/page_ext.h>
 #include <linux/page_owner.h>
+#include <linux/tick.h>
 
 #include "internal.h"
 
@@ -194,6 +195,22 @@ void fold_vm_numa_events(void)
 #endif
 
 #ifdef CONFIG_SMP
+static DEFINE_PER_CPU_ALIGNED(bool, vmstat_dirty);
+
+static inline void vmstat_mark_dirty(void)
+{
+	this_cpu_write(vmstat_dirty, true);
+}
+
+static inline void vmstat_clear_dirty(void)
+{
+	this_cpu_write(vmstat_dirty, false);
+}
+
+static inline bool is_vmstat_dirty(void)
+{
+	return this_cpu_read(vmstat_dirty);
+}
 
 int calculate_pressure_threshold(struct zone *zone)
 {
@@ -367,6 +384,8 @@ void __mod_zone_page_state(struct zone *zone, enum zone_stat_item item,
 	__this_cpu_write(*p, x);
 
 	preempt_enable_nested();
+
+	vmstat_mark_dirty();
 }
 EXPORT_SYMBOL(__mod_zone_page_state);
 
@@ -403,6 +422,8 @@ void __mod_node_page_state(struct pglist_data *pgdat, enum node_stat_item item,
 	__this_cpu_write(*p, x);
 
 	preempt_enable_nested();
+
+	vmstat_mark_dirty();
 }
 EXPORT_SYMBOL(__mod_node_page_state);
 
@@ -590,6 +611,7 @@ static inline void mod_zone_state(struct zone *zone,
 
 	if (z)
 		zone_page_state_add(z, zone, item);
+	vmstat_mark_dirty();
 }
 
 void mod_zone_page_state(struct zone *zone, enum zone_stat_item item,
@@ -658,6 +680,7 @@ static inline void mod_node_state(struct pglist_data *pgdat,
 
 	if (z)
 		node_page_state_add(z, pgdat, item);
+	vmstat_mark_dirty();
 }
 
 void mod_node_page_state(struct pglist_data *pgdat, enum node_stat_item item,
@@ -811,6 +834,14 @@ static int refresh_cpu_vm_stats(bool do_pagesets)
 	int global_zone_diff[NR_VM_ZONE_STAT_ITEMS] = { 0, };
 	int global_node_diff[NR_VM_NODE_STAT_ITEMS] = { 0, };
 	int changes = 0;
+
+	/*
+	 * Clear vmstat_dirty before clearing the percpu vmstats.
+	 * If interrupts are enabled, it is possible that an interrupt
+	 * or another task modifies a percpu vmstat, which will
+	 * set vmstat_dirty to true.
+	 */
+	vmstat_clear_dirty();
 
 	for_each_populated_zone(zone) {
 		struct per_cpu_zonestat __percpu *pzstats = zone->per_cpu_zonestats;
@@ -1711,7 +1742,6 @@ static void zoneinfo_show_print(struct seq_file *m, pg_data_t *pgdat,
 			   zone_page_state(zone, i));
 
 #ifdef CONFIG_NUMA
-	fold_vm_zone_numa_events(zone);
 	for (i = 0; i < NR_VM_NUMA_EVENT_ITEMS; i++)
 		seq_printf(m, "\n      %-12s %lu", numa_stat_name(i),
 			   zone_numa_event_state(zone, i));
@@ -1942,57 +1972,48 @@ static void vmstat_update(struct work_struct *w)
 }
 
 /*
- * Check if the diffs for a certain cpu indicate that
- * an update is needed.
- */
-static bool need_update(int cpu)
-{
-	pg_data_t *last_pgdat = NULL;
-	struct zone *zone;
-
-	for_each_populated_zone(zone) {
-		struct per_cpu_zonestat *pzstats = per_cpu_ptr(zone->per_cpu_zonestats, cpu);
-		struct per_cpu_nodestat *n;
-
-		/*
-		 * The fast way of checking if there are any vmstat diffs.
-		 */
-		if (memchr_inv(pzstats->vm_stat_diff, 0, sizeof(pzstats->vm_stat_diff)))
-			return true;
-
-		if (last_pgdat == zone->zone_pgdat)
-			continue;
-		last_pgdat = zone->zone_pgdat;
-		n = per_cpu_ptr(zone->zone_pgdat->per_cpu_nodestats, cpu);
-		if (memchr_inv(n->vm_node_stat_diff, 0, sizeof(n->vm_node_stat_diff)))
-			return true;
-	}
-	return false;
-}
-
-/*
  * Switch off vmstat processing and then fold all the remaining differentials
  * until the diffs stay at zero. The function is used by NOHZ and can only be
  * invoked when tick processing is not active.
  */
 void quiet_vmstat(void)
 {
+	struct delayed_work *dw;
+
 	if (system_state != SYSTEM_RUNNING)
 		return;
 
-	if (!delayed_work_pending(this_cpu_ptr(&vmstat_work)))
+	if (!is_vmstat_dirty())
 		return;
 
-	if (!need_update(smp_processor_id()))
-		return;
+	refresh_cpu_vm_stats(false);
 
 	/*
-	 * Just refresh counters and do not care about the pending delayed
-	 * vmstat_update. It doesn't fire that often to matter and canceling
-	 * it would be too expensive from this path.
-	 * vmstat_shepherd will take care about that for us.
+	 * If the tick is stopped, cancel any delayed work to avoid
+	 * interruptions to this CPU in the future.
 	 */
+	dw = &per_cpu(vmstat_work, smp_processor_id());
+	if (delayed_work_pending(dw) && tick_nohz_tick_stopped())
+		cancel_delayed_work(dw);
+}
+
+/*
+ * Synchronously quiet vmstat so the work is guaranteed not to run on return.
+ */
+void quiet_vmstat_sync(void)
+{
+	cancel_delayed_work_sync(this_cpu_ptr(&vmstat_work));
 	refresh_cpu_vm_stats(false);
+}
+
+/*
+ * Report on whether vmstat processing is quiesced on the core currently:
+ * no vmstat worker running and no vmstat updates to perform.
+ */
+bool vmstat_idle(void)
+{
+	return !delayed_work_pending(this_cpu_ptr(&vmstat_work)) &&
+		!per_cpu(vmstat_dirty, smp_processor_id());
 }
 
 /*
@@ -2014,7 +2035,10 @@ static void vmstat_shepherd(struct work_struct *w)
 	for_each_online_cpu(cpu) {
 		struct delayed_work *dw = &per_cpu(vmstat_work, cpu);
 
-		if (!delayed_work_pending(dw) && need_update(cpu))
+		if (tick_nohz_tick_stopped_cpu(cpu))
+			continue;
+
+		if (!delayed_work_pending(dw) && per_cpu(vmstat_dirty, cpu))
 			queue_delayed_work_on(cpu, mm_percpu_wq, dw, 0);
 
 		cond_resched();

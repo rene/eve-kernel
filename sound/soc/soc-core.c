@@ -937,9 +937,6 @@ static int soc_dai_link_sanity_check(struct snd_soc_card *card,
 void snd_soc_remove_pcm_runtime(struct snd_soc_card *card,
 				struct snd_soc_pcm_runtime *rtd)
 {
-	if (!rtd)
-		return;
-
 	lockdep_assert_held(&client_mutex);
 
 	/* release machine specific resources */
@@ -1021,9 +1018,6 @@ int snd_soc_add_pcm_runtime(struct snd_soc_card *card,
 	for_each_link_platforms(dai_link, i, platform) {
 		for_each_component(component) {
 			if (!snd_soc_is_matching_component(platform, component))
-				continue;
-
-			if (snd_soc_component_is_dummy(component) && component->num_dai)
 				continue;
 
 			snd_soc_rtd_add_component(rtd, component);
@@ -2426,7 +2420,6 @@ struct snd_soc_dai *snd_soc_register_dai(struct snd_soc_component *component,
 {
 	struct device *dev = component->dev;
 	struct snd_soc_dai *dai;
-	struct snd_soc_dai_ops *ops; /* REMOVE ME */
 
 	dev_dbg(dev, "ASoC: dynamically register DAI %s\n", dev_name(dev));
 
@@ -2456,30 +2449,6 @@ struct snd_soc_dai *snd_soc_register_dai(struct snd_soc_component *component,
 	}
 	if (!dai->name)
 		return NULL;
-
-	/* REMOVE ME */
-	if (dai_drv->probe		||
-	    dai_drv->remove		||
-	    dai_drv->compress_new	||
-	    dai_drv->pcm_new		||
-	    dai_drv->probe_order	||
-	    dai_drv->remove_order) {
-
-		ops = devm_kzalloc(dev, sizeof(struct snd_soc_dai_ops), GFP_KERNEL);
-		if (!ops)
-			return NULL;
-		if (dai_drv->ops)
-			memcpy(ops, dai_drv->ops, sizeof(struct snd_soc_dai_ops));
-
-		ops->probe		= dai_drv->probe;
-		ops->remove		= dai_drv->remove;
-		ops->compress_new	= dai_drv->compress_new;
-		ops->pcm_new		= dai_drv->pcm_new;
-		ops->probe_order	= dai_drv->probe_order;
-		ops->remove_order	= dai_drv->remove_order;
-
-		dai_drv->ops = ops;
-	}
 
 	dai->component = component;
 	dai->dev = dev;
@@ -2865,7 +2834,7 @@ int snd_soc_of_parse_pin_switches(struct snd_soc_card *card, const char *prop)
 	unsigned int i, nb_controls;
 	int ret;
 
-	if (!of_property_present(dev->of_node, prop))
+	if (!of_property_read_bool(dev->of_node, prop))
 		return 0;
 
 	strings = devm_kcalloc(dev, nb_controls_max,
@@ -2939,17 +2908,23 @@ int snd_soc_of_parse_tdm_slot(struct device_node *np,
 	if (rx_mask)
 		snd_soc_of_get_slot_mask(np, "dai-tdm-slot-rx-mask", rx_mask);
 
-	ret = of_property_read_u32(np, "dai-tdm-slot-num", &val);
-	if (ret && ret != -EINVAL)
-		return ret;
-	if (!ret && slots)
-		*slots = val;
+	if (of_property_read_bool(np, "dai-tdm-slot-num")) {
+		ret = of_property_read_u32(np, "dai-tdm-slot-num", &val);
+		if (ret)
+			return ret;
 
-	ret = of_property_read_u32(np, "dai-tdm-slot-width", &val);
-	if (ret && ret != -EINVAL)
-		return ret;
-	if (!ret && slot_width)
-		*slot_width = val;
+		if (slots)
+			*slots = val;
+	}
+
+	if (of_property_read_bool(np, "dai-tdm-slot-width")) {
+		ret = of_property_read_u32(np, "dai-tdm-slot-width", &val);
+		if (ret)
+			return ret;
+
+		if (slot_width)
+			*slot_width = val;
+	}
 
 	return 0;
 }
@@ -3165,10 +3140,10 @@ unsigned int snd_soc_daifmt_parse_format(struct device_node *np,
 	 * SND_SOC_DAIFMT_INV_MASK area
 	 */
 	snprintf(prop, sizeof(prop), "%sbitclock-inversion", prefix);
-	bit = of_property_read_bool(np, prop);
+	bit = !!of_get_property(np, prop, NULL);
 
 	snprintf(prop, sizeof(prop), "%sframe-inversion", prefix);
-	frame = of_property_read_bool(np, prop);
+	frame = !!of_get_property(np, prop, NULL);
 
 	switch ((bit << 4) + frame) {
 	case 0x11:
@@ -3205,12 +3180,12 @@ unsigned int snd_soc_daifmt_parse_clock_provider_raw(struct device_node *np,
 	 * check "[prefix]frame-master"
 	 */
 	snprintf(prop, sizeof(prop), "%sbitclock-master", prefix);
-	bit = of_property_present(np, prop);
+	bit = !!of_get_property(np, prop, NULL);
 	if (bit && bitclkmaster)
 		*bitclkmaster = of_parse_phandle(np, prop, 0);
 
 	snprintf(prop, sizeof(prop), "%sframe-master", prefix);
-	frame = of_property_present(np, prop);
+	frame = !!of_get_property(np, prop, NULL);
 	if (frame && framemaster)
 		*framemaster = of_parse_phandle(np, prop, 0);
 

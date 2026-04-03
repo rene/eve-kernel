@@ -380,9 +380,14 @@ static void svm_range_bo_release(struct kref *kref)
 		spin_lock(&svm_bo->list_lock);
 	}
 	spin_unlock(&svm_bo->list_lock);
-	if (!dma_fence_is_signaled(&svm_bo->eviction_fence->base))
-		/* We're not in the eviction worker. Signal the fence. */
+	if (!dma_fence_is_signaled(&svm_bo->eviction_fence->base)) {
+		/* We're not in the eviction worker.
+		 * Signal the fence and synchronize with any
+		 * pending eviction work.
+		 */
 		dma_fence_signal(&svm_bo->eviction_fence->base);
+		cancel_work_sync(&svm_bo->eviction_work);
+	}
 	dma_fence_put(&svm_bo->eviction_fence->base);
 	amdgpu_bo_unref(&svm_bo->bo);
 	kfree(svm_bo);
@@ -1076,12 +1081,13 @@ svm_range_split_head(struct svm_range *prange,
 }
 
 static void
-svm_range_add_child(struct svm_range *prange, struct svm_range *pchild, enum svm_work_list_ops op)
+svm_range_add_child(struct svm_range *prange, struct mm_struct *mm,
+		    struct svm_range *pchild, enum svm_work_list_ops op)
 {
 	pr_debug("add child 0x%p [0x%lx 0x%lx] to prange 0x%p child list %d\n",
 		 pchild, pchild->start, pchild->last, prange, op);
 
-	pchild->work_item.mm = NULL;
+	pchild->work_item.mm = mm;
 	pchild->work_item.op = op;
 	list_add_tail(&pchild->child_list, &prange->child_list);
 }
@@ -1127,14 +1133,14 @@ svm_range_split_by_granularity(struct kfd_process *p, struct mm_struct *mm,
 		r = svm_range_split(prange, start, prange->last, &head);
 		if (r)
 			return r;
-		svm_range_add_child(parent, head, SVM_OP_ADD_RANGE);
+		svm_range_add_child(parent, mm, head, SVM_OP_ADD_RANGE);
 	}
 
 	if (last < prange->last) {
 		r = svm_range_split(prange, prange->start, last, &tail);
 		if (r)
 			return r;
-		svm_range_add_child(parent, tail, SVM_OP_ADD_RANGE);
+		svm_range_add_child(parent, mm, tail, SVM_OP_ADD_RANGE);
 	}
 
 	/* xnack on, update mapping on GPUs with ACCESS_IN_PLACE */
@@ -2240,10 +2246,8 @@ retry:
 		mutex_unlock(&svms->lock);
 		mmap_write_unlock(mm);
 
-		/* Pairs with mmget in svm_range_add_list_work. If dropping the
-		 * last mm refcount, schedule release work to avoid circular locking
-		 */
-		mmput_async(mm);
+		/* Pairs with mmget in svm_range_add_list_work */
+		mmput(mm);
 
 		spin_lock(&svms->deferred_list_lock);
 	}
@@ -2264,17 +2268,15 @@ svm_range_add_list_work(struct svm_range_list *svms, struct svm_range *prange,
 		    prange->work_item.op != SVM_OP_UNMAP_RANGE)
 			prange->work_item.op = op;
 	} else {
-		/* Pairs with mmput in deferred_list_work.
-		 * If process is exiting and mm is gone, don't update mmu notifier.
-		 */
-		if (mmget_not_zero(mm)) {
-			prange->work_item.mm = mm;
-			prange->work_item.op = op;
-			list_add_tail(&prange->deferred_list,
-				      &prange->svms->deferred_range_list);
-			pr_debug("add prange 0x%p [0x%lx 0x%lx] to work list op %d\n",
-				 prange, prange->start, prange->last, op);
-		}
+		prange->work_item.op = op;
+
+		/* Pairs with mmput in deferred_list_work */
+		mmget(mm);
+		prange->work_item.mm = mm;
+		list_add_tail(&prange->deferred_list,
+			      &prange->svms->deferred_range_list);
+		pr_debug("add prange 0x%p [0x%lx 0x%lx] to work list op %d\n",
+			 prange, prange->start, prange->last, op);
 	}
 	spin_unlock(&svms->deferred_list_lock);
 }
@@ -2288,7 +2290,8 @@ void schedule_deferred_list_work(struct svm_range_list *svms)
 }
 
 static void
-svm_range_unmap_split(struct svm_range *parent, struct svm_range *prange, unsigned long start,
+svm_range_unmap_split(struct mm_struct *mm, struct svm_range *parent,
+		      struct svm_range *prange, unsigned long start,
 		      unsigned long last)
 {
 	struct svm_range *head;
@@ -2309,12 +2312,12 @@ svm_range_unmap_split(struct svm_range *parent, struct svm_range *prange, unsign
 		svm_range_split(tail, last + 1, tail->last, &head);
 
 	if (head != prange && tail != prange) {
-		svm_range_add_child(parent, head, SVM_OP_UNMAP_RANGE);
-		svm_range_add_child(parent, tail, SVM_OP_ADD_RANGE);
+		svm_range_add_child(parent, mm, head, SVM_OP_UNMAP_RANGE);
+		svm_range_add_child(parent, mm, tail, SVM_OP_ADD_RANGE);
 	} else if (tail != prange) {
-		svm_range_add_child(parent, tail, SVM_OP_UNMAP_RANGE);
+		svm_range_add_child(parent, mm, tail, SVM_OP_UNMAP_RANGE);
 	} else if (head != prange) {
-		svm_range_add_child(parent, head, SVM_OP_UNMAP_RANGE);
+		svm_range_add_child(parent, mm, head, SVM_OP_UNMAP_RANGE);
 	} else if (parent != prange) {
 		prange->work_item.op = SVM_OP_UNMAP_RANGE;
 	}
@@ -2353,14 +2356,14 @@ svm_range_unmap_from_cpu(struct mm_struct *mm, struct svm_range *prange,
 		l = min(last, pchild->last);
 		if (l >= s)
 			svm_range_unmap_from_gpus(pchild, s, l, trigger);
-		svm_range_unmap_split(prange, pchild, start, last);
+		svm_range_unmap_split(mm, prange, pchild, start, last);
 		mutex_unlock(&pchild->lock);
 	}
 	s = max(start, prange->start);
 	l = min(last, prange->last);
 	if (l >= s)
 		svm_range_unmap_from_gpus(prange, s, l, trigger);
-	svm_range_unmap_split(prange, prange, start, last);
+	svm_range_unmap_split(mm, prange, prange, start, last);
 
 	if (unmap_parent)
 		svm_range_add_list_work(svms, prange, mm, SVM_OP_UNMAP_RANGE);
@@ -2403,6 +2406,8 @@ svm_range_cpu_invalidate_pagetables(struct mmu_interval_notifier *mni,
 
 	if (range->event == MMU_NOTIFY_RELEASE)
 		return true;
+	if (!mmget_not_zero(mni->mm))
+		return true;
 
 	start = mni->interval_tree.start;
 	last = mni->interval_tree.last;
@@ -2429,6 +2434,7 @@ svm_range_cpu_invalidate_pagetables(struct mmu_interval_notifier *mni,
 	}
 
 	svm_range_unlock(prange);
+	mmput(mni->mm);
 
 	return true;
 }
@@ -2550,7 +2556,6 @@ svm_range_get_range_boundaries(struct kfd_process *p, int64_t addr,
 {
 	struct vm_area_struct *vma;
 	struct interval_tree_node *node;
-	struct rb_node *rb_node;
 	unsigned long start_limit, end_limit;
 
 	vma = find_vma(p->mm, addr << PAGE_SHIFT);
@@ -2573,15 +2578,16 @@ svm_range_get_range_boundaries(struct kfd_process *p, int64_t addr,
 	if (node) {
 		end_limit = min(end_limit, node->start);
 		/* Last range that ends before the fault address */
-		rb_node = rb_prev(&node->rb);
+		node = container_of(rb_prev(&node->rb),
+				    struct interval_tree_node, rb);
 	} else {
 		/* Last range must end before addr because
 		 * there was no range after addr
 		 */
-		rb_node = rb_last(&p->svms.objects.rb_root);
+		node = container_of(rb_last(&p->svms.objects.rb_root),
+				    struct interval_tree_node, rb);
 	}
-	if (rb_node) {
-		node = container_of(rb_node, struct interval_tree_node, rb);
+	if (node) {
 		if (node->last >= addr) {
 			WARN(1, "Overlap with prev node and page fault addr\n");
 			return -EFAULT;
@@ -3304,14 +3310,13 @@ svm_range_trigger_migration(struct mm_struct *mm, struct svm_range *prange,
 
 int svm_range_schedule_evict_svm_bo(struct amdgpu_amdkfd_fence *fence)
 {
-	/* Dereferencing fence->svm_bo is safe here because the fence hasn't
-	 * signaled yet and we're under the protection of the fence->lock.
-	 * After the fence is signaled in svm_range_bo_release, we cannot get
-	 * here any more.
-	 *
-	 * Reference is dropped in svm_range_evict_svm_bo_worker.
-	 */
-	if (svm_bo_ref_unless_zero(fence->svm_bo)) {
+	if (!fence)
+		return -EINVAL;
+
+	if (dma_fence_is_signaled(&fence->base))
+		return 0;
+
+	if (fence->svm_bo) {
 		WRITE_ONCE(fence->svm_bo->evicting, 1);
 		schedule_work(&fence->svm_bo->eviction_work);
 	}
@@ -3326,6 +3331,8 @@ static void svm_range_evict_svm_bo_worker(struct work_struct *work)
 	int r = 0;
 
 	svm_bo = container_of(work, struct svm_range_bo, eviction_work);
+	if (!svm_bo_ref_unless_zero(svm_bo))
+		return; /* svm_bo was freed while eviction was pending */
 
 	if (mmget_not_zero(svm_bo->eviction_fence->mm)) {
 		mm = svm_bo->eviction_fence->mm;

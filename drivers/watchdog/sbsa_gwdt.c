@@ -40,6 +40,7 @@
  * is half of that in the single stage mode.
  */
 
+#include <linux/clk.h>
 #include <linux/io.h>
 #include <linux/io-64-nonatomic-lo-hi.h>
 #include <linux/interrupt.h>
@@ -76,17 +77,11 @@
 #define SBSA_GWDT_VERSION_MASK  0xF
 #define SBSA_GWDT_VERSION_SHIFT 16
 
-#define SBSA_GWDT_IMPL_MASK	0x7FF
-#define SBSA_GWDT_IMPL_SHIFT	0
-#define SBSA_GWDT_IMPL_MEDIATEK	0x426
-
 /**
  * struct sbsa_gwdt - Internal representation of the SBSA GWDT
  * @wdd:		kernel watchdog_device structure
  * @clk:		store the System Counter clock frequency, in Hz.
  * @version:            store the architecture version
- * @need_ws0_race_workaround:
- *			indicate whether to adjust wdd->timeout to avoid a race with WS0
  * @refresh_base:	Virtual address of the watchdog refresh frame
  * @control_base:	Virtual address of the watchdog control frame
  */
@@ -94,9 +89,9 @@ struct sbsa_gwdt {
 	struct watchdog_device	wdd;
 	u32			clk;
 	int			version;
-	bool			need_ws0_race_workaround;
 	void __iomem		*refresh_base;
 	void __iomem		*control_base;
+	struct clk		*sclk;
 };
 
 #define DEFAULT_TIMEOUT		10 /* seconds */
@@ -124,6 +119,9 @@ MODULE_PARM_DESC(nowayout,
 		 "Watchdog cannot be stopped once started (default="
 		 __MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
 
+static int panicnotify;
+module_param(panicnotify, int, 0);
+MODULE_PARM_DESC(panicnotify, "after kernel panic, do: 0 = don't stop wd(*)  1 = stop wd");
 /*
  * Arm Base System Architecture 1.0 introduces watchdog v1 which
  * increases the length watchdog offset register to 48 bits.
@@ -169,31 +167,6 @@ static int sbsa_gwdt_set_timeout(struct watchdog_device *wdd,
 		 */
 		sbsa_gwdt_reg_write(((u64)gwdt->clk / 2) * timeout, gwdt);
 
-	/*
-	 * Some watchdog hardware has a race condition where it will ignore
-	 * sbsa_gwdt_keepalive() if it is called at the exact moment that a
-	 * timeout occurs and WS0 is being asserted. Unfortunately, the default
-	 * behavior of the watchdog core is very likely to trigger this race
-	 * when action=0 because it programs WOR to be half of the desired
-	 * timeout, and watchdog_next_keepalive() chooses the exact same time to
-	 * send keepalive pings.
-	 *
-	 * This triggers a race where sbsa_gwdt_keepalive() can be called right
-	 * as WS0 is being asserted, and affected hardware will ignore that
-	 * write and continue to assert WS0. After another (timeout / 2)
-	 * seconds, the same race happens again. If the driver wins then the
-	 * explicit refresh will reset WS0 to false but if the hardware wins,
-	 * then WS1 is asserted and the system resets.
-	 *
-	 * Avoid the problem by scheduling keepalive heartbeats one second later
-	 * than the WOR timeout.
-	 *
-	 * This workaround might not be needed in a future revision of the
-	 * hardware.
-	 */
-	if (gwdt->need_ws0_race_workaround)
-		wdd->min_hw_heartbeat_ms = timeout * 500 + 1000;
-
 	return 0;
 }
 
@@ -235,15 +208,12 @@ static int sbsa_gwdt_keepalive(struct watchdog_device *wdd)
 static void sbsa_gwdt_get_version(struct watchdog_device *wdd)
 {
 	struct sbsa_gwdt *gwdt = watchdog_get_drvdata(wdd);
-	int iidr, ver, impl;
+	int ver;
 
-	iidr = readl(gwdt->control_base + SBSA_GWDT_W_IIDR);
-	ver = (iidr >> SBSA_GWDT_VERSION_SHIFT) & SBSA_GWDT_VERSION_MASK;
-	impl = (iidr >> SBSA_GWDT_IMPL_SHIFT) & SBSA_GWDT_IMPL_MASK;
+	ver = readl(gwdt->control_base + SBSA_GWDT_W_IIDR);
+	ver = (ver >> SBSA_GWDT_VERSION_SHIFT) & SBSA_GWDT_VERSION_MASK;
 
 	gwdt->version = ver;
-	gwdt->need_ws0_race_workaround =
-		!action && (impl == SBSA_GWDT_IMPL_MEDIATEK);
 }
 
 static int sbsa_gwdt_start(struct watchdog_device *wdd)
@@ -290,6 +260,39 @@ static const struct watchdog_ops sbsa_gwdt_ops = {
 	.get_timeleft	= sbsa_gwdt_get_timeleft,
 };
 
+static void sbsa_clk_disable_unprepare(void *data)
+{
+	clk_disable_unprepare(data);
+}
+
+static int get_sbsa_clkfrq(struct platform_device *pdev, struct sbsa_gwdt *gwdt)
+{
+	int err;
+
+	gwdt->sclk = devm_clk_get(&pdev->dev, NULL);
+	if (IS_ERR(gwdt->sclk))
+		return PTR_ERR(gwdt->sclk);
+
+	err = clk_prepare_enable(gwdt->sclk);
+	if (err)
+		return err;
+
+	err = devm_add_action_or_reset(&pdev->dev,
+				       sbsa_clk_disable_unprepare, gwdt->sclk);
+	if (err)
+		goto err_exit;
+
+	gwdt->clk = clk_get_rate(gwdt->sclk);
+	if (!gwdt->clk)
+		return -EINVAL;
+
+	return 0;
+
+err_exit:
+	clk_disable_unprepare(gwdt->sclk);
+	return err;
+}
+
 static int sbsa_gwdt_probe(struct platform_device *pdev)
 {
 	void __iomem *rf_base, *cf_base;
@@ -317,7 +320,11 @@ static int sbsa_gwdt_probe(struct platform_device *pdev)
 	 * Generic timer. We don't need to check it, because if it returns "0",
 	 * system would panic in very early stage.
 	 */
-	gwdt->clk = arch_timer_get_cntfrq();
+	if (!get_sbsa_clkfrq(pdev, gwdt))
+		dev_info(dev, "Using Clock data from device node.\n");
+	else
+		gwdt->clk = arch_timer_get_cntfrq();
+
 	gwdt->refresh_base = rf_base;
 	gwdt->control_base = cf_base;
 
@@ -335,15 +342,6 @@ static int sbsa_gwdt_probe(struct platform_device *pdev)
 	else
 		wdd->max_hw_heartbeat_ms = GENMASK_ULL(47, 0) / gwdt->clk * 1000;
 
-	if (gwdt->need_ws0_race_workaround) {
-		/*
-		 * A timeout of 3 seconds means that WOR will be set to 1.5
-		 * seconds and the heartbeat will be scheduled every 2.5
-		 * seconds.
-		 */
-		wdd->min_timeout = 3;
-	}
-
 	status = readl(cf_base + SBSA_GWDT_WCS);
 	if (status & SBSA_GWDT_WCS_WS1) {
 		dev_warn(dev, "System reset by WDT.\n");
@@ -351,6 +349,9 @@ static int sbsa_gwdt_probe(struct platform_device *pdev)
 	}
 	if (status & SBSA_GWDT_WCS_EN)
 		set_bit(WDOG_HW_RUNNING, &wdd->status);
+
+	if (!nowayout && panicnotify)
+		watchdog_stop_on_panic(wdd);
 
 	if (action) {
 		irq = platform_get_irq(pdev, 0);

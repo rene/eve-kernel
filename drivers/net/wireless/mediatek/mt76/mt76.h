@@ -388,7 +388,6 @@ struct mt76_tx_cb {
 
 enum {
 	MT76_STATE_INITIALIZED,
-	MT76_STATE_REGISTERED,
 	MT76_STATE_RUNNING,
 	MT76_STATE_MCU_RUNNING,
 	MT76_SCANNING,
@@ -565,7 +564,8 @@ struct mt76_sdio {
 	struct mt76_worker txrx_worker;
 	struct mt76_worker status_worker;
 	struct mt76_worker net_worker;
-	struct mt76_worker stat_worker;
+
+	struct work_struct stat_work;
 
 	u8 *xmit_buf;
 	u32 xmit_buf_sz;

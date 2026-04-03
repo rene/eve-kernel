@@ -435,9 +435,6 @@ static void l2cap_chan_timeout(struct work_struct *work)
 
 	BT_DBG("chan %p state %s", chan, state_to_string(chan->state));
 
-	if (!conn)
-		return;
-
 	mutex_lock(&conn->chan_lock);
 	/* __set_chan_timer() calls l2cap_chan_hold(chan) while scheduling
 	 * this work. No need to call l2cap_chan_hold(chan) here again.
@@ -476,9 +473,6 @@ struct l2cap_chan *l2cap_chan_create(void)
 
 	/* Set default lock nesting level */
 	atomic_set(&chan->nesting, L2CAP_NESTING_NORMAL);
-
-	/* Available receive buffer space is initially unknown */
-	chan->rx_avail = -1;
 
 	write_lock(&chan_list_lock);
 	list_add(&chan->global_l, &chan_list);
@@ -561,28 +555,6 @@ void l2cap_chan_set_defaults(struct l2cap_chan *chan)
 }
 EXPORT_SYMBOL_GPL(l2cap_chan_set_defaults);
 
-static __u16 l2cap_le_rx_credits(struct l2cap_chan *chan)
-{
-	size_t sdu_len = chan->sdu ? chan->sdu->len : 0;
-
-	if (chan->mps == 0)
-		return 0;
-
-	/* If we don't know the available space in the receiver buffer, give
-	 * enough credits for a full packet.
-	 */
-	if (chan->rx_avail == -1)
-		return (chan->imtu / chan->mps) + 1;
-
-	/* If we know how much space is available in the receive buffer, give
-	 * out as many credits as would fill the buffer.
-	 */
-	if (chan->rx_avail <= sdu_len)
-		return 0;
-
-	return DIV_ROUND_UP(chan->rx_avail - sdu_len, chan->mps);
-}
-
 static void l2cap_le_flowctl_init(struct l2cap_chan *chan, u16 tx_credits)
 {
 	chan->sdu = NULL;
@@ -591,7 +563,8 @@ static void l2cap_le_flowctl_init(struct l2cap_chan *chan, u16 tx_credits)
 	chan->tx_credits = tx_credits;
 	/* Derive MPS from connection MTU to stop HCI fragmentation */
 	chan->mps = min_t(u16, chan->imtu, chan->conn->mtu - L2CAP_HDR_SIZE);
-	chan->rx_credits = l2cap_le_rx_credits(chan);
+	/* Give enough credits for a full packet */
+	chan->rx_credits = (chan->imtu / chan->mps) + 1;
 
 	skb_queue_head_init(&chan->tx_q);
 }
@@ -603,7 +576,7 @@ static void l2cap_ecred_init(struct l2cap_chan *chan, u16 tx_credits)
 	/* L2CAP implementations shall support a minimum MPS of 64 octets */
 	if (chan->mps < L2CAP_ECRED_MIN_MPS) {
 		chan->mps = L2CAP_ECRED_MIN_MPS;
-		chan->rx_credits = l2cap_le_rx_credits(chan);
+		chan->rx_credits = (chan->imtu / chan->mps) + 1;
 	}
 }
 
@@ -656,8 +629,7 @@ void __l2cap_chan_add(struct l2cap_conn *conn, struct l2cap_chan *chan)
 	    test_bit(FLAG_HOLD_HCI_CONN, &chan->flags))
 		hci_conn_hold(conn->hcon);
 
-	/* Append to the list since the order matters for ECRED */
-	list_add_tail(&chan->list, &conn->chan_l);
+	list_add(&chan->list, &conn->chan_l);
 }
 
 void l2cap_chan_add(struct l2cap_conn *conn, struct l2cap_chan *chan)
@@ -1561,8 +1533,7 @@ static void l2cap_request_info(struct l2cap_conn *conn)
 		       sizeof(req), &req);
 }
 
-static bool l2cap_check_enc_key_size(struct hci_conn *hcon,
-				     struct l2cap_chan *chan)
+static bool l2cap_check_enc_key_size(struct hci_conn *hcon)
 {
 	/* The minimum encryption key size needs to be enforced by the
 	 * host stack before establishing any L2CAP connections. The
@@ -1576,7 +1547,7 @@ static bool l2cap_check_enc_key_size(struct hci_conn *hcon,
 	int min_key_size = hcon->hdev->min_enc_key_size;
 
 	/* On FIPS security level, key size must be 16 bytes */
-	if (chan->sec_level == BT_SECURITY_FIPS)
+	if (hcon->sec_level == BT_SECURITY_FIPS)
 		min_key_size = 16;
 
 	return (!test_bit(HCI_CONN_ENCRYPT, &hcon->flags) ||
@@ -1604,7 +1575,7 @@ static void l2cap_do_start(struct l2cap_chan *chan)
 	    !__l2cap_no_conn_pending(chan))
 		return;
 
-	if (l2cap_check_enc_key_size(conn->hcon, chan))
+	if (l2cap_check_enc_key_size(conn->hcon))
 		l2cap_start_connection(chan);
 	else
 		__set_chan_timer(chan, L2CAP_DISC_TIMEOUT);
@@ -1686,7 +1657,7 @@ static void l2cap_conn_start(struct l2cap_conn *conn)
 				continue;
 			}
 
-			if (l2cap_check_enc_key_size(conn->hcon, chan))
+			if (l2cap_check_enc_key_size(conn->hcon))
 				l2cap_start_connection(chan);
 			else
 				l2cap_chan_close(chan, ECONNREFUSED);
@@ -3600,7 +3571,7 @@ static int l2cap_parse_conf_req(struct l2cap_chan *chan, void *data, size_t data
 	struct l2cap_conf_rfc rfc = { .mode = L2CAP_MODE_BASIC };
 	struct l2cap_conf_efs efs;
 	u8 remote_efs = 0;
-	u16 mtu = 0;
+	u16 mtu = L2CAP_DEFAULT_MTU;
 	u16 result = L2CAP_CONF_SUCCESS;
 	u16 size;
 
@@ -3710,29 +3681,6 @@ done:
 	if (result == L2CAP_CONF_SUCCESS) {
 		/* Configure output options and let the other side know
 		 * which ones we don't like. */
-
-		/* If MTU is not provided in configure request, try adjusting it
-		 * to the current output MTU if it has been set
-		 *
-		 * Bluetooth Core 6.1, Vol 3, Part A, Section 4.5
-		 *
-		 * Each configuration parameter value (if any is present) in an
-		 * L2CAP_CONFIGURATION_RSP packet reflects an ‘adjustment’ to a
-		 * configuration parameter value that has been sent (or, in case
-		 * of default values, implied) in the corresponding
-		 * L2CAP_CONFIGURATION_REQ packet.
-		 */
-		if (!mtu) {
-			/* Only adjust for ERTM channels as for older modes the
-			 * remote stack may not be able to detect that the
-			 * adjustment causing it to silently drop packets.
-			 */
-			if (chan->mode == L2CAP_MODE_ERTM &&
-			    chan->omtu && chan->omtu != L2CAP_DEFAULT_MTU)
-				mtu = chan->omtu;
-			else
-				mtu = L2CAP_DEFAULT_MTU;
-		}
 
 		if (mtu < L2CAP_DEFAULT_MIN_MTU)
 			result = L2CAP_CONF_UNACCEPT;
@@ -4020,11 +3968,7 @@ static void l2cap_ecred_rsp_defer(struct l2cap_chan *chan, void *data)
 {
 	struct l2cap_ecred_rsp_data *rsp = data;
 
-	/* Check if channel for outgoing connection or if it wasn't deferred
-	 * since in those cases it must be skipped.
-	 */
-	if (test_bit(FLAG_ECRED_CONN_REQ_SENT, &chan->flags) ||
-	    !test_and_clear_bit(FLAG_DEFER_SETUP, &chan->flags))
+	if (test_bit(FLAG_ECRED_CONN_REQ_SENT, &chan->flags))
 		return;
 
 	/* Reset ident so only one response is sent */
@@ -4210,8 +4154,7 @@ static struct l2cap_chan *l2cap_connect(struct l2cap_conn *conn,
 
 	/* Check if the ACL is secure enough (if not SDP) */
 	if (psm != cpu_to_le16(L2CAP_PSM_SDP) &&
-	    (!hci_conn_check_link_mode(conn->hcon) ||
-	    !l2cap_check_enc_key_size(conn->hcon, pchan))) {
+	    !hci_conn_check_link_mode(conn->hcon)) {
 		conn->disc_reason = HCI_ERROR_AUTH_FAILURE;
 		result = L2CAP_CR_SEC_BLOCK;
 		goto response;
@@ -4330,8 +4273,17 @@ sendresp:
 static int l2cap_connect_req(struct l2cap_conn *conn,
 			     struct l2cap_cmd_hdr *cmd, u16 cmd_len, u8 *data)
 {
+	struct hci_dev *hdev = conn->hcon->hdev;
+	struct hci_conn *hcon = conn->hcon;
+
 	if (cmd_len < sizeof(struct l2cap_conn_req))
 		return -EPROTO;
+
+	hci_dev_lock(hdev);
+	if (hci_dev_test_flag(hdev, HCI_MGMT) &&
+	    !test_and_set_bit(HCI_CONN_MGMT_CONNECTED, &hcon->flags))
+		mgmt_device_connected(hdev, hcon, NULL, 0);
+	hci_dev_unlock(hdev);
 
 	l2cap_connect(conn, cmd, data, L2CAP_CONN_RSP, 0);
 	return 0;
@@ -5906,8 +5858,7 @@ static int l2cap_le_connect_req(struct l2cap_conn *conn,
 
 	if (!smp_sufficient_security(conn->hcon, pchan->sec_level,
 				     SMP_ALLOW_STK)) {
-		result = pchan->sec_level == BT_SECURITY_MEDIUM ?
-			L2CAP_CR_LE_ENCRYPTION : L2CAP_CR_LE_AUTHENTICATION;
+		result = L2CAP_CR_LE_AUTHENTICATION;
 		chan = NULL;
 		goto response_unlock;
 	}
@@ -6542,14 +6493,6 @@ drop:
 	kfree_skb(skb);
 }
 
-static inline void l2cap_sig_send_rej(struct l2cap_conn *conn, u16 ident)
-{
-	struct l2cap_cmd_rej_unk rej;
-
-	rej.reason = cpu_to_le16(L2CAP_REJ_NOT_UNDERSTOOD);
-	l2cap_send_cmd(conn, ident, L2CAP_COMMAND_REJ, sizeof(rej), &rej);
-}
-
 static inline void l2cap_sig_channel(struct l2cap_conn *conn,
 				     struct sk_buff *skb)
 {
@@ -6575,23 +6518,21 @@ static inline void l2cap_sig_channel(struct l2cap_conn *conn,
 
 		if (len > skb->len || !cmd->ident) {
 			BT_DBG("corrupted command");
-			l2cap_sig_send_rej(conn, cmd->ident);
-			skb_pull(skb, len > skb->len ? skb->len : len);
-			continue;
+			break;
 		}
 
 		err = l2cap_bredr_sig_cmd(conn, cmd, len, skb->data);
 		if (err) {
+			struct l2cap_cmd_rej_unk rej;
+
 			BT_ERR("Wrong link type (%d)", err);
-			l2cap_sig_send_rej(conn, cmd->ident);
+
+			rej.reason = cpu_to_le16(L2CAP_REJ_NOT_UNDERSTOOD);
+			l2cap_send_cmd(conn, cmd->ident, L2CAP_COMMAND_REJ,
+				       sizeof(rej), &rej);
 		}
 
 		skb_pull(skb, len);
-	}
-
-	if (skb->len > 0) {
-		BT_DBG("corrupted command");
-		l2cap_sig_send_rej(conn, 0);
 	}
 
 drop:
@@ -7569,7 +7510,9 @@ static void l2cap_chan_le_send_credits(struct l2cap_chan *chan)
 {
 	struct l2cap_conn *conn = chan->conn;
 	struct l2cap_le_credits pkt;
-	u16 return_credits = l2cap_le_rx_credits(chan);
+	u16 return_credits;
+
+	return_credits = (chan->imtu / chan->mps) + 1;
 
 	if (chan->rx_credits >= return_credits)
 		return;
@@ -7588,19 +7531,6 @@ static void l2cap_chan_le_send_credits(struct l2cap_chan *chan)
 	l2cap_send_cmd(conn, chan->ident, L2CAP_LE_CREDITS, sizeof(pkt), &pkt);
 }
 
-void l2cap_chan_rx_avail(struct l2cap_chan *chan, ssize_t rx_avail)
-{
-	if (chan->rx_avail == rx_avail)
-		return;
-
-	BT_DBG("chan %p has %zd bytes avail for rx", chan, rx_avail);
-
-	chan->rx_avail = rx_avail;
-
-	if (chan->state == BT_CONNECTED)
-		l2cap_chan_le_send_credits(chan);
-}
-
 static int l2cap_ecred_recv(struct l2cap_chan *chan, struct sk_buff *skb)
 {
 	int err;
@@ -7609,12 +7539,6 @@ static int l2cap_ecred_recv(struct l2cap_chan *chan, struct sk_buff *skb)
 
 	/* Wait recv to confirm reception before updating the credits */
 	err = chan->ops->recv(chan, skb);
-
-	if (err < 0 && chan->rx_avail != -1) {
-		BT_ERR("Queueing received LE L2CAP data failed");
-		l2cap_send_disconn_req(chan, ECONNRESET);
-		return err;
-	}
 
 	/* Update credits whenever an SDU is received */
 	l2cap_chan_le_send_credits(chan);
@@ -7638,8 +7562,7 @@ static int l2cap_ecred_data_rcv(struct l2cap_chan *chan, struct sk_buff *skb)
 	}
 
 	chan->rx_credits--;
-	BT_DBG("chan %p: rx_credits %u -> %u",
-	       chan, chan->rx_credits + 1, chan->rx_credits);
+	BT_DBG("rx_credits %u -> %u", chan->rx_credits + 1, chan->rx_credits);
 
 	/* Update if remote had run out of credits, this should only happens
 	 * if the remote is not using the entire MPS.
@@ -7820,8 +7743,6 @@ static void l2cap_conless_channel(struct l2cap_conn *conn, __le16 psm,
 
 	BT_DBG("chan %p, len %d", chan, skb->len);
 
-	l2cap_chan_lock(chan);
-
 	if (chan->state != BT_BOUND && chan->state != BT_CONNECTED)
 		goto drop;
 
@@ -7833,13 +7754,11 @@ static void l2cap_conless_channel(struct l2cap_conn *conn, __le16 psm,
 	bt_cb(skb)->l2cap.psm = psm;
 
 	if (!chan->ops->recv(chan, skb)) {
-		l2cap_chan_unlock(chan);
 		l2cap_chan_put(chan);
 		return;
 	}
 
 drop:
-	l2cap_chan_unlock(chan);
 	l2cap_chan_put(chan);
 free_skb:
 	kfree_skb(skb);
@@ -8443,7 +8362,7 @@ static void l2cap_security_cfm(struct hci_conn *hcon, u8 status, u8 encrypt)
 		}
 
 		if (chan->state == BT_CONNECT) {
-			if (!status && l2cap_check_enc_key_size(hcon, chan))
+			if (!status && l2cap_check_enc_key_size(hcon))
 				l2cap_start_connection(chan);
 			else
 				__set_chan_timer(chan, L2CAP_DISC_TIMEOUT);
@@ -8453,7 +8372,7 @@ static void l2cap_security_cfm(struct hci_conn *hcon, u8 status, u8 encrypt)
 			struct l2cap_conn_rsp rsp;
 			__u16 res, stat;
 
-			if (!status && l2cap_check_enc_key_size(hcon, chan)) {
+			if (!status && l2cap_check_enc_key_size(hcon)) {
 				if (test_bit(FLAG_DEFER_SETUP, &chan->flags)) {
 					res = L2CAP_CR_PEND;
 					stat = L2CAP_CS_AUTHOR_PEND;

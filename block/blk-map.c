@@ -203,17 +203,10 @@ static int bio_copy_user_iov(struct request *rq, struct rq_map_data *map_data,
 	/*
 	 * success
 	 */
-	if (iov_iter_rw(iter) == WRITE &&
-	     (!map_data || !map_data->null_mapped)) {
+	if ((iov_iter_rw(iter) == WRITE &&
+	     (!map_data || !map_data->null_mapped)) ||
+	    (map_data && map_data->from_user)) {
 		ret = bio_copy_from_iter(bio, iter);
-		if (ret)
-			goto cleanup;
-	} else if (map_data && map_data->from_user) {
-		struct iov_iter iter2 = *iter;
-
-		/* This is the copy-in part of SG_DXFER_TO_FROM_DEV. */
-		iter2.data_source = ITER_SOURCE;
-		ret = bio_copy_from_iter(bio, &iter2);
 		if (ret)
 			goto cleanup;
 	} else {
@@ -597,7 +590,9 @@ static int blk_rq_map_user_bvec(struct request *rq, const struct iov_iter *iter)
 		if (nsegs >= nr_segs || bytes > UINT_MAX - bv->bv_len)
 			goto put_bio;
 		if (bytes + bv->bv_len > nr_iter)
-			break;
+			goto put_bio;
+		if (bv->bv_offset + bv->bv_len > PAGE_SIZE)
+			goto put_bio;
 
 		nsegs++;
 		bytes += bv->bv_len;

@@ -10,9 +10,8 @@
 
 #include <linux/acpi.h>
 #include <linux/bitmap.h>
-#include <linux/cleanup.h>
-#include <linux/gpio/consumer.h>
 #include <linux/gpio/driver.h>
+#include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -21,7 +20,6 @@
 #include <linux/platform_data/pca953x.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
-#include <linux/seq_file.h>
 #include <linux/slab.h>
 
 #include <asm/unaligned.h>
@@ -524,10 +522,12 @@ static int pca953x_gpio_direction_input(struct gpio_chip *gc, unsigned off)
 	struct pca953x_chip *chip = gpiochip_get_data(gc);
 	u8 dirreg = chip->recalc_addr(chip, chip->regs->direction, off);
 	u8 bit = BIT(off % BANK_SZ);
+	int ret;
 
-	guard(mutex)(&chip->i2c_lock);
-
-	return regmap_write_bits(chip->regmap, dirreg, bit, bit);
+	mutex_lock(&chip->i2c_lock);
+	ret = regmap_write_bits(chip->regmap, dirreg, bit, bit);
+	mutex_unlock(&chip->i2c_lock);
+	return ret;
 }
 
 static int pca953x_gpio_direction_output(struct gpio_chip *gc,
@@ -539,15 +539,17 @@ static int pca953x_gpio_direction_output(struct gpio_chip *gc,
 	u8 bit = BIT(off % BANK_SZ);
 	int ret;
 
-	guard(mutex)(&chip->i2c_lock);
-
+	mutex_lock(&chip->i2c_lock);
 	/* set output level */
 	ret = regmap_write_bits(chip->regmap, outreg, bit, val ? bit : 0);
 	if (ret)
-		return ret;
+		goto exit;
 
 	/* then direction */
-	return regmap_write_bits(chip->regmap, dirreg, bit, 0);
+	ret = regmap_write_bits(chip->regmap, dirreg, bit, 0);
+exit:
+	mutex_unlock(&chip->i2c_lock);
+	return ret;
 }
 
 static int pca953x_gpio_get_value(struct gpio_chip *gc, unsigned off)
@@ -558,8 +560,9 @@ static int pca953x_gpio_get_value(struct gpio_chip *gc, unsigned off)
 	u32 reg_val;
 	int ret;
 
-	scoped_guard(mutex, &chip->i2c_lock)
-		ret = regmap_read(chip->regmap, inreg, &reg_val);
+	mutex_lock(&chip->i2c_lock);
+	ret = regmap_read(chip->regmap, inreg, &reg_val);
+	mutex_unlock(&chip->i2c_lock);
 	if (ret < 0)
 		return ret;
 
@@ -572,9 +575,9 @@ static void pca953x_gpio_set_value(struct gpio_chip *gc, unsigned off, int val)
 	u8 outreg = chip->recalc_addr(chip, chip->regs->output, off);
 	u8 bit = BIT(off % BANK_SZ);
 
-	guard(mutex)(&chip->i2c_lock);
-
+	mutex_lock(&chip->i2c_lock);
 	regmap_write_bits(chip->regmap, outreg, bit, val ? bit : 0);
+	mutex_unlock(&chip->i2c_lock);
 }
 
 static int pca953x_gpio_get_direction(struct gpio_chip *gc, unsigned off)
@@ -585,8 +588,9 @@ static int pca953x_gpio_get_direction(struct gpio_chip *gc, unsigned off)
 	u32 reg_val;
 	int ret;
 
-	scoped_guard(mutex, &chip->i2c_lock)
-		ret = regmap_read(chip->regmap, dirreg, &reg_val);
+	mutex_lock(&chip->i2c_lock);
+	ret = regmap_read(chip->regmap, dirreg, &reg_val);
+	mutex_unlock(&chip->i2c_lock);
 	if (ret < 0)
 		return ret;
 
@@ -603,8 +607,9 @@ static int pca953x_gpio_get_multiple(struct gpio_chip *gc,
 	DECLARE_BITMAP(reg_val, MAX_LINE);
 	int ret;
 
-	scoped_guard(mutex, &chip->i2c_lock)
-		ret = pca953x_read_regs(chip, chip->regs->input, reg_val);
+	mutex_lock(&chip->i2c_lock);
+	ret = pca953x_read_regs(chip, chip->regs->input, reg_val);
+	mutex_unlock(&chip->i2c_lock);
 	if (ret)
 		return ret;
 
@@ -619,15 +624,16 @@ static void pca953x_gpio_set_multiple(struct gpio_chip *gc,
 	DECLARE_BITMAP(reg_val, MAX_LINE);
 	int ret;
 
-	guard(mutex)(&chip->i2c_lock);
-
+	mutex_lock(&chip->i2c_lock);
 	ret = pca953x_read_regs(chip, chip->regs->output, reg_val);
 	if (ret)
-		return;
+		goto exit;
 
 	bitmap_replace(reg_val, reg_val, bits, mask, gc->ngpio);
 
 	pca953x_write_regs(chip, chip->regs->output, reg_val);
+exit:
+	mutex_unlock(&chip->i2c_lock);
 }
 
 static int pca953x_gpio_set_pull_up_down(struct pca953x_chip *chip,
@@ -635,6 +641,7 @@ static int pca953x_gpio_set_pull_up_down(struct pca953x_chip *chip,
 					 unsigned long config)
 {
 	enum pin_config_param param = pinconf_to_config_param(config);
+
 	u8 pull_en_reg = chip->recalc_addr(chip, PCAL953X_PULL_EN, offset);
 	u8 pull_sel_reg = chip->recalc_addr(chip, PCAL953X_PULL_SEL, offset);
 	u8 bit = BIT(offset % BANK_SZ);
@@ -647,7 +654,7 @@ static int pca953x_gpio_set_pull_up_down(struct pca953x_chip *chip,
 	if (!(chip->driver_data & PCA_PCAL))
 		return -ENOTSUPP;
 
-	guard(mutex)(&chip->i2c_lock);
+	mutex_lock(&chip->i2c_lock);
 
 	/* Configure pull-up/pull-down */
 	if (param == PIN_CONFIG_BIAS_PULL_UP)
@@ -657,13 +664,17 @@ static int pca953x_gpio_set_pull_up_down(struct pca953x_chip *chip,
 	else
 		ret = 0;
 	if (ret)
-		return ret;
+		goto exit;
 
 	/* Disable/Enable pull-up/pull-down */
 	if (param == PIN_CONFIG_BIAS_DISABLE)
-		return regmap_write_bits(chip->regmap, pull_en_reg, bit, 0);
+		ret = regmap_write_bits(chip->regmap, pull_en_reg, bit, 0);
 	else
-		return regmap_write_bits(chip->regmap, pull_en_reg, bit, bit);
+		ret = regmap_write_bits(chip->regmap, pull_en_reg, bit, bit);
+
+exit:
+	mutex_unlock(&chip->i2c_lock);
+	return ret;
 }
 
 static int pca953x_gpio_set_config(struct gpio_chip *gc, unsigned int offset,
@@ -757,8 +768,6 @@ static void pca953x_irq_bus_sync_unlock(struct irq_data *d)
 	int level;
 
 	if (chip->driver_data & PCA_PCAL) {
-		guard(mutex)(&chip->i2c_lock);
-
 		/* Enable latch on interrupt-enabled inputs */
 		pca953x_write_regs(chip, PCAL953X_IN_LATCH, chip->irq_mask);
 
@@ -840,6 +849,25 @@ static bool pca953x_irq_pending(struct pca953x_chip *chip, unsigned long *pendin
 	DECLARE_BITMAP(trigger, MAX_LINE);
 	int ret;
 
+	if (chip->driver_data & PCA_PCAL) {
+		/* Read the current interrupt status from the device */
+		ret = pca953x_read_regs(chip, PCAL953X_INT_STAT, trigger);
+		if (ret)
+			return false;
+
+		/* Check latched inputs and clear interrupt status */
+		ret = pca953x_read_regs(chip, chip->regs->input, cur_stat);
+		if (ret)
+			return false;
+
+		/* Apply filter for rising/falling edge selection */
+		bitmap_replace(new_stat, chip->irq_trig_fall, chip->irq_trig_raise, cur_stat, gc->ngpio);
+
+		bitmap_and(pending, new_stat, trigger, gc->ngpio);
+
+		return !bitmap_empty(pending, gc->ngpio);
+	}
+
 	ret = pca953x_read_regs(chip, chip->regs->input, cur_stat);
 	if (ret)
 		return false;
@@ -876,8 +904,10 @@ static irqreturn_t pca953x_irq_handler(int irq, void *devid)
 
 	bitmap_zero(pending, MAX_LINE);
 
-	scoped_guard(mutex, &chip->i2c_lock)
-		ret = pca953x_irq_pending(chip, pending);
+	mutex_lock(&chip->i2c_lock);
+	ret = pca953x_irq_pending(chip, pending);
+	mutex_unlock(&chip->i2c_lock);
+
 	if (ret) {
 		ret = 0;
 
@@ -1186,9 +1216,9 @@ static void pca953x_remove(struct i2c_client *client)
 }
 
 #ifdef CONFIG_PM_SLEEP
-static int pca953x_regcache_sync(struct pca953x_chip *chip)
+static int pca953x_regcache_sync(struct device *dev)
 {
-	struct device *dev = &chip->client->dev;
+	struct pca953x_chip *chip = dev_get_drvdata(dev);
 	int ret;
 	u8 regaddr;
 
@@ -1235,38 +1265,13 @@ static int pca953x_regcache_sync(struct pca953x_chip *chip)
 	return 0;
 }
 
-static int pca953x_restore_context(struct pca953x_chip *chip)
-{
-	int ret;
-
-	guard(mutex)(&chip->i2c_lock);
-
-	if (chip->client->irq > 0)
-		enable_irq(chip->client->irq);
-	regcache_cache_only(chip->regmap, false);
-	regcache_mark_dirty(chip->regmap);
-	ret = pca953x_regcache_sync(chip);
-	if (ret)
-		return ret;
-
-	return regcache_sync(chip->regmap);
-}
-
-static void pca953x_save_context(struct pca953x_chip *chip)
-{
-	guard(mutex)(&chip->i2c_lock);
-
-	/* Disable IRQ to prevent early triggering while regmap "cache only" is on */
-	if (chip->client->irq > 0)
-		disable_irq(chip->client->irq);
-	regcache_cache_only(chip->regmap, true);
-}
-
 static int pca953x_suspend(struct device *dev)
 {
 	struct pca953x_chip *chip = dev_get_drvdata(dev);
 
-	pca953x_save_context(chip);
+	mutex_lock(&chip->i2c_lock);
+	regcache_cache_only(chip->regmap, true);
+	mutex_unlock(&chip->i2c_lock);
 
 	if (atomic_read(&chip->wakeup_path))
 		device_set_wakeup_path(dev);
@@ -1289,7 +1294,17 @@ static int pca953x_resume(struct device *dev)
 		}
 	}
 
-	ret = pca953x_restore_context(chip);
+	mutex_lock(&chip->i2c_lock);
+	regcache_cache_only(chip->regmap, false);
+	regcache_mark_dirty(chip->regmap);
+	ret = pca953x_regcache_sync(dev);
+	if (ret) {
+		mutex_unlock(&chip->i2c_lock);
+		return ret;
+	}
+
+	ret = regcache_sync(chip->regmap);
+	mutex_unlock(&chip->i2c_lock);
 	if (ret) {
 		dev_err(dev, "Failed to restore register map: %d\n", ret);
 		return ret;

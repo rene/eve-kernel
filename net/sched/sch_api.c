@@ -333,22 +333,17 @@ out:
 	return q;
 }
 
-static struct Qdisc *qdisc_leaf(struct Qdisc *p, u32 classid,
-				struct netlink_ext_ack *extack)
+static struct Qdisc *qdisc_leaf(struct Qdisc *p, u32 classid)
 {
 	unsigned long cl;
 	const struct Qdisc_class_ops *cops = p->ops->cl_ops;
 
-	if (cops == NULL) {
-		NL_SET_ERR_MSG(extack, "Parent qdisc is not classful");
-		return ERR_PTR(-EOPNOTSUPP);
-	}
+	if (cops == NULL)
+		return NULL;
 	cl = cops->find(p, classid);
 
-	if (cl == 0) {
-		NL_SET_ERR_MSG(extack, "Specified class not found");
-		return ERR_PTR(-ENOENT);
-	}
+	if (cl == 0)
+		return NULL;
 	return cops->leaf(p, cl);
 }
 
@@ -597,6 +592,7 @@ out:
 		pkt_len = 1;
 	qdisc_skb_cb(skb)->pkt_len = pkt_len;
 }
+EXPORT_SYMBOL(__qdisc_calculate_pkt_len);
 
 void qdisc_warn_nonwc(const char *txt, struct Qdisc *qdisc)
 {
@@ -781,33 +777,42 @@ static u32 qdisc_alloc_handle(struct net_device *dev)
 
 void qdisc_tree_reduce_backlog(struct Qdisc *sch, int n, int len)
 {
+	bool qdisc_is_offloaded = sch->flags & TCQ_F_OFFLOADED;
 	const struct Qdisc_class_ops *cops;
 	unsigned long cl;
 	u32 parentid;
 	bool notify;
 	int drops;
 
+	if (n == 0 && len == 0)
+		return;
 	drops = max_t(int, n, 0);
 	rcu_read_lock();
 	while ((parentid = sch->parent)) {
-		if (parentid == TC_H_ROOT)
+		if (TC_H_MAJ(parentid) == TC_H_MAJ(TC_H_INGRESS))
 			break;
 
 		if (sch->flags & TCQ_F_NOPARENT)
 			break;
-		/* Notify parent qdisc only if child qdisc becomes empty. */
-		notify = !sch->q.qlen;
+		/* Notify parent qdisc only if child qdisc becomes empty.
+		 *
+		 * If child was empty even before update then backlog
+		 * counter is screwed and we skip notification because
+		 * parent class is already passive.
+		 *
+		 * If the original child was offloaded then it is allowed
+		 * to be seem as empty, so the parent is notified anyway.
+		 */
+		notify = !sch->q.qlen && !WARN_ON_ONCE(!n &&
+						       !qdisc_is_offloaded);
 		/* TODO: perform the search on a per txq basis */
-		sch = qdisc_lookup_rcu(qdisc_dev(sch), TC_H_MAJ(parentid));
+		sch = qdisc_lookup(qdisc_dev(sch), TC_H_MAJ(parentid));
 		if (sch == NULL) {
 			WARN_ON_ONCE(parentid != TC_H_ROOT);
 			break;
 		}
 		cops = sch->ops->cl_ops;
 		if (notify && cops->qlen_notify) {
-			/* Note that qlen_notify must be idempotent as it may get called
-			 * multiple times.
-			 */
 			cl = cops->find(sch, parentid);
 			cops->qlen_notify(sch, cl);
 		}
@@ -1164,12 +1169,6 @@ skip:
 			return -EINVAL;
 		}
 
-		if (new &&
-		    !(parent->flags & TCQ_F_MQROOT) &&
-		    rcu_access_pointer(new->stab)) {
-			NL_SET_ERR_MSG(extack, "STAB not supported on a non root");
-			return -EINVAL;
-		}
 		err = cops->graft(parent, cl, new, &old, extack);
 		if (err)
 			return err;
@@ -1354,7 +1353,6 @@ err_out5:
 	if (ops->destroy)
 		ops->destroy(sch);
 err_out3:
-	lockdep_unregister_key(&sch->root_lock_key);
 	netdev_put(dev, &sch->dev_tracker);
 	qdisc_free(sch);
 err_out2:
@@ -1505,7 +1503,7 @@ static int tc_get_qdisc(struct sk_buff *skb, struct nlmsghdr *n,
 					NL_SET_ERR_MSG(extack, "Failed to find qdisc with specified classid");
 					return -ENOENT;
 				}
-				q = qdisc_leaf(p, clid, extack);
+				q = qdisc_leaf(p, clid);
 			} else if (dev_ingress_queue(dev)) {
 				q = rtnl_dereference(dev_ingress_queue(dev)->qdisc_sleeping);
 			}
@@ -1516,8 +1514,6 @@ static int tc_get_qdisc(struct sk_buff *skb, struct nlmsghdr *n,
 			NL_SET_ERR_MSG(extack, "Cannot find specified qdisc on specified device");
 			return -ENOENT;
 		}
-		if (IS_ERR(q))
-			return PTR_ERR(q);
 
 		if (tcm->tcm_handle && q->handle != tcm->tcm_handle) {
 			NL_SET_ERR_MSG(extack, "Invalid handle");
@@ -1611,9 +1607,7 @@ replay:
 					NL_SET_ERR_MSG(extack, "Failed to find specified qdisc");
 					return -ENOENT;
 				}
-				q = qdisc_leaf(p, clid, extack);
-				if (IS_ERR(q))
-					return PTR_ERR(q);
+				q = qdisc_leaf(p, clid);
 			} else if (dev_ingress_queue_create(dev)) {
 				q = rtnl_dereference(dev_ingress_queue(dev)->qdisc_sleeping);
 			}
@@ -1638,10 +1632,6 @@ replay:
 				q = qdisc_lookup(dev, tcm->tcm_handle);
 				if (!q)
 					goto create_n_graft;
-				if (q->parent != tcm->tcm_parent) {
-					NL_SET_ERR_MSG(extack, "Cannot move an existing qdisc to a different parent");
-					return -EINVAL;
-				}
 				if (n->nlmsg_flags & NLM_F_EXCL) {
 					NL_SET_ERR_MSG(extack, "Exclusivity flag on, cannot override");
 					return -EEXIST;
@@ -2198,12 +2188,6 @@ static int tc_ctl_tclass(struct sk_buff *skb, struct nlmsghdr *n,
 	if (tca[TCA_INGRESS_BLOCK] || tca[TCA_EGRESS_BLOCK]) {
 		NL_SET_ERR_MSG(extack, "Shared blocks are not supported for classes");
 		return -EOPNOTSUPP;
-	}
-
-	/* Prevent creation of traffic classes with classid TC_H_ROOT */
-	if (clid == TC_H_ROOT) {
-		NL_SET_ERR_MSG(extack, "Cannot create traffic class with classid TC_H_ROOT");
-		return -EINVAL;
 	}
 
 	new_cl = cl;

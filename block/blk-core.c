@@ -49,7 +49,6 @@
 #include "blk-pm.h"
 #include "blk-cgroup.h"
 #include "blk-throttle.h"
-#include "blk-ioprio.h"
 
 struct dentry *blk_debugfs_root;
 
@@ -755,15 +754,6 @@ void submit_bio_noacct(struct bio *bio)
 		bio_clear_polled(bio);
 
 	switch (bio_op(bio)) {
-	case REQ_OP_READ:
-	case REQ_OP_WRITE:
-		break;
-	case REQ_OP_FLUSH:
-		/*
-		 * REQ_OP_FLUSH can't be submitted through bios, it is only
-		 * synthetized in struct request by the flush state machine.
-		 */
-		goto not_supported;
 	case REQ_OP_DISCARD:
 		if (!bdev_max_discard_sectors(bdev))
 			goto not_supported;
@@ -777,10 +767,6 @@ void submit_bio_noacct(struct bio *bio)
 		if (status != BLK_STS_OK)
 			goto end_io;
 		break;
-	case REQ_OP_WRITE_ZEROES:
-		if (!q->limits.max_write_zeroes_sectors)
-			goto not_supported;
-		break;
 	case REQ_OP_ZONE_RESET:
 	case REQ_OP_ZONE_OPEN:
 	case REQ_OP_ZONE_CLOSE:
@@ -792,15 +778,12 @@ void submit_bio_noacct(struct bio *bio)
 		if (!bdev_is_zoned(bio->bi_bdev) || !blk_queue_zone_resetall(q))
 			goto not_supported;
 		break;
-	case REQ_OP_DRV_IN:
-	case REQ_OP_DRV_OUT:
-		/*
-		 * Driver private operations are only used with passthrough
-		 * requests.
-		 */
-		fallthrough;
+	case REQ_OP_WRITE_ZEROES:
+		if (!q->limits.max_write_zeroes_sectors)
+			goto not_supported;
+		break;
 	default:
-		goto not_supported;
+		break;
 	}
 
 	if (blk_throtl_bio(bio))
@@ -815,14 +798,6 @@ end_io:
 	bio_endio(bio);
 }
 EXPORT_SYMBOL(submit_bio_noacct);
-
-static void bio_set_ioprio(struct bio *bio)
-{
-	/* Nobody set ioprio so far? Initialize it based on task's nice value */
-	if (IOPRIO_PRIO_CLASS(bio->bi_ioprio) == IOPRIO_CLASS_NONE)
-		bio->bi_ioprio = get_current_ioprio();
-	blkcg_set_ioprio(bio);
-}
 
 /**
  * submit_bio - submit a bio to the block device layer for I/O
@@ -849,7 +824,6 @@ void submit_bio(struct bio *bio)
 		count_vm_events(PGPGOUT, bio_sectors(bio));
 	}
 
-	bio_set_ioprio(bio);
 	submit_bio_noacct(bio);
 }
 EXPORT_SYMBOL(submit_bio);
@@ -890,16 +864,7 @@ int bio_poll(struct bio *bio, struct io_comp_batch *iob, unsigned int flags)
 	 */
 	blk_flush_plug(current->plug, false);
 
-	/*
-	 * We need to be able to enter a frozen queue, similar to how
-	 * timeouts also need to do that. If that is blocked, then we can
-	 * have pending IO when a queue freeze is started, and then the
-	 * wait for the freeze to finish will wait for polled requests to
-	 * timeout as the poller is preventer from entering the queue and
-	 * completing them. As long as we prevent new IO from being queued,
-	 * that should be all that matters.
-	 */
-	if (!percpu_ref_tryget(&q->q_usage_counter))
+	if (bio_queue_enter(bio))
 		return 0;
 	if (queue_is_mq(q)) {
 		ret = blk_mq_poll(q, cookie, iob, flags);
@@ -959,11 +924,10 @@ void update_io_ticks(struct block_device *part, unsigned long now, bool end)
 	unsigned long stamp;
 again:
 	stamp = READ_ONCE(part->bd_stamp);
-	if (unlikely(time_after(now, stamp)) &&
-	    likely(try_cmpxchg(&part->bd_stamp, &stamp, now)) &&
-	    (end || part_in_flight(part)))
-		__part_stat_add(part, io_ticks, now - stamp);
-
+	if (unlikely(time_after(now, stamp))) {
+		if (likely(try_cmpxchg(&part->bd_stamp, &stamp, now)))
+			__part_stat_add(part, io_ticks, end ? now - stamp : 1);
+	}
 	if (part->bd_partno) {
 		part = bdev_whole(part);
 		goto again;

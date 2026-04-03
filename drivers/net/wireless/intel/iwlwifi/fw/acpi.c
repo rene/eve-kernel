@@ -123,7 +123,7 @@ static int iwl_acpi_get_dsm_integer(struct device *dev, int rev, int func,
 				    size_t expected_size)
 {
 	union acpi_object *obj;
-	int ret;
+	int ret = 0;
 
 	obj = iwl_acpi_get_dsm_object(dev, rev, func, NULL, guid);
 	if (IS_ERR(obj)) {
@@ -138,10 +138,8 @@ static int iwl_acpi_get_dsm_integer(struct device *dev, int rev, int func,
 	} else if (obj->type == ACPI_TYPE_BUFFER) {
 		__le64 le_value = 0;
 
-		if (WARN_ON_ONCE(expected_size > sizeof(le_value))) {
-			ret = -EINVAL;
-			goto out;
-		}
+		if (WARN_ON_ONCE(expected_size > sizeof(le_value)))
+			return -EINVAL;
 
 		/* if the buffer size doesn't match the expected size */
 		if (obj->buffer.length != expected_size)
@@ -162,9 +160,8 @@ static int iwl_acpi_get_dsm_integer(struct device *dev, int rev, int func,
 	}
 
 	IWL_DEBUG_DEV_RADIO(dev,
-			    "ACPI: DSM method evaluated: func=%d, value=%lld\n",
-			    func, *value);
-	ret = 0;
+			    "ACPI: DSM method evaluated: func=%d, ret=%d\n",
+			    func, ret);
 out:
 	ACPI_FREE(obj);
 	return ret;
@@ -579,7 +576,7 @@ int iwl_sar_get_wrds_table(struct iwl_fw_runtime *fwrt)
 					 &tbl_rev);
 	if (!IS_ERR(wifi_pkg)) {
 		if (tbl_rev != 2) {
-			ret = -EINVAL;
+			ret = PTR_ERR(wifi_pkg);
 			goto out_free;
 		}
 
@@ -595,7 +592,7 @@ int iwl_sar_get_wrds_table(struct iwl_fw_runtime *fwrt)
 					 &tbl_rev);
 	if (!IS_ERR(wifi_pkg)) {
 		if (tbl_rev != 1) {
-			ret = -EINVAL;
+			ret = PTR_ERR(wifi_pkg);
 			goto out_free;
 		}
 
@@ -611,7 +608,7 @@ int iwl_sar_get_wrds_table(struct iwl_fw_runtime *fwrt)
 					 &tbl_rev);
 	if (!IS_ERR(wifi_pkg)) {
 		if (tbl_rev != 0) {
-			ret = -EINVAL;
+			ret = PTR_ERR(wifi_pkg);
 			goto out_free;
 		}
 
@@ -668,7 +665,7 @@ int iwl_sar_get_ewrd_table(struct iwl_fw_runtime *fwrt)
 					 &tbl_rev);
 	if (!IS_ERR(wifi_pkg)) {
 		if (tbl_rev != 2) {
-			ret = -EINVAL;
+			ret = PTR_ERR(wifi_pkg);
 			goto out_free;
 		}
 
@@ -684,7 +681,7 @@ int iwl_sar_get_ewrd_table(struct iwl_fw_runtime *fwrt)
 					 &tbl_rev);
 	if (!IS_ERR(wifi_pkg)) {
 		if (tbl_rev != 1) {
-			ret = -EINVAL;
+			ret = PTR_ERR(wifi_pkg);
 			goto out_free;
 		}
 
@@ -700,7 +697,7 @@ int iwl_sar_get_ewrd_table(struct iwl_fw_runtime *fwrt)
 					 &tbl_rev);
 	if (!IS_ERR(wifi_pkg)) {
 		if (tbl_rev != 0) {
-			ret = -EINVAL;
+			ret = PTR_ERR(wifi_pkg);
 			goto out_free;
 		}
 
@@ -728,7 +725,7 @@ read_table:
 	 * from index 1, so the maximum value allowed here is
 	 * ACPI_SAR_PROFILES_NUM - 1.
 	 */
-	if (n_profiles >= ACPI_SAR_PROFILE_NUM) {
+	if (n_profiles <= 0 || n_profiles >= ACPI_SAR_PROFILE_NUM) {
 		ret = -EINVAL;
 		goto out_free;
 	}
@@ -828,25 +825,22 @@ int iwl_sar_get_wgds_table(struct iwl_fw_runtime *fwrt)
 				entry = &wifi_pkg->package.elements[entry_idx];
 				entry_idx++;
 				if (entry->type != ACPI_TYPE_INTEGER ||
-				    entry->integer.value > num_profiles ||
-				    entry->integer.value <
-					rev_data[idx].min_profiles) {
+				    entry->integer.value > num_profiles) {
 					ret = -EINVAL;
 					goto out_free;
 				}
+				num_profiles = entry->integer.value;
 
 				/*
-				 * Check to see if we received package count
-				 * same as max # of profiles
+				 * this also validates >= min_profiles since we
+				 * otherwise wouldn't have gotten the data when
+				 * looking up in ACPI
 				 */
 				if (wifi_pkg->package.count !=
 				    hdr_size + profile_size * num_profiles) {
 					ret = -EINVAL;
 					goto out_free;
 				}
-
-				/* Number of valid profiles */
-				num_profiles = entry->integer.value;
 			}
 			goto read_table;
 		}
@@ -1049,9 +1043,6 @@ int iwl_acpi_get_ppag_table(struct iwl_fw_runtime *fwrt)
 		IWL_DEBUG_RADIO(fwrt, "Reading PPAG table v1 (tbl_rev=0)\n");
 		goto read_table;
 	}
-
-	ret = PTR_ERR(wifi_pkg);
-	goto out_free;
 
 read_table:
 	fwrt->ppag_ver = tbl_rev;

@@ -28,9 +28,9 @@
 #include <net/tcp.h>
 #include <net/sock_reuseport.h>
 
-u32 inet_ehashfn(const struct net *net, const __be32 laddr,
-		 const __u16 lport, const __be32 faddr,
-		 const __be16 fport)
+static u32 inet_ehashfn(const struct net *net, const __be32 laddr,
+			const __u16 lport, const __be32 faddr,
+			const __be16 fport)
 {
 	static u32 inet_ehash_secret __read_mostly;
 
@@ -39,7 +39,6 @@ u32 inet_ehashfn(const struct net *net, const __be32 laddr,
 	return __inet_ehashfn(laddr, lport, faddr, fport,
 			      inet_ehash_secret + net_hash_mix(net));
 }
-EXPORT_SYMBOL_GPL(inet_ehashfn);
 
 /* This function handles inet_sock, but also timewait and request sockets
  * for IPv4/IPv6.
@@ -339,25 +338,20 @@ static inline int compute_score(struct sock *sk, struct net *net,
 	return score;
 }
 
-INDIRECT_CALLABLE_DECLARE(inet_ehashfn_t udp_ehashfn);
-
-struct sock *inet_lookup_reuseport(struct net *net, struct sock *sk,
-				   struct sk_buff *skb, int doff,
-				   __be32 saddr, __be16 sport,
-				   __be32 daddr, unsigned short hnum,
-				   inet_ehashfn_t *ehashfn)
+static inline struct sock *lookup_reuseport(struct net *net, struct sock *sk,
+					    struct sk_buff *skb, int doff,
+					    __be32 saddr, __be16 sport,
+					    __be32 daddr, unsigned short hnum)
 {
 	struct sock *reuse_sk = NULL;
 	u32 phash;
 
 	if (sk->sk_reuseport) {
-		phash = INDIRECT_CALL_2(ehashfn, udp_ehashfn, inet_ehashfn,
-					net, daddr, hnum, saddr, sport);
+		phash = inet_ehashfn(net, daddr, hnum, saddr, sport);
 		reuse_sk = reuseport_select_sock(sk, phash, skb, doff);
 	}
 	return reuse_sk;
 }
-EXPORT_SYMBOL_GPL(inet_lookup_reuseport);
 
 /*
  * Here are some nice properties to exploit here. The BSD API
@@ -381,8 +375,8 @@ static struct sock *inet_lhash2_lookup(struct net *net,
 	sk_nulls_for_each_rcu(sk, node, &ilb2->nulls_head) {
 		score = compute_score(sk, net, hnum, daddr, dif, sdif);
 		if (score > hiscore) {
-			result = inet_lookup_reuseport(net, sk, skb, doff,
-						       saddr, sport, daddr, hnum, inet_ehashfn);
+			result = lookup_reuseport(net, sk, skb, doff,
+						  saddr, sport, daddr, hnum);
 			if (result)
 				return result;
 
@@ -411,8 +405,7 @@ static inline struct sock *inet_lookup_run_bpf(struct net *net,
 	if (no_reuseport || IS_ERR_OR_NULL(sk))
 		return sk;
 
-	reuse_sk = inet_lookup_reuseport(net, sk, skb, doff, saddr, sport, daddr, hnum,
-					 inet_ehashfn);
+	reuse_sk = lookup_reuseport(net, sk, skb, doff, saddr, sport, daddr, hnum);
 	if (reuse_sk)
 		sk = reuse_sk;
 	return sk;
@@ -1118,33 +1111,10 @@ ok:
 	return 0;
 
 error:
-	if (sk_hashed(sk)) {
-		spinlock_t *lock = inet_ehash_lockp(hinfo, sk->sk_hash);
-
-		sock_prot_inuse_add(net, sk->sk_prot, -1);
-
-		spin_lock(lock);
-		__sk_nulls_del_node_init_rcu(sk);
-		spin_unlock(lock);
-
-		sk->sk_hash = 0;
-		inet_sk(sk)->inet_sport = 0;
-		inet_sk(sk)->inet_num = 0;
-
-		if (tw)
-			inet_twsk_bind_unhash(tw, hinfo);
-	}
-
 	spin_unlock(&head2->lock);
 	if (tb_created)
 		inet_bind_bucket_destroy(hinfo->bind_bucket_cachep, tb);
-	spin_unlock(&head->lock);
-
-	if (tw)
-		inet_twsk_deschedule_put(tw);
-
-	local_bh_enable();
-
+	spin_unlock_bh(&head->lock);
 	return -ENOMEM;
 }
 
@@ -1218,37 +1188,22 @@ int inet_ehash_locks_alloc(struct inet_hashinfo *hashinfo)
 {
 	unsigned int locksz = sizeof(spinlock_t);
 	unsigned int i, nblocks = 1;
-	spinlock_t *ptr = NULL;
 
-	if (locksz == 0)
-		goto set_mask;
+	if (locksz != 0) {
+		/* allocate 2 cache lines or at least one spinlock per cpu */
+		nblocks = max(2U * L1_CACHE_BYTES / locksz, 1U);
+		nblocks = roundup_pow_of_two(nblocks * num_possible_cpus());
 
-	/* Allocate 2 cache lines or at least one spinlock per cpu. */
-	nblocks = max(2U * L1_CACHE_BYTES / locksz, 1U) * num_possible_cpus();
+		/* no more locks than number of hash buckets */
+		nblocks = min(nblocks, hashinfo->ehash_mask + 1);
 
-	/* At least one page per NUMA node. */
-	nblocks = max(nblocks, num_online_nodes() * PAGE_SIZE / locksz);
-
-	nblocks = roundup_pow_of_two(nblocks);
-
-	/* No more locks than number of hash buckets. */
-	nblocks = min(nblocks, hashinfo->ehash_mask + 1);
-
-	if (num_online_nodes() > 1) {
-		/* Use vmalloc() to allow NUMA policy to spread pages
-		 * on all available nodes if desired.
-		 */
-		ptr = vmalloc_array(nblocks, locksz);
-	}
-	if (!ptr) {
-		ptr = kvmalloc_array(nblocks, locksz, GFP_KERNEL);
-		if (!ptr)
+		hashinfo->ehash_locks = kvmalloc_array(nblocks, locksz, GFP_KERNEL);
+		if (!hashinfo->ehash_locks)
 			return -ENOMEM;
+
+		for (i = 0; i < nblocks; i++)
+			spin_lock_init(&hashinfo->ehash_locks[i]);
 	}
-	for (i = 0; i < nblocks; i++)
-		spin_lock_init(&ptr[i]);
-	hashinfo->ehash_locks = ptr;
-set_mask:
 	hashinfo->ehash_locks_mask = nblocks - 1;
 	return 0;
 }

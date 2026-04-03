@@ -18,10 +18,12 @@
 #include <linux/of_platform.h>
 #include <linux/delay.h>
 #include <linux/pm_runtime.h>
+#include <linux/panic_notifier.h>
 
 #include "coresight-etm-perf.h"
 #include "coresight-priv.h"
 #include "coresight-syscfg.h"
+#include "coresight-tmc.h"
 
 static DEFINE_MUTEX(coresight_mutex);
 static DEFINE_PER_CPU(struct coresight_device *, csdev_sink);
@@ -189,8 +191,7 @@ static int coresight_find_link_outport(struct coresight_device *csdev,
 
 static inline u32 coresight_read_claim_tags(struct coresight_device *csdev)
 {
-	return FIELD_GET(CORESIGHT_CLAIM_MASK,
-			 csdev_access_relaxed_read32(&csdev->access, CORESIGHT_CLAIMCLR));
+	return csdev_access_relaxed_read32(&csdev->access, CORESIGHT_CLAIMCLR);
 }
 
 static inline bool coresight_is_claimed_self_hosted(struct coresight_device *csdev)
@@ -1120,6 +1121,7 @@ int coresight_enable(struct coresight_device *csdev)
 	int cpu, ret = 0;
 	struct coresight_device *sink;
 	struct list_head *path;
+	struct tmc_drvdata *drvdata;
 	enum coresight_dev_subtype_source subtype;
 
 	subtype = csdev->subtype.source_subtype;
@@ -1153,6 +1155,9 @@ int coresight_enable(struct coresight_device *csdev)
 		ret = PTR_ERR(path);
 		goto out;
 	}
+
+	drvdata = dev_get_drvdata(sink->dev.parent);
+	drvdata->etm_source = csdev;
 
 	ret = coresight_enable_path(path, CS_MODE_SYSFS, NULL);
 	if (ret)
@@ -1479,20 +1484,18 @@ static void coresight_remove_conns(struct coresight_device *csdev)
 }
 
 /**
- * coresight_timeout_action - loop until a bit has changed to a specific register
- *                  state, with a callback after every trial.
+ * coresight_timeout - loop until a bit has changed to a specific register
+ *			state.
  * @csa: coresight device access for the device
  * @offset: Offset of the register from the base of the device.
  * @position: the position of the bit of interest.
  * @value: the value the bit should have.
- * @cb: Call back after each trial.
  *
  * Return: 0 as soon as the bit has taken the desired state or -EAGAIN if
  * TIMEOUT_US has elapsed, which ever happens first.
  */
-int coresight_timeout_action(struct csdev_access *csa, u32 offset,
-		      int position, int value,
-			  coresight_timeout_cb_t cb)
+int coresight_timeout(struct csdev_access *csa, u32 offset,
+		      int position, int value)
 {
 	int i;
 	u32 val;
@@ -1508,8 +1511,7 @@ int coresight_timeout_action(struct csdev_access *csa, u32 offset,
 			if (!(val & BIT(position)))
 				return 0;
 		}
-		if (cb)
-			cb(csa, offset, position, value);
+
 		/*
 		 * Delay is arbitrary - the specification doesn't say how long
 		 * we are expected to wait.  Extra check required to make sure
@@ -1520,13 +1522,6 @@ int coresight_timeout_action(struct csdev_access *csa, u32 offset,
 	}
 
 	return -EAGAIN;
-}
-EXPORT_SYMBOL_GPL(coresight_timeout_action);
-
-int coresight_timeout(struct csdev_access *csa, u32 offset,
-		      int position, int value)
-{
-	return coresight_timeout_action(csa, offset, position, value, NULL);
 }
 EXPORT_SYMBOL_GPL(coresight_timeout);
 
@@ -1798,6 +1793,31 @@ struct bus_type coresight_bustype = {
 	.name	= "coresight",
 };
 
+static int coresight_panic_sync(struct device *dev, void *data)
+{
+
+	struct coresight_device *csdev = container_of(dev, struct coresight_device, dev);
+
+	/* Run through panic sync handlers for all enabled devices */
+	if (csdev->enable && panic_ops(csdev))
+		panic_ops(csdev)->sync(csdev);
+
+	return 0;
+}
+
+static int coresight_panic_cb(struct notifier_block *self,
+			       unsigned long v, void *p)
+{
+	bus_for_each_dev(&coresight_bustype, NULL, NULL,
+				 coresight_panic_sync);
+
+	return 0;
+}
+
+static struct notifier_block coresight_notifier = {
+	.notifier_call = coresight_panic_cb,
+};
+
 static int __init coresight_init(void)
 {
 	int ret;
@@ -1810,20 +1830,32 @@ static int __init coresight_init(void)
 	if (ret)
 		goto exit_bus_unregister;
 
+	/* Register function to be called for panic */
+	ret = atomic_notifier_chain_register(&panic_notifier_list,
+					     &coresight_notifier);
+	if (ret)
+		goto exit_etm_perf;
+
 	/* initialise the coresight syscfg API */
 	ret = cscfg_init();
 	if (!ret)
 		return 0;
 
+	atomic_notifier_chain_unregister(&panic_notifier_list,
+					 &coresight_notifier);
+exit_etm_perf:
 	etm_perf_exit();
 exit_bus_unregister:
 	bus_unregister(&coresight_bustype);
+
 	return ret;
 }
 
 static void __exit coresight_exit(void)
 {
 	cscfg_exit();
+	atomic_notifier_chain_unregister(&panic_notifier_list,
+					 &coresight_notifier);
 	etm_perf_exit();
 	bus_unregister(&coresight_bustype);
 }

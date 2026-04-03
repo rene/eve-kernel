@@ -306,6 +306,7 @@ static void __irq_disable(struct irq_desc *desc, bool mask);
 void irq_shutdown(struct irq_desc *desc)
 {
 	if (irqd_is_started(&desc->irq_data)) {
+		clear_irq_resend(desc);
 		desc->depth = 1;
 		if (desc->irq_data.chip->irq_shutdown) {
 			desc->irq_data.chip->irq_shutdown(&desc->irq_data);
@@ -1586,7 +1587,6 @@ int irq_chip_pm_get(struct irq_data *data)
 
 	return retval;
 }
-EXPORT_SYMBOL_GPL(irq_chip_pm_get);
 
 /**
  * irq_chip_pm_put - Disable power for an IRQ chip
@@ -1606,4 +1606,3 @@ int irq_chip_pm_put(struct irq_data *data)
 
 	return (retval < 0) ? retval : 0;
 }
-EXPORT_SYMBOL_GPL(irq_chip_pm_put);

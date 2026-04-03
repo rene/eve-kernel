@@ -19,7 +19,6 @@
 #include "xfs_icache.h"
 #include "xfs_rtalloc.h"
 #include "xfs_sb.h"
-#include "xfs_rtbitmap.h"
 
 /*
  * Read and return the summary information for a given extent size,
@@ -213,23 +212,6 @@ xfs_rtallocate_range(
 }
 
 /*
- * Make sure we don't run off the end of the rt volume.  Be careful that
- * adjusting maxlen downwards doesn't cause us to fail the alignment checks.
- */
-static inline xfs_extlen_t
-xfs_rtallocate_clamp_len(
-	struct xfs_mount	*mp,
-	xfs_rtblock_t		startrtx,
-	xfs_extlen_t		rtxlen,
-	xfs_extlen_t		prod)
-{
-	xfs_extlen_t		ret;
-
-	ret = min(mp->m_sb.sb_rextents, startrtx + rtxlen) - startrtx;
-	return rounddown(ret, prod);
-}
-
-/*
  * Attempt to allocate an extent minlen<=len<=maxlen starting from
  * bitmap block bbno.  If we don't get maxlen then use prod to trim
  * the length, if given.  Returns error; returns starting block in *rtblock.
@@ -266,7 +248,7 @@ xfs_rtallocate_extent_block(
 	     i <= end;
 	     i++) {
 		/* Make sure we don't scan off the end of the rt volume. */
-		maxlen = xfs_rtallocate_clamp_len(mp, i, maxlen, prod);
+		maxlen = min(mp->m_sb.sb_rextents, i + maxlen) - i;
 
 		/*
 		 * See if there's a free extent of maxlen starting at i.
@@ -318,7 +300,7 @@ xfs_rtallocate_extent_block(
 	/*
 	 * Searched the whole thing & didn't find a maxlen free extent.
 	 */
-	if (minlen <= maxlen && besti != -1) {
+	if (minlen < maxlen && besti != -1) {
 		xfs_extlen_t	p;	/* amount to trim length by */
 
 		/*
@@ -373,8 +355,7 @@ xfs_rtallocate_extent_exact(
 	int		isfree;		/* extent is free */
 	xfs_rtblock_t	next;		/* next block to try (dummy) */
 
-	ASSERT(minlen % prod == 0);
-	ASSERT(maxlen % prod == 0);
+	ASSERT(minlen % prod == 0 && maxlen % prod == 0);
 	/*
 	 * Check if the range in question (for maxlen) is free.
 	 */
@@ -457,9 +438,7 @@ xfs_rtallocate_extent_near(
 	xfs_rtblock_t	n;		/* next block to try */
 	xfs_rtblock_t	r;		/* result block */
 
-	ASSERT(minlen % prod == 0);
-	ASSERT(maxlen % prod == 0);
-
+	ASSERT(minlen % prod == 0 && maxlen % prod == 0);
 	/*
 	 * If the block number given is off the end, silently set it to
 	 * the last block.
@@ -468,7 +447,7 @@ xfs_rtallocate_extent_near(
 		bno = mp->m_sb.sb_rextents - 1;
 
 	/* Make sure we don't run off the end of the rt volume. */
-	maxlen = xfs_rtallocate_clamp_len(mp, bno, maxlen, prod);
+	maxlen = min(mp->m_sb.sb_rextents, bno + maxlen) - bno;
 	if (maxlen < minlen) {
 		*rtblock = NULLRTBLOCK;
 		return 0;
@@ -659,8 +638,7 @@ xfs_rtallocate_extent_size(
 	xfs_rtblock_t	r;		/* result block number */
 	xfs_suminfo_t	sum;		/* summary information for extents */
 
-	ASSERT(minlen % prod == 0);
-	ASSERT(maxlen % prod == 0);
+	ASSERT(minlen % prod == 0 && maxlen % prod == 0);
 	ASSERT(maxlen != 0);
 
 	/*
@@ -840,6 +818,8 @@ xfs_growfs_rt_alloc(
 		nmap = 1;
 		error = xfs_bmapi_write(tp, ip, oblocks, nblocks - oblocks,
 					XFS_BMAPI_METADATA, 0, &map, &nmap);
+		if (!error && nmap < 1)
+			error = -ENOSPC;
 		if (error)
 			goto out_trans_cancel;
 		/*
@@ -916,39 +896,6 @@ xfs_alloc_rsum_cache(
 }
 
 /*
- * If we changed the rt extent size (meaning there was no rt volume previously)
- * and the root directory had EXTSZINHERIT and RTINHERIT set, it's possible
- * that the extent size hint on the root directory is no longer congruent with
- * the new rt extent size.  Log the rootdir inode to fix this.
- */
-static int
-xfs_growfs_rt_fixup_extsize(
-	struct xfs_mount	*mp)
-{
-	struct xfs_inode	*ip = mp->m_rootip;
-	struct xfs_trans	*tp;
-	int			error = 0;
-
-	xfs_ilock(ip, XFS_IOLOCK_EXCL);
-	if (!(ip->i_diflags & XFS_DIFLAG_RTINHERIT) ||
-	    !(ip->i_diflags & XFS_DIFLAG_EXTSZINHERIT))
-		goto out_iolock;
-
-	error = xfs_trans_alloc_inode(ip, &M_RES(mp)->tr_ichange, 0, 0, false,
-			&tp);
-	if (error)
-		goto out_iolock;
-
-	xfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
-	error = xfs_trans_commit(tp);
-	xfs_iunlock(ip, XFS_ILOCK_EXCL);
-
-out_iolock:
-	xfs_iunlock(ip, XFS_IOLOCK_EXCL);
-	return error;
-}
-
-/*
  * Visible (exported) functions.
  */
 
@@ -977,7 +924,6 @@ xfs_growfs_rt(
 	xfs_sb_t	*sbp;		/* old superblock */
 	xfs_fsblock_t	sumbno;		/* summary block number */
 	uint8_t		*rsum_cache;	/* old summary cache */
-	xfs_agblock_t	old_rextsize = mp->m_sb.sb_rextsize;
 
 	sbp = &mp->m_sb;
 
@@ -987,39 +933,34 @@ xfs_growfs_rt(
 	/* Needs to have been mounted with an rt device. */
 	if (!XFS_IS_REALTIME_MOUNT(mp))
 		return -EINVAL;
-
-	if (!mutex_trylock(&mp->m_growlock))
-		return -EWOULDBLOCK;
 	/*
 	 * Mount should fail if the rt bitmap/summary files don't load, but
 	 * we'll check anyway.
 	 */
-	error = -EINVAL;
 	if (!mp->m_rbmip || !mp->m_rsumip)
-		goto out_unlock;
+		return -EINVAL;
 
 	/* Shrink not supported. */
 	if (in->newblocks <= sbp->sb_rblocks)
-		goto out_unlock;
+		return -EINVAL;
 
 	/* Can only change rt extent size when adding rt volume. */
 	if (sbp->sb_rblocks > 0 && in->extsize != sbp->sb_rextsize)
-		goto out_unlock;
+		return -EINVAL;
 
 	/* Range check the extent size. */
 	if (XFS_FSB_TO_B(mp, in->extsize) > XFS_MAX_RTEXTSIZE ||
 	    XFS_FSB_TO_B(mp, in->extsize) < XFS_MIN_RTEXTSIZE)
-		goto out_unlock;
+		return -EINVAL;
 
 	/* Unsupported realtime features. */
-	error = -EOPNOTSUPP;
-	if (xfs_has_rmapbt(mp) || xfs_has_reflink(mp) || xfs_has_quota(mp))
-		goto out_unlock;
+	if (xfs_has_rmapbt(mp) || xfs_has_reflink(mp))
+		return -EOPNOTSUPP;
 
 	nrblocks = in->newblocks;
 	error = xfs_sb_validate_fsb_count(sbp, nrblocks);
 	if (error)
-		goto out_unlock;
+		return error;
 	/*
 	 * Read in the last block of the device, make sure it exists.
 	 */
@@ -1027,7 +968,7 @@ xfs_growfs_rt(
 				XFS_FSB_TO_BB(mp, nrblocks - 1),
 				XFS_FSB_TO_BB(mp, 1), 0, &bp, NULL);
 	if (error)
-		goto out_unlock;
+		return error;
 	xfs_buf_relse(bp);
 
 	/*
@@ -1035,12 +976,8 @@ xfs_growfs_rt(
 	 */
 	nrextents = nrblocks;
 	do_div(nrextents, in->extsize);
-	if (!xfs_validate_rtextents(nrextents)) {
-		error = -EINVAL;
-		goto out_unlock;
-	}
 	nrbmblocks = howmany_64(nrextents, NBBY * sbp->sb_blocksize);
-	nrextslog = xfs_compute_rextslog(nrextents);
+	nrextslog = xfs_highbit32(nrextents);
 	nrsumlevels = nrextslog + 1;
 	nrsumsize = (uint)sizeof(xfs_suminfo_t) * nrsumlevels * nrbmblocks;
 	nrsumblocks = XFS_B_TO_FSB(mp, nrsumsize);
@@ -1050,11 +987,8 @@ xfs_growfs_rt(
 	 * the log.  This prevents us from getting a log overflow,
 	 * since we'll log basically the whole summary file at once.
 	 */
-	if (nrsumblocks > (mp->m_sb.sb_logblocks >> 1)) {
-		error = -EINVAL;
-		goto out_unlock;
-	}
-
+	if (nrsumblocks > (mp->m_sb.sb_logblocks >> 1))
+		return -EINVAL;
 	/*
 	 * Get the old block counts for bitmap and summary inodes.
 	 * These can't change since other growfs callers are locked out.
@@ -1066,10 +1000,10 @@ xfs_growfs_rt(
 	 */
 	error = xfs_growfs_rt_alloc(mp, rbmblocks, nrbmblocks, mp->m_rbmip);
 	if (error)
-		goto out_unlock;
+		return error;
 	error = xfs_growfs_rt_alloc(mp, rsumblocks, nrsumblocks, mp->m_rsumip);
 	if (error)
-		goto out_unlock;
+		return error;
 
 	rsum_cache = mp->m_rsum_cache;
 	if (nrbmblocks != sbp->sb_rbmblocks)
@@ -1105,16 +1039,13 @@ xfs_growfs_rt(
 		nsbp->sb_rextents = nsbp->sb_rblocks;
 		do_div(nsbp->sb_rextents, nsbp->sb_rextsize);
 		ASSERT(nsbp->sb_rextents != 0);
-		nsbp->sb_rextslog = xfs_compute_rextslog(nsbp->sb_rextents);
+		nsbp->sb_rextslog = xfs_highbit32(nsbp->sb_rextents);
 		nrsumlevels = nmp->m_rsumlevels = nsbp->sb_rextslog + 1;
 		nrsumsize =
 			(uint)sizeof(xfs_suminfo_t) * nrsumlevels *
 			nsbp->sb_rbmblocks;
 		nrsumblocks = XFS_B_TO_FSB(mp, nrsumsize);
 		nmp->m_rsumsize = nrsumsize = XFS_FSB_TO_B(mp, nrsumblocks);
-		/* recompute growfsrt reservation from new rsumsize */
-		xfs_trans_resv_calc(nmp, &nmp->m_resv);
-
 		/*
 		 * Start a transaction, get the log reservation.
 		 */
@@ -1198,8 +1129,6 @@ error_cancel:
 		 */
 		mp->m_rsumlevels = nrsumlevels;
 		mp->m_rsumsize = nrsumsize;
-		/* recompute growfsrt reservation from new rsumsize */
-		xfs_trans_resv_calc(mp, &mp->m_resv);
 
 		error = xfs_trans_commit(tp);
 		if (error)
@@ -1210,12 +1139,6 @@ error_cancel:
 	}
 	if (error)
 		goto out_free;
-
-	if (old_rextsize != in->extsize) {
-		error = xfs_growfs_rt_fixup_extsize(mp);
-		if (error)
-			goto out_free;
-	}
 
 	/* Update secondary superblocks now the physical grow has completed */
 	error = xfs_update_secondary_sbs(mp);
@@ -1240,8 +1163,6 @@ out_free:
 		}
 	}
 
-out_unlock:
-	mutex_unlock(&mp->m_growlock);
 	return error;
 }
 

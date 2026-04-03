@@ -534,7 +534,7 @@ static int epf_ntb_db_bar_init(struct epf_ntb *ntb)
 	struct device *dev = &ntb->epf->dev;
 	int ret;
 	struct pci_epf_bar *epf_bar;
-	void *mw_addr;
+	void __iomem *mw_addr;
 	enum pci_barno barno;
 	size_t size = 4 * ntb->db_count;
 
@@ -714,7 +714,7 @@ static int epf_ntb_init_epc_bar(struct epf_ntb *ntb)
 		barno = pci_epc_get_next_free_bar(epc_features, barno);
 		if (barno < 0) {
 			dev_err(dev, "Fail to get NTB function BAR\n");
-			return -ENOENT;
+			return barno;
 		}
 		ntb->epf_ntb_bar[bar] = barno;
 	}
@@ -813,9 +813,8 @@ err_config_interrupt:
  */
 static void epf_ntb_epc_cleanup(struct epf_ntb *ntb)
 {
-	epf_ntb_mw_bar_clear(ntb, ntb->num_mws);
 	epf_ntb_db_bar_clear(ntb);
-	epf_ntb_config_sspad_bar_clear(ntb);
+	epf_ntb_mw_bar_clear(ntb, ntb->num_mws);
 }
 
 #define EPF_NTB_R(_name)						\
@@ -1033,10 +1032,8 @@ static int vpci_scan_bus(void *sysdata)
 	struct epf_ntb *ndev = sysdata;
 
 	vpci_bus = pci_scan_bus(ndev->vbus_number, &vpci_ops, sysdata);
-	if (!vpci_bus) {
-		pr_err("create pci bus failed\n");
-		return -EINVAL;
-	}
+	if (vpci_bus)
+		pr_err("create pci bus\n");
 
 	pci_bus_add_devices(vpci_bus);
 
@@ -1284,11 +1281,14 @@ static int pci_vntb_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	ret = ntb_register_device(&ndev->ntb);
 	if (ret) {
 		dev_err(dev, "Failed to register NTB device\n");
-		return ret;
+		goto err_register_dev;
 	}
 
 	dev_dbg(dev, "PCI Virtual NTB driver loaded\n");
 	return 0;
+
+err_register_dev:
+	return -EINVAL;
 }
 
 static struct pci_device_id pci_vntb_table[] = {
@@ -1355,19 +1355,13 @@ static int epf_ntb_bind(struct pci_epf *epf)
 	ret = pci_register_driver(&vntb_pci_driver);
 	if (ret) {
 		dev_err(dev, "failure register vntb pci driver\n");
-		goto err_epc_cleanup;
+		goto err_bar_alloc;
 	}
 
-	ret = vpci_scan_bus(ntb);
-	if (ret)
-		goto err_unregister;
+	vpci_scan_bus(ntb);
 
 	return 0;
 
-err_unregister:
-	pci_unregister_driver(&vntb_pci_driver);
-err_epc_cleanup:
-	epf_ntb_epc_cleanup(ntb);
 err_bar_alloc:
 	epf_ntb_config_spad_bar_free(ntb);
 

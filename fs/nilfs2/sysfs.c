@@ -836,15 +836,9 @@ ssize_t nilfs_dev_revision_show(struct nilfs_dev_attr *attr,
 				struct the_nilfs *nilfs,
 				char *buf)
 {
-	struct nilfs_super_block *raw_sb;
-	u32 major;
-	u16 minor;
-
-	down_read(&nilfs->ns_sem);
-	raw_sb = nilfs->ns_sbp[0];
-	major = le32_to_cpu(raw_sb->s_rev_level);
-	minor = le16_to_cpu(raw_sb->s_minor_rev_level);
-	up_read(&nilfs->ns_sem);
+	struct nilfs_super_block **sbp = nilfs->ns_sbp;
+	u32 major = le32_to_cpu(sbp[0]->s_rev_level);
+	u16 minor = le16_to_cpu(sbp[0]->s_minor_rev_level);
 
 	return sysfs_emit(buf, "%d.%d\n", major, minor);
 }
@@ -862,13 +856,8 @@ ssize_t nilfs_dev_device_size_show(struct nilfs_dev_attr *attr,
 				    struct the_nilfs *nilfs,
 				    char *buf)
 {
-	struct nilfs_super_block *raw_sb;
-	u64 dev_size;
-
-	down_read(&nilfs->ns_sem);
-	raw_sb = nilfs->ns_sbp[0];
-	dev_size = le64_to_cpu(raw_sb->s_dev_size);
-	up_read(&nilfs->ns_sem);
+	struct nilfs_super_block **sbp = nilfs->ns_sbp;
+	u64 dev_size = le64_to_cpu(sbp[0]->s_dev_size);
 
 	return sysfs_emit(buf, "%llu\n", dev_size);
 }
@@ -890,15 +879,9 @@ ssize_t nilfs_dev_uuid_show(struct nilfs_dev_attr *attr,
 			    struct the_nilfs *nilfs,
 			    char *buf)
 {
-	struct nilfs_super_block *raw_sb;
-	ssize_t len;
+	struct nilfs_super_block **sbp = nilfs->ns_sbp;
 
-	down_read(&nilfs->ns_sem);
-	raw_sb = nilfs->ns_sbp[0];
-	len = sysfs_emit(buf, "%pUb\n", raw_sb->s_uuid);
-	up_read(&nilfs->ns_sem);
-
-	return len;
+	return sysfs_emit(buf, "%pUb\n", sbp[0]->s_uuid);
 }
 
 static
@@ -906,16 +889,10 @@ ssize_t nilfs_dev_volume_name_show(struct nilfs_dev_attr *attr,
 				    struct the_nilfs *nilfs,
 				    char *buf)
 {
-	struct nilfs_super_block *raw_sb;
-	ssize_t len;
+	struct nilfs_super_block **sbp = nilfs->ns_sbp;
 
-	down_read(&nilfs->ns_sem);
-	raw_sb = nilfs->ns_sbp[0];
-	len = scnprintf(buf, sizeof(raw_sb->s_volume_name), "%s\n",
-			raw_sb->s_volume_name);
-	up_read(&nilfs->ns_sem);
-
-	return len;
+	return scnprintf(buf, sizeof(sbp[0]->s_volume_name), "%s\n",
+			 sbp[0]->s_volume_name);
 }
 
 static const char dev_readme_str[] =
@@ -1075,7 +1052,7 @@ void nilfs_sysfs_delete_device_group(struct the_nilfs *nilfs)
  ************************************************************************/
 
 static ssize_t nilfs_feature_revision_show(struct kobject *kobj,
-					    struct kobj_attribute *attr, char *buf)
+					    struct attribute *attr, char *buf)
 {
 	return sysfs_emit(buf, "%d.%d\n",
 			NILFS_CURRENT_REV, NILFS_MINOR_REV);
@@ -1087,7 +1064,7 @@ static const char features_readme_str[] =
 	"(1) revision\n\tshow current revision of NILFS file system driver.\n";
 
 static ssize_t nilfs_feature_README_show(struct kobject *kobj,
-					 struct kobj_attribute *attr,
+					 struct attribute *attr,
 					 char *buf)
 {
 	return sysfs_emit(buf, features_readme_str);

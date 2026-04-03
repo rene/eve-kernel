@@ -492,6 +492,28 @@ struct safexcel_context_record {
 #define EIP197_CS_RC_PREV(x)			((x) << 10)
 #define EIP197_RC_NULL				0x3ff
 
+/* EIP-96 PRNG */
+/* Registers   */
+#define EIP197_PE_EIP96_PRNG_CTRL(n)                    (0x01044 + (0x2000 * n))
+#define EIP197_PE_EIP96_PRNG_SEED_L(n)                  (0x01048 + (0x2000 * n))
+#define EIP197_PE_EIP96_PRNG_SEED_H(n)                  (0x0104c + (0x2000 * n))
+#define EIP197_PE_EIP96_PRNG_KEY_0_L(n)                 (0x01050 + (0x2000 * n))
+#define EIP197_PE_EIP96_PRNG_KEY_0_H(n)                 (0x01054 + (0x2000 * n))
+#define EIP197_PE_EIP96_PRNG_KEY_1_L(n)                 (0x01058 + (0x2000 * n))
+#define EIP197_PE_EIP96_PRNG_KEY_1_H(n)                 (0x0105c + (0x2000 * n))
+#define EIP197_PE_EIP96_PRNG_LFSR_L(n)                  (0x01070 + (0x2000 * n))
+#define EIP197_PE_EIP96_PRNG_LFSR_H(n)                  (0x01074 + (0x2000 * n))
+/* Register bits */
+#define EIP197_PE_EIP96_PRNG_EN                         BIT(0)
+#define EIP197_PE_EIP96_PRNG_AUTO                       BIT(1)
+/* Default values */
+#define EIP197_PE_EIP96_PRNG_KEY_0_L_VAL                0xaee75681
+#define EIP197_PE_EIP96_PRNG_KEY_0_H_VAL                0x0f27c239
+#define EIP197_PE_EIP96_PRNG_KEY_1_L_VAL                0x79947198
+#define EIP197_PE_EIP96_PRNG_KEY_1_H_VAL                0xe2991275
+#define EIP197_PE_EIP96_PRNG_LFSR_L_VAL                 0x21ac3c7c
+#define EIP197_PE_EIP96_PRNG_LFSR_H_VAL                 0xd008c4b4
+
 /* Result data */
 struct result_data_desc {
 	u32 packet_length:17;
@@ -783,12 +805,13 @@ struct safexcel_register_offsets {
 };
 
 enum safexcel_flags {
-	EIP197_TRC_CACHE	= BIT(0),
-	SAFEXCEL_HW_EIP197	= BIT(1),
-	EIP197_PE_ARB		= BIT(2),
-	EIP197_ICE		= BIT(3),
-	EIP197_SIMPLE_TRC	= BIT(4),
-	EIP197_OCE		= BIT(5),
+	EIP197_TRC_CACHE		= BIT(0),
+	SAFEXCEL_HW_EIP197		= BIT(1),
+	EIP197_PE_ARB			= BIT(2),
+	EIP197_ICE			= BIT(3),
+	EIP197_SIMPLE_TRC		= BIT(4),
+	EIP197_OCE			= BIT(5),
+	SAFEXCEL_ALGS_NOT_REGISTERED	= BIT(6),
 };
 
 struct safexcel_hwconfig {

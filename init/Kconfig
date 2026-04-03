@@ -89,15 +89,6 @@ config CC_HAS_ASM_GOTO_TIED_OUTPUT
 	# Detect buggy gcc and clang, fixed in gcc-11 clang-14.
 	def_bool $(success,echo 'int foo(int *x) { asm goto (".long (%l[bar]) - .": "+m"(*x) ::: bar); return *x; bar: return 0; }' | $CC -x c - -c -o /dev/null)
 
-config GCC_ASM_GOTO_OUTPUT_WORKAROUND
-	bool
-	depends on CC_IS_GCC && CC_HAS_ASM_GOTO_OUTPUT
-	# Fixed in GCC 14, 13.3, 12.4 and 11.5
-	# https://gcc.gnu.org/bugzilla/show_bug.cgi?id=113921
-	default y if GCC_VERSION < 110500
-	default y if GCC_VERSION >= 120000 && GCC_VERSION < 120400
-	default y if GCC_VERSION >= 130000 && GCC_VERSION < 130300
-
 config TOOLS_SUPPORT_RELR
 	def_bool $(success,env "CC=$(CC)" "LD=$(LD)" "NM=$(NM)" "OBJCOPY=$(OBJCOPY)" $(srctree)/scripts/tools-support-relr.sh)
 
@@ -678,7 +669,7 @@ endmenu # "CPU/Task time and stats accounting"
 
 config CPU_ISOLATION
 	bool "CPU isolation"
-	depends on SMP
+	depends on SMP || COMPILE_TEST
 	default y
 	help
 	  Make sure that CPUs running critical tasks are not disturbed by
@@ -689,6 +680,34 @@ config CPU_ISOLATION
 	  Say Y if unsure.
 
 source "kernel/rcu/Kconfig"
+
+config HAVE_ARCH_TASK_ISOLATION
+	bool
+
+config TASK_ISOLATION
+	bool "Provide hard CPU isolation from the kernel on demand"
+	depends on NO_HZ_FULL && HAVE_ARCH_TASK_ISOLATION
+	help
+
+	Allow userspace processes that place themselves on cores with
+	nohz_full and isolcpus enabled, and run prctl(PR_TASK_ISOLATION),
+	to "isolate" themselves from the kernel.  Prior to returning to
+	userspace, isolated tasks will arrange that no future kernel
+	activity will interrupt the task while the task is running in
+	userspace.  Attempting to re-enter the kernel while in this mode
+	will cause the task to be terminated with a signal; you must
+	explicitly use prctl() to disable task isolation before resuming
+	normal use of the kernel.
+
+	This "hard" isolation from the kernel is required for userspace
+	tasks that are running hard real-time tasks in userspace, such as
+	a high-speed network driver in userspace.  Without this option, but
+	with NO_HZ_FULL enabled, the kernel will make a best-faith, "soft"
+	effort to shield a single userspace process from interrupts, but
+	makes no guarantees.
+
+	You should say "N" unless you are intending to run a
+	high-performance userspace driver or similar task.
 
 config BUILD_BIN2C
 	bool
@@ -902,14 +921,14 @@ config CC_IMPLICIT_FALLTHROUGH
 	default "-Wimplicit-fallthrough=5" if CC_IS_GCC && $(cc-option,-Wimplicit-fallthrough=5)
 	default "-Wimplicit-fallthrough" if CC_IS_CLANG && $(cc-option,-Wunreachable-code-fallthrough)
 
-# Currently, disable gcc-10+ array-bounds globally.
+# Currently, disable gcc-11+ array-bounds globally.
 # It's still broken in gcc-13, so no upper bound yet.
-config GCC10_NO_ARRAY_BOUNDS
+config GCC11_NO_ARRAY_BOUNDS
 	def_bool y
 
 config CC_NO_ARRAY_BOUNDS
 	bool
-	default y if CC_IS_GCC && GCC_VERSION >= 100000 && GCC10_NO_ARRAY_BOUNDS
+	default y if CC_IS_GCC && GCC_VERSION >= 110000 && GCC11_NO_ARRAY_BOUNDS
 
 #
 # For architectures that know their GCC __int128 support is sound
@@ -1920,12 +1939,11 @@ config RUST
 	bool "Rust support"
 	depends on HAVE_RUST
 	depends on RUST_IS_AVAILABLE
-	depends on !CFI_CLANG
 	depends on !MODVERSIONS
 	depends on !GCC_PLUGINS
 	depends on !RANDSTRUCT
-	depends on !SHADOW_CALL_STACK
-	depends on !DEBUG_INFO_BTF || (PAHOLE_HAS_LANG_EXCLUDE && !LTO)
+	depends on !DEBUG_INFO_BTF
+	select CONSTRUCTORS
 	help
 	  Enables Rust support in the kernel.
 
@@ -1942,15 +1960,12 @@ config RUST
 config RUSTC_VERSION_TEXT
 	string
 	depends on RUST
-	default "$(shell,$(RUSTC) --version 2>/dev/null)"
+	default $(shell,command -v $(RUSTC) >/dev/null 2>&1 && $(RUSTC) --version || echo n)
 
 config BINDGEN_VERSION_TEXT
 	string
 	depends on RUST
-	# The dummy parameter `workaround-for-0.69.0` is required to support 0.69.0
-	# (https://github.com/rust-lang/rust-bindgen/pull/2678). It can be removed when
-	# the minimum version is upgraded past that (0.69.1 already fixed the issue).
-	default "$(shell,$(BINDGEN) --version workaround-for-0.69.0 2>/dev/null)"
+	default $(shell,command -v $(BINDGEN) >/dev/null 2>&1 && $(BINDGEN) --version || echo n)
 
 #
 # Place an empty function call at each tracepoint site. Can be

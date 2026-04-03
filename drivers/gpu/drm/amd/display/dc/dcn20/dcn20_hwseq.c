@@ -164,13 +164,14 @@ static void dcn20_setup_gsl_group_as_lock(
 	}
 
 	/* at this point we want to program whether it's to enable or disable */
-	if (pipe_ctx->stream_res.tg->funcs->set_gsl != NULL) {
+	if (pipe_ctx->stream_res.tg->funcs->set_gsl != NULL &&
+		pipe_ctx->stream_res.tg->funcs->set_gsl_source_select != NULL) {
 		pipe_ctx->stream_res.tg->funcs->set_gsl(
 			pipe_ctx->stream_res.tg,
 			&gsl);
-		if (pipe_ctx->stream_res.tg->funcs->set_gsl_source_select != NULL)
-			pipe_ctx->stream_res.tg->funcs->set_gsl_source_select(
-				pipe_ctx->stream_res.tg, group_idx, enable ? 4 : 0);
+
+		pipe_ctx->stream_res.tg->funcs->set_gsl_source_select(
+			pipe_ctx->stream_res.tg, group_idx,	enable ? 4 : 0);
 	} else
 		BREAK_TO_DEBUGGER();
 }
@@ -757,7 +758,7 @@ enum dc_status dcn20_enable_stream_timing(
 		return DC_ERROR_UNEXPECTED;
 	}
 
-	fsleep(stream->timing.v_total * (stream->timing.h_total * 10000u / stream->timing.pix_clk_100hz));
+	hws->funcs.wait_for_blank_complete(pipe_ctx->stream_res.opp);
 
 	params.vertical_total_min = stream->adjust.v_total_min;
 	params.vertical_total_max = stream->adjust.v_total_max;
@@ -855,8 +856,7 @@ bool dcn20_set_output_transfer_func(struct dc *dc, struct pipe_ctx *pipe_ctx,
 	/*
 	 * if above if is not executed then 'params' equal to 0 and set in bypass
 	 */
-	if (mpc->funcs->set_output_gamma)
-		mpc->funcs->set_output_gamma(mpc, mpcc_id, params);
+	mpc->funcs->set_output_gamma(mpc, mpcc_id, params);
 
 	return true;
 }

@@ -135,9 +135,6 @@ void ovl_dentry_init_flags(struct dentry *dentry, struct dentry *upperdentry,
 
 bool ovl_dentry_weird(struct dentry *dentry)
 {
-	if (!d_can_lookup(dentry) && !d_is_file(dentry) && !d_is_symlink(dentry))
-		return true;
-
 	return dentry->d_flags & (DCACHE_NEED_AUTOMOUNT |
 				  DCACHE_MANAGE_TRANSIT |
 				  DCACHE_OP_HASH |
@@ -229,9 +226,7 @@ enum ovl_path_type ovl_path_realdata(struct dentry *dentry, struct path *path)
 
 struct dentry *ovl_dentry_upper(struct dentry *dentry)
 {
-	struct inode *inode = d_inode(dentry);
-
-	return inode ? ovl_upperdentry_dereference(OVL_I(inode)) : NULL;
+	return ovl_upperdentry_dereference(OVL_I(d_inode(dentry)));
 }
 
 struct dentry *ovl_dentry_lower(struct dentry *dentry)

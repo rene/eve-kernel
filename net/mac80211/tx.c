@@ -5,7 +5,7 @@
  * Copyright 2006-2007	Jiri Benc <jbenc@suse.cz>
  * Copyright 2007	Johannes Berg <johannes@sipsolutions.net>
  * Copyright 2013-2014  Intel Mobile Communications GmbH
- * Copyright (C) 2018-2024 Intel Corporation
+ * Copyright (C) 2018-2022 Intel Corporation
  *
  * Transmit and frame generation functions.
  */
@@ -644,12 +644,6 @@ ieee80211_tx_h_select_key(struct ieee80211_tx_data *tx)
 	else
 		tx->key = NULL;
 
-	if (info->flags & IEEE80211_TX_CTL_HW_80211_ENCAP) {
-		if (tx->key && tx->key->flags & KEY_FLAG_UPLOADED_TO_HARDWARE)
-			info->control.hw_key = &tx->key->conf;
-		return TX_CONTINUE;
-	}
-
 	if (tx->key) {
 		bool skip_hw = false;
 
@@ -726,16 +720,11 @@ ieee80211_tx_h_rate_ctrl(struct ieee80211_tx_data *tx)
 	txrc.bss_conf = &tx->sdata->vif.bss_conf;
 	txrc.skb = tx->skb;
 	txrc.reported_rate.idx = -1;
+	txrc.rate_idx_mask = tx->sdata->rc_rateidx_mask[info->band];
 
-	if (unlikely(info->control.flags & IEEE80211_TX_CTRL_DONT_USE_RATE_MASK)) {
-		txrc.rate_idx_mask = ~0;
-	} else {
-		txrc.rate_idx_mask = tx->sdata->rc_rateidx_mask[info->band];
-
-		if (tx->sdata->rc_has_mcs_mask[info->band])
-			txrc.rate_idx_mcs_mask =
-				tx->sdata->rc_rateidx_mcs_mask[info->band];
-	}
+	if (tx->sdata->rc_has_mcs_mask[info->band])
+		txrc.rate_idx_mcs_mask =
+			tx->sdata->rc_rateidx_mcs_mask[info->band];
 
 	txrc.bss = (tx->sdata->vif.type == NL80211_IFTYPE_AP ||
 		    tx->sdata->vif.type == NL80211_IFTYPE_MESH_POINT ||
@@ -1473,7 +1462,7 @@ static void ieee80211_txq_enqueue(struct ieee80211_local *local,
 {
 	struct fq *fq = &local->fq;
 	struct fq_tin *tin = &txqi->tin;
-	u32 flow_idx;
+	u32 flow_idx = fq_flow_idx(fq, skb);
 
 	ieee80211_set_skb_enqueue_time(skb);
 
@@ -1489,7 +1478,6 @@ static void ieee80211_txq_enqueue(struct ieee80211_local *local,
 			IEEE80211_TX_INTCFL_NEED_TXPROCESSING;
 		__skb_queue_tail(&txqi->frags, skb);
 	} else {
-		flow_idx = fq_flow_idx(fq, skb);
 		fq_tin_enqueue(fq, tin, flow_idx, skb,
 			       fq_skb_free_func);
 	}
@@ -3056,7 +3044,7 @@ void ieee80211_check_fast_xmit(struct sta_info *sta)
 	    sdata->vif.type == NL80211_IFTYPE_STATION)
 		goto out;
 
-	if (!test_sta_flag(sta, WLAN_STA_AUTHORIZED) || !sta->uploaded)
+	if (!test_sta_flag(sta, WLAN_STA_AUTHORIZED))
 		goto out;
 
 	if (test_sta_flag(sta, WLAN_STA_PS_STA) ||
@@ -3807,7 +3795,6 @@ begin:
 	 * The key can be removed while the packet was queued, so need to call
 	 * this here to get the current key.
 	 */
-	info->control.hw_key = NULL;
 	r = ieee80211_tx_h_select_key(&tx);
 	if (r != TX_CONTINUE) {
 		ieee80211_free_txskb(&local->hw, skb);
@@ -3851,7 +3838,6 @@ begin:
 			goto begin;
 
 		skb = __skb_dequeue(&tx.skbs);
-		info = IEEE80211_SKB_CB(skb);
 
 		if (!skb_queue_empty(&tx.skbs)) {
 			spin_lock_bh(&fq->lock);
@@ -3896,7 +3882,7 @@ begin:
 	}
 
 encap_out:
-	info->control.vif = vif;
+	IEEE80211_SKB_CB(skb)->control.vif = vif;
 
 	if (tx.sta &&
 	    wiphy_ext_feature_isset(local->hw.wiphy, NL80211_EXT_FEATURE_AQL)) {
@@ -4032,9 +4018,7 @@ void __ieee80211_schedule_txq(struct ieee80211_hw *hw,
 
 	spin_lock_bh(&local->active_txq_lock[txq->ac]);
 
-	has_queue = force ||
-		    (!test_bit(IEEE80211_TXQ_STOP, &txqi->flags) &&
-		     txq_has_queue(txq));
+	has_queue = force || txq_has_queue(txq);
 	if (list_empty(&txqi->schedule_order) &&
 	    (has_queue || ieee80211_txq_keep_active(txqi))) {
 		/* If airtime accounting is active, always enqueue STAs at the
@@ -5206,10 +5190,8 @@ ieee80211_beacon_get_ap(struct ieee80211_hw *hw,
 	if (beacon->tail)
 		skb_put_data(skb, beacon->tail, beacon->tail_len);
 
-	if (ieee80211_beacon_protect(skb, local, sdata, link) < 0) {
-		dev_kfree_skb(skb);
+	if (ieee80211_beacon_protect(skb, local, sdata, link) < 0)
 		return NULL;
-	}
 
 	ieee80211_beacon_get_finish(hw, vif, link, offs, beacon, skb,
 				    chanctx_conf, csa_off_base);

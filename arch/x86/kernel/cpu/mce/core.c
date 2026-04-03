@@ -44,7 +44,6 @@
 #include <linux/sync_core.h>
 #include <linux/task_work.h>
 #include <linux/hardirq.h>
-#include <linux/kexec.h>
 
 #include <asm/intel-family.h>
 #include <asm/processor.h>
@@ -240,7 +239,6 @@ static noinstr void mce_panic(const char *msg, struct mce *final, char *exp)
 	struct llist_node *pending;
 	struct mce_evt_llist *l;
 	int apei_err = 0;
-	struct page *p;
 
 	/*
 	 * Allow instrumentation around external facilities usage. Not that it
@@ -294,20 +292,6 @@ static noinstr void mce_panic(const char *msg, struct mce *final, char *exp)
 	if (!fake_panic) {
 		if (panic_timeout == 0)
 			panic_timeout = mca_cfg.panic_timeout;
-
-		/*
-		 * Kdump skips the poisoned page in order to avoid
-		 * touching the error bits again. Poison the page even
-		 * if the error is fatal and the machine is about to
-		 * panic.
-		 */
-		if (kexec_crash_loaded()) {
-			if (final && (final->status & MCI_STATUS_ADDRV)) {
-				p = pfn_to_online_page(final->addr >> PAGE_SHIFT);
-				if (p)
-					SetPageHWPoison(p);
-			}
-		}
 		panic(msg);
 	} else
 		pr_emerg(HW_ERR "Fake kernel panic: %s\n", msg);
@@ -2471,14 +2455,12 @@ static ssize_t set_bank(struct device *s, struct device_attribute *attr,
 		return -EINVAL;
 
 	b = &per_cpu(mce_banks_array, s->id)[bank];
+
 	if (!b->init)
 		return -ENODEV;
 
 	b->ctl = new;
-
-	mutex_lock(&mce_sysfs_mutex);
 	mce_restart();
-	mutex_unlock(&mce_sysfs_mutex);
 
 	return size;
 }
@@ -2707,9 +2689,15 @@ static int mce_cpu_dead(unsigned int cpu)
 static int mce_cpu_online(unsigned int cpu)
 {
 	struct timer_list *t = this_cpu_ptr(&mce_timer);
+	int ret;
 
 	mce_device_create(cpu);
-	mce_threshold_create_device(cpu);
+
+	ret = mce_threshold_create_device(cpu);
+	if (ret) {
+		mce_device_remove(cpu);
+		return ret;
+	}
 	mce_reenable_cpu();
 	mce_start_timer(t);
 	return 0;

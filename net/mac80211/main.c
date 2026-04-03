@@ -144,8 +144,6 @@ static u32 ieee80211_hw_conf_chan(struct ieee80211_local *local)
 	}
 
 	power = ieee80211_chandef_max_power(&chandef);
-	if (local->user_power_level != IEEE80211_UNSET_POWER_LEVEL)
-		power = min(local->user_power_level, power);
 
 	rcu_read_lock();
 	list_for_each_entry_rcu(sdata, &local->interfaces, list) {
@@ -302,9 +300,9 @@ u32 ieee80211_reset_erp_info(struct ieee80211_sub_if_data *sdata)
 	       BSS_CHANGED_ERP_SLOT;
 }
 
-/* context: requires softirqs disabled */
-void ieee80211_handle_queued_frames(struct ieee80211_local *local)
+static void ieee80211_tasklet_handler(struct tasklet_struct *t)
 {
+	struct ieee80211_local *local = from_tasklet(local, t, tasklet);
 	struct sk_buff *skb;
 
 	while ((skb = skb_dequeue(&local->skb_queue)) ||
@@ -327,13 +325,6 @@ void ieee80211_handle_queued_frames(struct ieee80211_local *local)
 			break;
 		}
 	}
-}
-
-static void ieee80211_tasklet_handler(struct tasklet_struct *t)
-{
-	struct ieee80211_local *local = from_tasklet(local, t, tasklet);
-
-	ieee80211_handle_queued_frames(local);
 }
 
 static void ieee80211_restart_work(struct work_struct *work)
@@ -945,7 +936,7 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 	int result, i;
 	enum nl80211_band band;
 	int channels, max_bitrates;
-	bool supp_ht, supp_vht, supp_he, supp_eht, supp_s1g;
+	bool supp_ht, supp_vht, supp_he, supp_eht;
 	struct cfg80211_chan_def dflt_chandef = {};
 
 	if (ieee80211_hw_check(hw, QUEUE_CONTROL) &&
@@ -1061,7 +1052,6 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 	supp_vht = false;
 	supp_he = false;
 	supp_eht = false;
-	supp_s1g = false;
 	for (band = 0; band < NUM_NL80211_BANDS; band++) {
 		struct ieee80211_supported_band *sband;
 
@@ -1098,7 +1088,6 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 			max_bitrates = sband->n_bitrates;
 		supp_ht = supp_ht || sband->ht_cap.ht_supported;
 		supp_vht = supp_vht || sband->vht_cap.vht_supported;
-		supp_s1g = supp_s1g || sband->s1g_cap.s1g;
 
 		for (i = 0; i < sband->n_iftype_data; i++) {
 			const struct ieee80211_sband_iftype_data *iftd;
@@ -1220,9 +1209,6 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 	if (supp_vht)
 		local->scan_ies_len +=
 			2 + sizeof(struct ieee80211_vht_cap);
-
-	if (supp_s1g)
-		local->scan_ies_len += 2 + sizeof(struct ieee80211_s1g_cap);
 
 	/*
 	 * HE cap element is variable in size - set len to allow max size */

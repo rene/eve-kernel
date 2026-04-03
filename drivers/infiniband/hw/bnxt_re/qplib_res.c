@@ -121,7 +121,6 @@ static int __alloc_pbl(struct bnxt_qplib_res *res,
 	pbl->pg_arr = vmalloc(pages * sizeof(void *));
 	if (!pbl->pg_arr)
 		return -ENOMEM;
-	memset(pbl->pg_arr, 0, pages * sizeof(void *));
 
 	pbl->pg_map_arr = vmalloc(pages * sizeof(dma_addr_t));
 	if (!pbl->pg_map_arr) {
@@ -129,7 +128,6 @@ static int __alloc_pbl(struct bnxt_qplib_res *res,
 		pbl->pg_arr = NULL;
 		return -ENOMEM;
 	}
-	memset(pbl->pg_map_arr, 0, pages * sizeof(dma_addr_t));
 	pbl->pg_count = 0;
 	pbl->pg_size = sginfo->pgsize;
 
@@ -246,8 +244,6 @@ int bnxt_qplib_alloc_init_hwq(struct bnxt_qplib_hwq *hwq,
 			sginfo.pgsize = npde * pg_size;
 			sginfo.npages = 1;
 			rc = __alloc_pbl(res, &hwq->pbl[PBL_LVL_0], &sginfo);
-			if (rc)
-				goto fail;
 
 			/* Alloc PBL pages */
 			sginfo.npages = npbl;
@@ -259,9 +255,22 @@ int bnxt_qplib_alloc_init_hwq(struct bnxt_qplib_hwq *hwq,
 			dst_virt_ptr =
 				(dma_addr_t **)hwq->pbl[PBL_LVL_0].pg_arr;
 			src_phys_ptr = hwq->pbl[PBL_LVL_1].pg_map_arr;
-			for (i = 0; i < hwq->pbl[PBL_LVL_1].pg_count; i++)
-				dst_virt_ptr[0][i] = src_phys_ptr[i] | flag;
-
+			if (hwq_attr->type == HWQ_TYPE_MR) {
+			/* For MR it is expected that we supply only 1 contigous
+			 * page i.e only 1 entry in the PDL that will contain
+			 * all the PBLs for the user supplied memory region
+			 */
+				for (i = 0; i < hwq->pbl[PBL_LVL_1].pg_count;
+				     i++)
+					dst_virt_ptr[0][i] = src_phys_ptr[i] |
+						flag;
+			} else {
+				for (i = 0; i < hwq->pbl[PBL_LVL_1].pg_count;
+				     i++)
+					dst_virt_ptr[PTR_PG(i)][PTR_IDX(i)] =
+						src_phys_ptr[i] |
+						PTU_PDE_VALID;
+			}
 			/* Alloc or init PTEs */
 			rc = __alloc_pbl(res, &hwq->pbl[PBL_LVL_2],
 					 hwq_attr->sginfo);

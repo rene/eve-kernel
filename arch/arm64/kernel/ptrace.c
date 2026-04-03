@@ -28,6 +28,7 @@
 #include <linux/hw_breakpoint.h>
 #include <linux/regset.h>
 #include <linux/elf.h>
+#include <linux/isolation.h>
 
 #include <asm/compat.h>
 #include <asm/cpufeature.h>
@@ -139,7 +140,7 @@ unsigned long regs_get_kernel_stack_nth(struct pt_regs *regs, unsigned int n)
 
 	addr += n;
 	if (regs_within_kernel_stack(regs, (unsigned long)addr))
-		return READ_ONCE_NOCHECK(*addr);
+		return *addr;
 	else
 		return 0;
 }
@@ -917,7 +918,6 @@ static int sve_set_common(struct task_struct *target,
 		clear_tsk_thread_flag(target, TIF_SVE);
 		if (type == ARM64_VEC_SME)
 			fpsimd_force_sync_to_sve(target);
-		target->thread.fp_type = FP_STATE_FPSIMD;
 		goto out;
 	}
 
@@ -940,7 +940,6 @@ static int sve_set_common(struct task_struct *target,
 	if (!target->thread.sve_state) {
 		ret = -ENOMEM;
 		clear_tsk_thread_flag(target, TIF_SVE);
-		target->thread.fp_type = FP_STATE_FPSIMD;
 		goto out;
 	}
 
@@ -954,7 +953,6 @@ static int sve_set_common(struct task_struct *target,
 	fpsimd_sync_to_sve(target);
 	if (type == ARM64_VEC_SVE)
 		set_tsk_thread_flag(target, TIF_SVE);
-	target->thread.fp_type = FP_STATE_SVE;
 
 	BUILD_BUG_ON(SVE_PT_SVE_OFFSET != sizeof(header));
 	start = SVE_PT_SVE_OFFSET;
@@ -1343,7 +1341,7 @@ static int tagged_addr_ctrl_get(struct task_struct *target,
 {
 	long ctrl = get_tagged_addr_ctrl(target);
 
-	if (WARN_ON_ONCE(IS_ERR_VALUE(ctrl)))
+	if (IS_ERR_VALUE(ctrl))
 		return ctrl;
 
 	return membuf_write(&to, &ctrl, sizeof(ctrl));
@@ -1356,10 +1354,6 @@ static int tagged_addr_ctrl_set(struct task_struct *target, const struct
 {
 	int ret;
 	long ctrl;
-
-	ctrl = get_tagged_addr_ctrl(target);
-	if (WARN_ON_ONCE(IS_ERR_VALUE(ctrl)))
-		return ctrl;
 
 	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf, &ctrl, 0, -1);
 	if (ret)
@@ -1457,8 +1451,7 @@ static const struct user_regset aarch64_regsets[] = {
 #ifdef CONFIG_ARM64_SVE
 	[REGSET_SVE] = { /* Scalable Vector Extension */
 		.core_note_type = NT_ARM_SVE,
-		.n = DIV_ROUND_UP(SVE_PT_SIZE(ARCH_SVE_VQ_MAX,
-					      SVE_PT_REGS_SVE),
+		.n = DIV_ROUND_UP(SVE_PT_SIZE(SVE_VQ_MAX, SVE_PT_REGS_SVE),
 				  SVE_VQ_BYTES),
 		.size = SVE_VQ_BYTES,
 		.align = SVE_VQ_BYTES,
@@ -2142,12 +2135,25 @@ static void report_syscall(struct pt_regs *regs, enum ptrace_syscall_dir dir)
 
 int syscall_trace_enter(struct pt_regs *regs)
 {
-	unsigned long flags = read_thread_flags();
+	unsigned long flags;
+
+	task_isolation_kernel_enter();
+
+	flags = read_thread_flags();
 
 	if (flags & (_TIF_SYSCALL_EMU | _TIF_SYSCALL_TRACE)) {
 		report_syscall(regs, PTRACE_SYSCALL_ENTER);
 		if (flags & _TIF_SYSCALL_EMU)
 			return NO_SYSCALL;
+	}
+
+	/*
+	 * In task isolation mode, we may prevent the syscall from
+	 * running, and if so we also deliver a signal to the process.
+	 */
+	if (test_thread_flag(TIF_TASK_ISOLATION)) {
+		if (task_isolation_syscall(regs->syscallno) == -1)
+			return -1;
 	}
 
 	/* Do the secure computing after ptrace; failures should be fast. */

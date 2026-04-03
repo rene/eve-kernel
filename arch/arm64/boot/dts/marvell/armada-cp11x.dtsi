@@ -6,11 +6,13 @@
  */
 
 #include <dt-bindings/interrupt-controller/mvebu-icu.h>
+#define CP11X_PCIEx_MAC_RESET_BIT(n)	(11 + ((n + 2) % 3))
 #include <dt-bindings/thermal/thermal.h>
 
 #include "armada-common.dtsi"
 
 #define CP11X_PCIEx_CONF_BASE(iface)	(CP11X_PCIEx_MEM_BASE(iface) + CP11X_PCIEx_MEM_SIZE(iface))
+#define CP11X_PCIEx_EP_REG_BASE(iface)	(ADDRESSIFY(CP11X_BASE) + 0x600000 + (iface) * 0x4000)
 
 / {
 	/*
@@ -66,7 +68,7 @@
 			clock-names = "pp_clk", "gop_clk",
 				      "mg_clk", "mg_core_clk", "axi_clk";
 			marvell,system-controller = <&CP11X_LABEL(syscon0)>;
-			status = "disabled";
+			status = "okay";
 			dma-coherent;
 
 			CP11X_LABEL(eth0): eth0 {
@@ -127,6 +129,13 @@
 			};
 		};
 
+		CP11X_LABEL(uio_ethernet): EVALUATOR(uio_pp_, CP11X_NUM)@0 {
+			compatible = "generic-uio";
+			reg = <0x0 0x90000>, <0x130000 0x6000>,
+			      <0x220000 0x1000>;
+			reg-names = "pp", "mspg", "cm3";
+		};
+
 		CP11X_LABEL(comphy): phy@120000 {
 			compatible = "marvell,comphy-cp110";
 			reg = <0x120000 0x6000>;
@@ -185,6 +194,18 @@
 			reg = <0x12a600 0x10>;
 			clocks = <&CP11X_LABEL(clk) 1 5>,
 				 <&CP11X_LABEL(clk) 1 6>, <&CP11X_LABEL(clk) 1 18>;
+			status = "disabled";
+		};
+
+		CP11X_LABEL(mdio_uio): mdio_uio {
+			compatible = "marvell,mvmdio-uio";
+			mii-bus = <&CP11X_LABEL(mdio)>;
+			status = "disabled";
+		};
+
+		CP11X_LABEL(xmdio_uio): xmdio_uio {
+			compatible = "marvell,mvmdio-uio";
+			mii-bus = <&CP11X_LABEL(xmdio)>;
 			status = "disabled";
 		};
 
@@ -268,6 +289,12 @@
 					 <&CP11X_LABEL(clk) 1 17>;
 				status = "disabled";
 			};
+		};
+
+		CP11X_LABEL(pcie_mac_reset): pcie-mac-reset@0x440268 {
+			compatible = "snps,dw-low-reset";
+			#reset-cells = <1>;
+			reg = <0x440268 0x4>;
 		};
 
 		CP11X_LABEL(syscon1): system-controller@400000 {
@@ -367,6 +394,16 @@
 			clock-names = "core", "reg";
 			clocks = <&CP11X_LABEL(clk) 1 7>,
 				 <&CP11X_LABEL(clk) 1 14>;
+		};
+
+		CP11X_LABEL(uio_xor0) {
+			compatible = "marvell,uio-xor-v2";
+			xor_access = <&CP11X_LABEL(xor0)>;
+		};
+
+		CP11X_LABEL(uio_xor1) {
+			compatible = "marvell,uio-xor-v2";
+			xor_access = <&CP11X_LABEL(xor1)>;
 		};
 
 		CP11X_LABEL(spi0): spi@700600 {
@@ -506,19 +543,50 @@
 		CP11X_LABEL(crypto): crypto@800000 {
 			compatible = "inside-secure,safexcel-eip197b";
 			reg = <0x800000 0x200000>;
-			interrupts = <88 IRQ_TYPE_LEVEL_HIGH>,
+			interrupts = <87 IRQ_TYPE_LEVEL_HIGH>,
+				<88 IRQ_TYPE_LEVEL_HIGH>,
 				<89 IRQ_TYPE_LEVEL_HIGH>,
 				<90 IRQ_TYPE_LEVEL_HIGH>,
 				<91 IRQ_TYPE_LEVEL_HIGH>,
-				<92 IRQ_TYPE_LEVEL_HIGH>,
-				<87 IRQ_TYPE_LEVEL_HIGH>;
-			interrupt-names = "ring0", "ring1", "ring2", "ring3",
-					  "eip", "mem";
+				<92 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "mem", "ring0", "ring1",
+				"ring2", "ring3", "eip";
 			clock-names = "core", "reg";
 			clocks = <&CP11X_LABEL(clk) 1 26>,
 				 <&CP11X_LABEL(clk) 1 17>;
 			dma-coherent;
 		};
+
+		CP11X_LABEL(uio_sam): uio_sam@800000 {
+			compatible = "marvell,uio-sam";
+			eip_access = <&CP11X_LABEL(crypto)>;
+		};
+	};
+
+	CP11X_LABEL(armada_ep):armada-ep {
+		compatible = "marvell,armada-ep";
+		msi-parent = <&gic_v2m0>;
+		status = "disabled";
+	};
+
+	CP11X_LABEL(pcie_ep): pcie-ep@600000 {
+		compatible = "marvell,armada-pcie-ep", "snps,dw-pcie";
+		reg =	<0 CP11X_PCIEx_EP_REG_BASE(0) 0 0x4000>,
+			<0 CP11X_PCIEx_EP_REG_BASE(2) 0 0x80000>,
+			<0 CP11X_PCIEx_EP_REG_BASE(1) 0 0x1000>;
+		reg-names = "core", "lm", "shadow_core";
+		clocks = <&CP11X_LABEL(clk) 1 13>;
+		status = "disabled";
+	};
+
+	CP11X_LABEL(pci_ep_uio): pci-ep-uio {
+		compatible = "marvell,pci-ep-uio";
+		reg = <0x00 0x00000000 0x0 0x00100000>,
+		      <0x00 0x3f000000 0x0 0x01000000>,
+		      <0x00 0xf0000000 0x0 0x01000000>,
+		      <0x80 0x00000000 0x8 0x00000000>;
+		reg-names = "bar0", "bar2", "bar4", "host-map";
+		status = "disabled";
 	};
 
 	CP11X_LABEL(pcie0): pcie@CP11X_PCIE0_BASE {
@@ -542,6 +610,7 @@
 		num-lanes = <1>;
 		clock-names = "core", "reg";
 		clocks = <&CP11X_LABEL(clk) 1 13>, <&CP11X_LABEL(clk) 1 14>;
+		resets = <&CP11X_LABEL(pcie_mac_reset) CP11X_PCIEx_MAC_RESET_BIT(0)>;
 		status = "disabled";
 	};
 
@@ -567,6 +636,7 @@
 		num-lanes = <1>;
 		clock-names = "core", "reg";
 		clocks = <&CP11X_LABEL(clk) 1 11>, <&CP11X_LABEL(clk) 1 14>;
+		resets = <&CP11X_LABEL(pcie_mac_reset) CP11X_PCIEx_MAC_RESET_BIT(1)>;
 		status = "disabled";
 	};
 
@@ -592,6 +662,7 @@
 		num-lanes = <1>;
 		clock-names = "core", "reg";
 		clocks = <&CP11X_LABEL(clk) 1 12>, <&CP11X_LABEL(clk) 1 14>;
+		resets = <&CP11X_LABEL(pcie_mac_reset) CP11X_PCIEx_MAC_RESET_BIT(2)>;
 		status = "disabled";
 	};
 };

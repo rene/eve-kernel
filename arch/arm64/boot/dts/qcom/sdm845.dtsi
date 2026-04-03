@@ -2537,8 +2537,6 @@
 			clocks = <&gcc GCC_UFS_MEM_CLKREF_CLK>,
 				 <&gcc GCC_UFS_PHY_PHY_AUX_CLK>;
 
-			power-domains = <&gcc UFS_PHY_GDSC>;
-
 			resets = <&ufs_mem_hc 0>;
 			reset-names = "ufsphy";
 			status = "disabled";
@@ -4050,10 +4048,10 @@
 					  <&gcc GCC_USB30_PRIM_MASTER_CLK>;
 			assigned-clock-rates = <19200000>, <150000000>;
 
-			interrupts-extended = <&intc GIC_SPI 131 IRQ_TYPE_LEVEL_HIGH>,
-					      <&pdc_intc 6 IRQ_TYPE_LEVEL_HIGH>,
-					      <&pdc_intc 8 IRQ_TYPE_EDGE_BOTH>,
-					      <&pdc_intc 9 IRQ_TYPE_EDGE_BOTH>;
+			interrupts = <GIC_SPI 131 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 486 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 488 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 489 IRQ_TYPE_LEVEL_HIGH>;
 			interrupt-names = "hs_phy_irq", "ss_phy_irq",
 					  "dm_hs_phy_irq", "dp_hs_phy_irq";
 
@@ -4101,10 +4099,10 @@
 					  <&gcc GCC_USB30_SEC_MASTER_CLK>;
 			assigned-clock-rates = <19200000>, <150000000>;
 
-			interrupts-extended = <&intc GIC_SPI 136 IRQ_TYPE_LEVEL_HIGH>,
-					      <&pdc_intc 7 IRQ_TYPE_LEVEL_HIGH>,
-					      <&pdc_intc 10 IRQ_TYPE_EDGE_BOTH>,
-					      <&pdc_intc 11 IRQ_TYPE_EDGE_BOTH>;
+			interrupts = <GIC_SPI 136 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 487 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 490 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 491 IRQ_TYPE_LEVEL_HIGH>;
 			interrupt-names = "hs_phy_irq", "ss_phy_irq",
 					  "dm_hs_phy_irq", "dp_hs_phy_irq";
 
@@ -4234,16 +4232,16 @@
 				"vfe1",
 				"vfe_lite";
 
-			interrupts = <GIC_SPI 464 IRQ_TYPE_EDGE_RISING>,
-				<GIC_SPI 466 IRQ_TYPE_EDGE_RISING>,
-				<GIC_SPI 468 IRQ_TYPE_EDGE_RISING>,
-				<GIC_SPI 477 IRQ_TYPE_EDGE_RISING>,
-				<GIC_SPI 478 IRQ_TYPE_EDGE_RISING>,
-				<GIC_SPI 479 IRQ_TYPE_EDGE_RISING>,
-				<GIC_SPI 448 IRQ_TYPE_EDGE_RISING>,
-				<GIC_SPI 465 IRQ_TYPE_EDGE_RISING>,
-				<GIC_SPI 467 IRQ_TYPE_EDGE_RISING>,
-				<GIC_SPI 469 IRQ_TYPE_EDGE_RISING>;
+			interrupts = <GIC_SPI 464 IRQ_TYPE_LEVEL_HIGH>,
+				<GIC_SPI 466 IRQ_TYPE_LEVEL_HIGH>,
+				<GIC_SPI 468 IRQ_TYPE_LEVEL_HIGH>,
+				<GIC_SPI 477 IRQ_TYPE_LEVEL_HIGH>,
+				<GIC_SPI 478 IRQ_TYPE_LEVEL_HIGH>,
+				<GIC_SPI 479 IRQ_TYPE_LEVEL_HIGH>,
+				<GIC_SPI 448 IRQ_TYPE_LEVEL_HIGH>,
+				<GIC_SPI 465 IRQ_TYPE_LEVEL_HIGH>,
+				<GIC_SPI 467 IRQ_TYPE_LEVEL_HIGH>,
+				<GIC_SPI 469 IRQ_TYPE_LEVEL_HIGH>;
 			interrupt-names = "csid0",
 				"csid1",
 				"csid2",
@@ -4915,18 +4913,18 @@
 			cell-index = <0>;
 		};
 
-		sram@14680000 {
+		sram@146bf000 {
 			compatible = "qcom,sdm845-imem", "syscon", "simple-mfd";
-			reg = <0 0x14680000 0 0x40000>;
+			reg = <0 0x146bf000 0 0x1000>;
 
 			#address-cells = <1>;
 			#size-cells = <1>;
 
-			ranges = <0 0 0x14680000 0x40000>;
+			ranges = <0 0 0x146bf000 0x1000>;
 
-			pil-reloc@3f94c {
+			pil-reloc@94c {
 				compatible = "qcom,pil-reloc-info";
-				reg = <0x3f94c 0xc8>;
+				reg = <0x94c 0xc8>;
 			};
 		};
 
@@ -5021,7 +5019,7 @@
 			compatible = "qcom,apss-wdt-sdm845", "qcom,kpss-wdt";
 			reg = <0 0x17980000 0 0x1000>;
 			clocks = <&sleep_clk>;
-			interrupts = <GIC_SPI 0 IRQ_TYPE_EDGE_RISING>;
+			interrupts = <GIC_SPI 0 IRQ_TYPE_LEVEL_HIGH>;
 		};
 
 		apss_shared: mailbox@17990000 {

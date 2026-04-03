@@ -1038,11 +1038,8 @@ static int camss_of_parse_endpoint_node(struct device *dev,
 	struct v4l2_mbus_config_mipi_csi2 *mipi_csi2;
 	struct v4l2_fwnode_endpoint vep = { { 0 } };
 	unsigned int i;
-	int ret;
 
-	ret = v4l2_fwnode_endpoint_parse(of_fwnode_handle(node), &vep);
-	if (ret)
-		return ret;
+	v4l2_fwnode_endpoint_parse(of_fwnode_handle(node), &vep);
 
 	csd->interface.csiphy_id = vep.base.port;
 
@@ -1658,12 +1655,10 @@ static int camss_probe(struct platform_device *pdev)
 	ret = v4l2_device_register(camss->dev, &camss->v4l2_dev);
 	if (ret < 0) {
 		dev_err(dev, "Failed to register V4L2 device: %d\n", ret);
-		goto err_media_device_cleanup;
+		goto err_genpd_cleanup;
 	}
 
 	v4l2_async_nf_init(&camss->notifier);
-
-	pm_runtime_enable(dev);
 
 	num_subdevs = camss_of_parse_ports(camss);
 	if (num_subdevs < 0) {
@@ -1702,6 +1697,8 @@ static int camss_probe(struct platform_device *pdev)
 		}
 	}
 
+	pm_runtime_enable(dev);
+
 	return 0;
 
 err_register_subdevs:
@@ -1709,9 +1706,6 @@ err_register_subdevs:
 err_v4l2_device_unregister:
 	v4l2_device_unregister(&camss->v4l2_dev);
 	v4l2_async_nf_cleanup(&camss->notifier);
-	pm_runtime_disable(dev);
-err_media_device_cleanup:
-	media_device_cleanup(&camss->media_dev);
 err_genpd_cleanup:
 	camss_genpd_cleanup(camss);
 

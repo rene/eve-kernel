@@ -15,7 +15,7 @@
 	#size-cells = <2>;
 
 	aliases {
-		serial0 = &uart_b;
+		serial0 = &uart_B;
 	};
 
 	memory@0 {
@@ -25,6 +25,6 @@
 
 };
 
-&uart_b {
+&uart_B {
 	status = "okay";
 };

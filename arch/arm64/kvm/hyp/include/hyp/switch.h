@@ -26,6 +26,7 @@
 #include <asm/kvm_emulate.h>
 #include <asm/kvm_hyp.h>
 #include <asm/kvm_mmu.h>
+#include <asm/mpam.h>
 #include <asm/fpsimd.h>
 #include <asm/debug-monitors.h>
 #include <asm/processor.h>
@@ -69,6 +70,35 @@ static inline void __activate_traps_fpsimd32(struct kvm_vcpu *vcpu)
 	}
 }
 
+static inline void  __activate_traps_mpam(struct kvm_vcpu *vcpu)
+{
+	u64 r = MPAM_SYSREG_TRAP_MPAM0_EL1 | MPAM_SYSREG_TRAP_MPAM1_EL1;
+
+	if (!mpam_cpus_have_feature())
+		return;
+
+	/* trap guest access to MPAMIDR_EL1 */
+	if (mpam_cpus_have_mpam_hcr()) {
+		write_sysreg_s(MPAMHCR_TRAP_MPAMIDR, SYS_MPAMHCR_EL2);
+	} else {
+		/* From v1.1 TIDR can trap MPAMIDR, set it unconditionally */
+		r |= MPAM_SYSREG_TRAP_IDR;
+	}
+
+	write_sysreg_s(r, SYS_MPAM2_EL2);
+}
+
+static inline void __deactivate_traps_mpam(void)
+{
+	if (!mpam_cpus_have_feature())
+		return;
+
+	write_sysreg_s(0, SYS_MPAM2_EL2);
+
+	if (mpam_cpus_have_mpam_hcr())
+		write_sysreg_s(MPAMHCR_HOST_FLAGS, SYS_MPAMHCR_EL2);
+}
+
 static inline void __activate_traps_common(struct kvm_vcpu *vcpu)
 {
 	/* Trap on AArch32 cp15 c15 (impdef sysregs) accesses (EL1 or EL0) */
@@ -103,6 +133,8 @@ static inline void __activate_traps_common(struct kvm_vcpu *vcpu)
 				   HFGxTR_EL2_nTPIDR2_EL0_MASK,
 				   0);
 	}
+
+	__activate_traps_mpam(vcpu);
 }
 
 static inline void __deactivate_traps_common(struct kvm_vcpu *vcpu)
@@ -125,6 +157,8 @@ static inline void __deactivate_traps_common(struct kvm_vcpu *vcpu)
 				   HFGxTR_EL2_nSMPRI_EL1_MASK |
 				   HFGxTR_EL2_nTPIDR2_EL0_MASK);
 	}
+
+	__deactivate_traps_mpam();
 }
 
 static inline void ___activate_traps(struct kvm_vcpu *vcpu)
@@ -167,68 +201,13 @@ static inline void __hyp_sve_restore_guest(struct kvm_vcpu *vcpu)
 	write_sysreg_el1(__vcpu_sys_reg(vcpu, ZCR_EL1), SYS_ZCR);
 }
 
-static inline void fpsimd_lazy_switch_to_guest(struct kvm_vcpu *vcpu)
-{
-	u64 zcr_el1, zcr_el2;
-
-	if (!guest_owns_fp_regs(vcpu))
-		return;
-
-	if (vcpu_has_sve(vcpu)) {
-		zcr_el2 = vcpu_sve_max_vq(vcpu) - 1;
-
-		write_sysreg_el2(zcr_el2, SYS_ZCR);
-
-		zcr_el1 = __vcpu_sys_reg(vcpu, ZCR_EL1);
-		write_sysreg_el1(zcr_el1, SYS_ZCR);
-	}
-}
-
-static inline void fpsimd_lazy_switch_to_host(struct kvm_vcpu *vcpu)
-{
-	u64 zcr_el1, zcr_el2;
-
-	if (!guest_owns_fp_regs(vcpu))
-		return;
-
-	/*
-	 * When the guest owns the FP regs, we know that guest+hyp traps for
-	 * any FPSIMD/SVE/SME features exposed to the guest have been disabled
-	 * by either fpsimd_lazy_switch_to_guest() or kvm_hyp_handle_fpsimd()
-	 * prior to __guest_entry(). As __guest_entry() guarantees a context
-	 * synchronization event, we don't need an ISB here to avoid taking
-	 * traps for anything that was exposed to the guest.
-	 */
-	if (vcpu_has_sve(vcpu)) {
-		zcr_el1 = read_sysreg_el1(SYS_ZCR);
-		__vcpu_sys_reg(vcpu, ZCR_EL1) = zcr_el1;
-
-		/*
-		 * The guest's state is always saved using the guest's max VL.
-		 * Ensure that the host has the guest's max VL active such that
-		 * the host can save the guest's state lazily, but don't
-		 * artificially restrict the host to the guest's max VL.
-		 */
-		if (has_vhe()) {
-			zcr_el2 = vcpu_sve_max_vq(vcpu) - 1;
-			write_sysreg_el2(zcr_el2, SYS_ZCR);
-		} else {
-			zcr_el2 = sve_vq_from_vl(kvm_host_sve_max_vl) - 1;
-			write_sysreg_el2(zcr_el2, SYS_ZCR);
-
-			zcr_el1 = vcpu_sve_max_vq(vcpu) - 1;
-			write_sysreg_el1(zcr_el1, SYS_ZCR);
-		}
-	}
-}
-
 /*
  * We trap the first access to the FP/SIMD to save the host context and
  * restore the guest context lazily.
  * If FP/SIMD is not implemented, handle the trap and inject an undefined
  * instruction exception to the guest. Similarly for trapped SVE accesses.
  */
-static inline bool kvm_hyp_handle_fpsimd(struct kvm_vcpu *vcpu, u64 *exit_code)
+static bool kvm_hyp_handle_fpsimd(struct kvm_vcpu *vcpu, u64 *exit_code)
 {
 	bool sve_guest;
 	u8 esr_ec;
@@ -261,6 +240,10 @@ static inline bool kvm_hyp_handle_fpsimd(struct kvm_vcpu *vcpu, u64 *exit_code)
 		sysreg_clear_set(cptr_el2, reg, 0);
 	}
 	isb();
+
+	/* Write out the host state if it's in the registers */
+	if (vcpu->arch.fp_state == FP_STATE_HOST_OWNED)
+		__fpsimd_save_state(vcpu->arch.host_fpsimd_state);
 
 	/* Restore the guest state */
 	if (sve_guest)
@@ -386,7 +369,7 @@ static bool kvm_hyp_handle_ptrauth(struct kvm_vcpu *vcpu, u64 *exit_code)
 	return true;
 }
 
-static inline bool kvm_hyp_handle_sysreg(struct kvm_vcpu *vcpu, u64 *exit_code)
+static bool kvm_hyp_handle_sysreg(struct kvm_vcpu *vcpu, u64 *exit_code)
 {
 	if (cpus_have_final_cap(ARM64_WORKAROUND_CAVIUM_TX2_219_TVM) &&
 	    handle_tx2_tvm(vcpu))
@@ -402,7 +385,7 @@ static inline bool kvm_hyp_handle_sysreg(struct kvm_vcpu *vcpu, u64 *exit_code)
 	return false;
 }
 
-static inline bool kvm_hyp_handle_cp15_32(struct kvm_vcpu *vcpu, u64 *exit_code)
+static bool kvm_hyp_handle_cp15_32(struct kvm_vcpu *vcpu, u64 *exit_code)
 {
 	if (static_branch_unlikely(&vgic_v3_cpuif_trap) &&
 	    __vgic_v3_perform_cpuif_access(vcpu) == 1)
@@ -411,18 +394,19 @@ static inline bool kvm_hyp_handle_cp15_32(struct kvm_vcpu *vcpu, u64 *exit_code)
 	return false;
 }
 
-static inline bool kvm_hyp_handle_memory_fault(struct kvm_vcpu *vcpu,
-					       u64 *exit_code)
+static bool kvm_hyp_handle_memory_fault(struct kvm_vcpu *vcpu, u64 *exit_code)
 {
 	if (!__populate_fault_info(vcpu))
 		return true;
 
 	return false;
 }
-#define kvm_hyp_handle_iabt_low		kvm_hyp_handle_memory_fault
-#define kvm_hyp_handle_watchpt_low	kvm_hyp_handle_memory_fault
+static bool kvm_hyp_handle_iabt_low(struct kvm_vcpu *vcpu, u64 *exit_code)
+	__alias(kvm_hyp_handle_memory_fault);
+static bool kvm_hyp_handle_watchpt_low(struct kvm_vcpu *vcpu, u64 *exit_code)
+	__alias(kvm_hyp_handle_memory_fault);
 
-static inline bool kvm_hyp_handle_dabt_low(struct kvm_vcpu *vcpu, u64 *exit_code)
+static bool kvm_hyp_handle_dabt_low(struct kvm_vcpu *vcpu, u64 *exit_code)
 {
 	if (kvm_hyp_handle_memory_fault(vcpu, exit_code))
 		return true;
@@ -452,16 +436,23 @@ static inline bool kvm_hyp_handle_dabt_low(struct kvm_vcpu *vcpu, u64 *exit_code
 
 typedef bool (*exit_handler_fn)(struct kvm_vcpu *, u64 *);
 
+static const exit_handler_fn *kvm_get_exit_handler_array(struct kvm_vcpu *vcpu);
+
+static void early_exit_filter(struct kvm_vcpu *vcpu, u64 *exit_code);
+
 /*
  * Allow the hypervisor to handle the exit with an exit handler if it has one.
  *
  * Returns true if the hypervisor handled the exit, and control should go back
  * to the guest, or false if it hasn't.
  */
-static inline bool kvm_hyp_handle_exit(struct kvm_vcpu *vcpu, u64 *exit_code,
-				       const exit_handler_fn *handlers)
+static inline bool kvm_hyp_handle_exit(struct kvm_vcpu *vcpu, u64 *exit_code)
 {
-	exit_handler_fn fn = handlers[kvm_vcpu_trap_get_class(vcpu)];
+	const exit_handler_fn *handlers = kvm_get_exit_handler_array(vcpu);
+	exit_handler_fn fn;
+
+	fn = handlers[kvm_vcpu_trap_get_class(vcpu)];
+
 	if (fn)
 		return fn(vcpu, exit_code);
 
@@ -491,9 +482,20 @@ static inline void synchronize_vcpu_pstate(struct kvm_vcpu *vcpu, u64 *exit_code
  * the guest, false when we should restore the host state and return to the
  * main run loop.
  */
-static inline bool __fixup_guest_exit(struct kvm_vcpu *vcpu, u64 *exit_code,
-				      const exit_handler_fn *handlers)
+static inline bool fixup_guest_exit(struct kvm_vcpu *vcpu, u64 *exit_code)
 {
+	/*
+	 * Save PSTATE early so that we can evaluate the vcpu mode
+	 * early on.
+	 */
+	synchronize_vcpu_pstate(vcpu, exit_code);
+
+	/*
+	 * Check whether we want to repaint the state one way or
+	 * another.
+	 */
+	early_exit_filter(vcpu, exit_code);
+
 	if (ARM_EXCEPTION_CODE(*exit_code) != ARM_EXCEPTION_IRQ)
 		vcpu->arch.fault.esr_el2 = read_sysreg_el2(SYS_ESR);
 
@@ -523,7 +525,7 @@ static inline bool __fixup_guest_exit(struct kvm_vcpu *vcpu, u64 *exit_code,
 		goto exit;
 
 	/* Check if there's an exit handler and allow it to handle the exit. */
-	if (kvm_hyp_handle_exit(vcpu, exit_code, handlers))
+	if (kvm_hyp_handle_exit(vcpu, exit_code))
 		goto guest;
 exit:
 	/* Return to the host kernel and handle the exit */

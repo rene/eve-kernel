@@ -560,7 +560,7 @@ static enum vchiq_status service_callback(struct vchiq_instance *vchiq_instance,
 
 	if (!instance) {
 		pr_err("Message callback passed NULL instance\n");
-		return 0;
+		return VCHIQ_SUCCESS;
 	}
 
 	switch (reason) {
@@ -644,7 +644,7 @@ static enum vchiq_status service_callback(struct vchiq_instance *vchiq_instance,
 		break;
 	}
 
-	return 0;
+	return VCHIQ_SUCCESS;
 }
 
 static int send_synchronous_mmal_msg(struct vchiq_mmal_instance *instance,
@@ -938,9 +938,8 @@ static int create_component(struct vchiq_mmal_instance *instance,
 	/* build component create message */
 	m.h.type = MMAL_MSG_TYPE_COMPONENT_CREATE;
 	m.u.component_create.client_component = component->client_component;
-	strscpy_pad(m.u.component_create.name, name,
-		    sizeof(m.u.component_create.name));
-	m.u.component_create.pid = 0;
+	strncpy(m.u.component_create.name, name,
+		sizeof(m.u.component_create.name));
 
 	ret = send_synchronous_mmal_msg(instance, &m,
 					sizeof(m.u.component_create),

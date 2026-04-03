@@ -588,14 +588,7 @@ unsigned long zone_reclaimable_pages(struct zone *zone)
 	if (can_reclaim_anon_pages(NULL, zone_to_nid(zone), NULL))
 		nr += zone_page_state_snapshot(zone, NR_ZONE_INACTIVE_ANON) +
 			zone_page_state_snapshot(zone, NR_ZONE_ACTIVE_ANON);
-	/*
-	 * If there are no reclaimable file-backed or anonymous pages,
-	 * ensure zones with sufficient free pages are not skipped.
-	 * This prevents zones like DMA32 from being ignored in reclaim
-	 * scenarios where they can still help alleviate memory pressure.
-	 */
-	if (nr == 0)
-		nr = zone_page_state_snapshot(zone, NR_FREE_PAGES);
+
 	return nr;
 }
 
@@ -1999,7 +1992,7 @@ retry:
 		 * (refcount == 1) it can be freed.  Otherwise, leave
 		 * the folio on the LRU so it is swappable.
 		 */
-		if (folio_needs_release(folio)) {
+		if (folio_has_private(folio)) {
 			if (!filemap_release_folio(folio, sc->gfp_mask))
 				goto activate_locked;
 			if (!mapping && folio_ref_count(folio) == 1) {
@@ -2625,9 +2618,9 @@ static void shrink_active_list(unsigned long nr_to_scan,
 		}
 
 		if (unlikely(buffer_heads_over_limit)) {
-			if (folio_needs_release(folio) &&
-			    folio_trylock(folio)) {
-				filemap_release_folio(folio, 0);
+			if (folio_test_private(folio) && folio_trylock(folio)) {
+				if (folio_test_private(folio))
+					filemap_release_folio(folio, 0);
 				folio_unlock(folio);
 			}
 		}
@@ -4777,7 +4770,7 @@ static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_c
 	}
 
 	/* protected */
-	if (tier > tier_idx || refs == BIT(LRU_REFS_WIDTH)) {
+	if (tier > tier_idx) {
 		int hist = lru_hist_from_seq(lrugen->min_seq[type]);
 
 		gen = folio_inc_gen(lruvec, folio, false);
@@ -5072,6 +5065,7 @@ retry:
 
 		/* retry folios that may have missed folio_rotate_reclaimable() */
 		list_move(&folio->lru, &clean);
+		sc->nr_scanned -= folio_nr_pages(folio);
 	}
 
 	spin_lock_irq(&lruvec->lru_lock);
@@ -6030,7 +6024,7 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 /* Use reclaim/compaction for costly allocs or under memory pressure */
 static bool in_reclaim_compaction(struct scan_control *sc)
 {
-	if (gfp_compaction_allowed(sc->gfp_mask) && sc->order &&
+	if (IS_ENABLED(CONFIG_COMPACTION) && sc->order &&
 			(sc->order > PAGE_ALLOC_COSTLY_ORDER ||
 			 sc->priority < DEF_PRIORITY - 2))
 		return true;
@@ -6271,9 +6265,6 @@ static inline bool compaction_ready(struct zone *zone, struct scan_control *sc)
 {
 	unsigned long watermark;
 	enum compact_result suitable;
-
-	if (!gfp_compaction_allowed(sc->gfp_mask))
-		return false;
 
 	suitable = compaction_suitable(zone, sc->order, 0, sc->reclaim_idx);
 	if (suitable == COMPACT_SUCCESS)
@@ -7729,7 +7720,7 @@ int node_reclaim(struct pglist_data *pgdat, gfp_t gfp_mask, unsigned int order)
 		return NODE_RECLAIM_NOSCAN;
 
 	ret = __node_reclaim(pgdat, gfp_mask, order);
-	clear_bit_unlock(PGDAT_RECLAIM_LOCKED, &pgdat->flags);
+	clear_bit(PGDAT_RECLAIM_LOCKED, &pgdat->flags);
 
 	if (!ret)
 		count_vm_event(PGSCAN_ZONE_RECLAIM_FAILED);

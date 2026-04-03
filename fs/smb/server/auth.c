@@ -544,19 +544,7 @@ int ksmbd_krb5_authenticate(struct ksmbd_session *sess, char *in_blob,
 		retval = -ENOMEM;
 		goto out;
 	}
-
-	if (!sess->user) {
-		/* First successful authentication */
-		sess->user = user;
-	} else {
-		if (!ksmbd_compare_user(sess->user, user)) {
-			ksmbd_debug(AUTH, "different user tried to reuse session\n");
-			retval = -EPERM;
-			ksmbd_free_user(user);
-			goto out;
-		}
-		ksmbd_free_user(user);
-	}
+	sess->user = user;
 
 	memcpy(sess->sess_key, resp->payload, resp->session_key_len);
 	memcpy(out_blob, resp->payload + resp->session_key_len,
@@ -1023,8 +1011,6 @@ static int ksmbd_get_encryption_key(struct ksmbd_work *work, __u64 ses_id,
 	ses_enc_key = enc ? sess->smb3encryptionkey :
 		sess->smb3decryptionkey;
 	memcpy(key, ses_enc_key, SMB3_ENC_DEC_KEY_SIZE);
-	if (!enc)
-		ksmbd_user_session_put(sess);
 
 	return 0;
 }
@@ -1046,13 +1032,9 @@ static struct scatterlist *ksmbd_init_sg(struct kvec *iov, unsigned int nvec,
 {
 	struct scatterlist *sg;
 	unsigned int assoc_data_len = sizeof(struct smb2_transform_hdr) - 20;
-	int i, *nr_entries, total_entries = 0, sg_idx = 0;
+	int i, nr_entries[3] = {0}, total_entries = 0, sg_idx = 0;
 
 	if (!nvec)
-		return NULL;
-
-	nr_entries = kcalloc(nvec, sizeof(int), GFP_KERNEL);
-	if (!nr_entries)
 		return NULL;
 
 	for (i = 0; i < nvec - 1; i++) {
@@ -1072,10 +1054,8 @@ static struct scatterlist *ksmbd_init_sg(struct kvec *iov, unsigned int nvec,
 	total_entries += 2;
 
 	sg = kmalloc_array(total_entries, sizeof(struct scatterlist), GFP_KERNEL);
-	if (!sg) {
-		kfree(nr_entries);
+	if (!sg)
 		return NULL;
-	}
 
 	sg_init_table(sg, total_entries);
 	smb2_sg_set_buf(&sg[sg_idx++], iov[0].iov_base + 24, assoc_data_len);
@@ -1109,7 +1089,6 @@ static struct scatterlist *ksmbd_init_sg(struct kvec *iov, unsigned int nvec,
 		}
 	}
 	smb2_sg_set_buf(&sg[sg_idx], sign, SMB2_SIGNATURE_SIZE);
-	kfree(nr_entries);
 	return sg;
 }
 
@@ -1223,7 +1202,7 @@ free_iv:
 free_sg:
 	kfree(sg);
 free_req:
-	aead_request_free(req);
+	kfree(req);
 free_ctx:
 	ksmbd_release_crypto_ctx(ctx);
 	return rc;

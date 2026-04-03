@@ -543,8 +543,6 @@ static struct class ib_class = {
 static void rdma_init_coredev(struct ib_core_device *coredev,
 			      struct ib_device *dev, struct net *net)
 {
-	bool is_full_dev = &dev->coredev == coredev;
-
 	/* This BUILD_BUG_ON is intended to catch layout change
 	 * of union of ib_core_device and device.
 	 * dev must be the first element as ib_core and providers
@@ -556,13 +554,6 @@ static void rdma_init_coredev(struct ib_core_device *coredev,
 
 	coredev->dev.class = &ib_class;
 	coredev->dev.groups = dev->groups;
-
-	/*
-	 * Don't expose hw counters outside of the init namespace.
-	 */
-	if (!is_full_dev && dev->hw_stats_attr_index)
-		coredev->dev.groups[dev->hw_stats_attr_index] = NULL;
-
 	device_initialize(&coredev->dev);
 	coredev->owner = dev;
 	INIT_LIST_HEAD(&coredev->port_list);
@@ -1739,7 +1730,7 @@ static int assign_client_id(struct ib_client *client)
 {
 	int ret;
 
-	lockdep_assert_held(&clients_rwsem);
+	down_write(&clients_rwsem);
 	/*
 	 * The add/remove callbacks must be called in FIFO/LIFO order. To
 	 * achieve this we assign client_ids so they are sorted in
@@ -1748,11 +1739,14 @@ static int assign_client_id(struct ib_client *client)
 	client->client_id = highest_client_id;
 	ret = xa_insert(&clients, client->client_id, client, GFP_KERNEL);
 	if (ret)
-		return ret;
+		goto out;
 
 	highest_client_id++;
 	xa_set_mark(&clients, client->client_id, CLIENT_REGISTERED);
-	return 0;
+
+out:
+	up_write(&clients_rwsem);
+	return ret;
 }
 
 static void remove_client_id(struct ib_client *client)
@@ -1782,35 +1776,25 @@ int ib_register_client(struct ib_client *client)
 {
 	struct ib_device *device;
 	unsigned long index;
-	bool need_unreg = false;
 	int ret;
 
 	refcount_set(&client->uses, 1);
 	init_completion(&client->uses_zero);
-
-	/*
-	 * The devices_rwsem is held in write mode to ensure that a racing
-	 * ib_register_device() sees a consisent view of clients and devices.
-	 */
-	down_write(&devices_rwsem);
-	down_write(&clients_rwsem);
 	ret = assign_client_id(client);
 	if (ret)
-		goto out;
+		return ret;
 
-	need_unreg = true;
+	down_read(&devices_rwsem);
 	xa_for_each_marked (&devices, index, device, DEVICE_REGISTERED) {
 		ret = add_client_context(device, client);
-		if (ret)
-			goto out;
+		if (ret) {
+			up_read(&devices_rwsem);
+			ib_unregister_client(client);
+			return ret;
+		}
 	}
-	ret = 0;
-out:
-	up_write(&clients_rwsem);
-	up_write(&devices_rwsem);
-	if (need_unreg && ret)
-		ib_unregister_client(client);
-	return ret;
+	up_read(&devices_rwsem);
+	return 0;
 }
 EXPORT_SYMBOL(ib_register_client);
 
@@ -2155,9 +2139,6 @@ int ib_device_set_netdev(struct ib_device *ib_dev, struct net_device *ndev,
 	unsigned long flags;
 	int ret;
 
-	if (!rdma_is_port_valid(ib_dev, port))
-		return -EINVAL;
-
 	/*
 	 * Drivers wish to call this before ib_register_driver, so we have to
 	 * setup the port data early.
@@ -2165,6 +2146,9 @@ int ib_device_set_netdev(struct ib_device *ib_dev, struct net_device *ndev,
 	ret = alloc_port_data(ib_dev);
 	if (ret)
 		return ret;
+
+	if (!rdma_is_port_valid(ib_dev, port))
+		return -EINVAL;
 
 	pdata = &ib_dev->port_data[port];
 	spin_lock_irqsave(&pdata->netdev_lock, flags);

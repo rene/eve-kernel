@@ -45,10 +45,6 @@ struct arfs_table {
 	struct hlist_head	 rules_hash[ARFS_HASH_SIZE];
 };
 
-enum {
-	MLX5E_ARFS_STATE_ENABLED,
-};
-
 enum arfs_type {
 	ARFS_IPV4_TCP,
 	ARFS_IPV6_TCP,
@@ -64,7 +60,6 @@ struct mlx5e_arfs_tables {
 	struct list_head               rules;
 	int                            last_filter_id;
 	struct workqueue_struct        *wq;
-	unsigned long                  state;
 };
 
 struct arfs_tuple {
@@ -175,8 +170,6 @@ int mlx5e_arfs_enable(struct mlx5e_flow_steering *fs)
 			return err;
 		}
 	}
-	set_bit(MLX5E_ARFS_STATE_ENABLED, &arfs->state);
-
 	return 0;
 }
 
@@ -262,13 +255,11 @@ static int arfs_create_groups(struct mlx5e_flow_table *ft,
 
 	ft->g = kcalloc(MLX5E_ARFS_NUM_GROUPS,
 			sizeof(*ft->g), GFP_KERNEL);
-	if (!ft->g)
-		return -ENOMEM;
-
 	in = kvzalloc(inlen, GFP_KERNEL);
-	if (!in) {
-		err = -ENOMEM;
-		goto err_free_g;
+	if  (!in || !ft->g) {
+		kfree(ft->g);
+		kvfree(in);
+		return -ENOMEM;
 	}
 
 	mc = MLX5_ADDR_OF(create_flow_group_in, in, match_criteria);
@@ -288,7 +279,7 @@ static int arfs_create_groups(struct mlx5e_flow_table *ft,
 		break;
 	default:
 		err = -EINVAL;
-		goto err_free_in;
+		goto out;
 	}
 
 	switch (type) {
@@ -310,7 +301,7 @@ static int arfs_create_groups(struct mlx5e_flow_table *ft,
 		break;
 	default:
 		err = -EINVAL;
-		goto err_free_in;
+		goto out;
 	}
 
 	MLX5_SET_CFG(in, match_criteria_enable, MLX5_MATCH_OUTER_HEADERS);
@@ -319,7 +310,7 @@ static int arfs_create_groups(struct mlx5e_flow_table *ft,
 	MLX5_SET_CFG(in, end_flow_index, ix - 1);
 	ft->g[ft->num_groups] = mlx5_create_flow_group(ft->t, in);
 	if (IS_ERR(ft->g[ft->num_groups]))
-		goto err_clean_group;
+		goto err;
 	ft->num_groups++;
 
 	memset(in, 0, inlen);
@@ -328,20 +319,18 @@ static int arfs_create_groups(struct mlx5e_flow_table *ft,
 	MLX5_SET_CFG(in, end_flow_index, ix - 1);
 	ft->g[ft->num_groups] = mlx5_create_flow_group(ft->t, in);
 	if (IS_ERR(ft->g[ft->num_groups]))
-		goto err_clean_group;
+		goto err;
 	ft->num_groups++;
 
 	kvfree(in);
 	return 0;
 
-err_clean_group:
+err:
 	err = PTR_ERR(ft->g[ft->num_groups]);
 	ft->g[ft->num_groups] = NULL;
-err_free_in:
+out:
 	kvfree(in);
-err_free_g:
-	kfree(ft->g);
-	ft->g = NULL;
+
 	return err;
 }
 
@@ -460,8 +449,6 @@ static void arfs_del_rules(struct mlx5e_flow_steering *fs)
 	HLIST_HEAD(del_list);
 	int i;
 	int j;
-
-	clear_bit(MLX5E_ARFS_STATE_ENABLED, &arfs->state);
 
 	spin_lock_bh(&arfs->arfs_lock);
 	mlx5e_for_each_arfs_rule(rule, htmp, arfs->arfs_tables, i, j) {
@@ -630,8 +617,17 @@ static void arfs_handle_work(struct work_struct *work)
 	struct mlx5_flow_handle *rule;
 
 	arfs = mlx5e_fs_get_arfs(priv->fs);
-	if (!test_bit(MLX5E_ARFS_STATE_ENABLED, &arfs->state))
-		return;
+	mutex_lock(&priv->state_lock);
+	if (!test_bit(MLX5E_STATE_OPENED, &priv->state)) {
+		spin_lock_bh(&arfs->arfs_lock);
+		hlist_del(&arfs_rule->hlist);
+		spin_unlock_bh(&arfs->arfs_lock);
+
+		mutex_unlock(&priv->state_lock);
+		kfree(arfs_rule);
+		goto out;
+	}
+	mutex_unlock(&priv->state_lock);
 
 	if (!arfs_rule->rule) {
 		rule = arfs_add_rule(priv, arfs_rule);
@@ -744,11 +740,6 @@ int mlx5e_rx_flow_steer(struct net_device *dev, const struct sk_buff *skb,
 		return -EPROTONOSUPPORT;
 
 	spin_lock_bh(&arfs->arfs_lock);
-	if (!test_bit(MLX5E_ARFS_STATE_ENABLED, &arfs->state)) {
-		spin_unlock_bh(&arfs->arfs_lock);
-		return -EPERM;
-	}
-
 	arfs_rule = arfs_find_rule(arfs_t, &fk);
 	if (arfs_rule) {
 		if (arfs_rule->rxq == rxq_index) {

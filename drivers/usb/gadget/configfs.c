@@ -105,12 +105,9 @@ static int usb_string_copy(const char *s, char **s_copy)
 	int ret;
 	char *str;
 	char *copy = *s_copy;
-
 	ret = strlen(s);
 	if (ret > USB_MAX_STRING_LEN)
 		return -EOVERFLOW;
-	if (ret < 1)
-		return -EINVAL;
 
 	if (copy) {
 		str = copy;
@@ -862,8 +859,6 @@ static ssize_t os_desc_qw_sign_store(struct config_item *item, const char *page,
 	struct gadget_info *gi = os_desc_item_to_gadget_info(item);
 	int res, l;
 
-	if (!len)
-		return len;
 	l = min((int)len, OS_STRING_QW_SIGN_LEN >> 1);
 	if (page[l - 1] == '\n')
 		--l;
@@ -1380,9 +1375,6 @@ static int configfs_composite_bind(struct usb_gadget *gadget,
 
 		if (gadget_is_otg(gadget))
 			c->descriptors = otg_desc;
-
-		/* Properly configure the bmAttributes wakeup bit */
-		check_remote_wakeup_config(gadget, c);
 
 		cfg = container_of(c, struct config_usb_cfg, c);
 		if (!list_empty(&cfg->string_list)) {

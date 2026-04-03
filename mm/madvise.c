@@ -879,16 +879,7 @@ static long madvise_dontneed_free(struct vm_area_struct *vma,
 			 */
 			end = vma->vm_end;
 		}
-		/*
-		 * If the memory region between start and end was
-		 * originally backed by 4kB pages and then remapped to
-		 * be backed by hugepages while mmap_lock was dropped,
-		 * the adjustment for hugetlb vma above may have rounded
-		 * end down to the start address.
-		 */
-		if (start == end)
-			return 0;
-		VM_WARN_ON(start > end);
+		VM_WARN_ON(start >= end);
 	}
 
 	if (behavior == MADV_DONTNEED || behavior == MADV_DONTNEED_LOCKED)
@@ -980,7 +971,7 @@ static long madvise_remove(struct vm_area_struct *vma,
 			return -EINVAL;
 	}
 
-	if (!vma_is_shared_maywrite(vma))
+	if ((vma->vm_flags & (VM_SHARED|VM_WRITE)) != (VM_SHARED|VM_WRITE))
 		return -EACCES;
 
 	offset = (loff_t)(start - vma->vm_start)

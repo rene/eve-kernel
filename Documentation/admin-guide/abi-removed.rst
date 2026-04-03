@@ -1,5 +1,5 @@
 ABI removed symbols
 ===================
 
-.. kernel-abi:: ABI/removed
+.. kernel-abi:: $srctree/Documentation/ABI/removed
    :rst:

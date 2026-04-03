@@ -167,7 +167,7 @@ static const struct meson_drm_soc_attr meson_drm_soc_attrs[] = {
 	/* S805X/S805Y HDMI PLL won't lock for HDMI PHY freq > 1,65GHz */
 	{
 		.limits = {
-			.max_hdmi_phy_freq = 1650000000,
+			.max_hdmi_phy_freq = 1650000,
 		},
 		.attrs = (const struct soc_device_attribute []) {
 			{ .soc_id = "GXL (S805*)", },
@@ -249,20 +249,29 @@ static int meson_drv_bind_master(struct device *dev, bool has_components)
 	if (ret)
 		goto free_drm;
 	ret = meson_canvas_alloc(priv->canvas, &priv->canvas_id_vd1_0);
-	if (ret)
-		goto free_canvas_osd1;
+	if (ret) {
+		meson_canvas_free(priv->canvas, priv->canvas_id_osd1);
+		goto free_drm;
+	}
 	ret = meson_canvas_alloc(priv->canvas, &priv->canvas_id_vd1_1);
-	if (ret)
-		goto free_canvas_vd1_0;
+	if (ret) {
+		meson_canvas_free(priv->canvas, priv->canvas_id_osd1);
+		meson_canvas_free(priv->canvas, priv->canvas_id_vd1_0);
+		goto free_drm;
+	}
 	ret = meson_canvas_alloc(priv->canvas, &priv->canvas_id_vd1_2);
-	if (ret)
-		goto free_canvas_vd1_1;
+	if (ret) {
+		meson_canvas_free(priv->canvas, priv->canvas_id_osd1);
+		meson_canvas_free(priv->canvas, priv->canvas_id_vd1_0);
+		meson_canvas_free(priv->canvas, priv->canvas_id_vd1_1);
+		goto free_drm;
+	}
 
 	priv->vsync_irq = platform_get_irq(pdev, 0);
 
 	ret = drm_vblank_init(drm, 1);
 	if (ret)
-		goto free_canvas_vd1_2;
+		goto free_drm;
 
 	/* Assign limits per soc revision/package */
 	for (i = 0 ; i < ARRAY_SIZE(meson_drm_soc_attrs) ; ++i) {
@@ -278,11 +287,11 @@ static int meson_drv_bind_master(struct device *dev, bool has_components)
 	 */
 	ret = drm_aperture_remove_framebuffers(&meson_driver);
 	if (ret)
-		goto free_canvas_vd1_2;
+		goto free_drm;
 
 	ret = drmm_mode_config_init(drm);
 	if (ret)
-		goto free_canvas_vd1_2;
+		goto free_drm;
 	drm->mode_config.max_width = 3840;
 	drm->mode_config.max_height = 2160;
 	drm->mode_config.funcs = &meson_mode_config_funcs;
@@ -297,7 +306,7 @@ static int meson_drv_bind_master(struct device *dev, bool has_components)
 	if (priv->afbcd.ops) {
 		ret = priv->afbcd.ops->init(priv);
 		if (ret)
-			goto free_canvas_vd1_2;
+			goto free_drm;
 	}
 
 	/* Encoder Initialization */
@@ -307,34 +316,32 @@ static int meson_drv_bind_master(struct device *dev, bool has_components)
 		goto exit_afbcd;
 
 	if (has_components) {
-		ret = component_bind_all(dev, drm);
+		ret = component_bind_all(drm->dev, drm);
 		if (ret) {
 			dev_err(drm->dev, "Couldn't bind all components\n");
-			/* Do not try to unbind */
-			has_components = false;
 			goto exit_afbcd;
 		}
 	}
 
 	ret = meson_encoder_hdmi_init(priv);
 	if (ret)
-		goto exit_afbcd;
+		goto unbind_all;
 
 	ret = meson_plane_create(priv);
 	if (ret)
-		goto exit_afbcd;
+		goto unbind_all;
 
 	ret = meson_overlay_create(priv);
 	if (ret)
-		goto exit_afbcd;
+		goto unbind_all;
 
 	ret = meson_crtc_create(priv);
 	if (ret)
-		goto exit_afbcd;
+		goto unbind_all;
 
 	ret = request_irq(priv->vsync_irq, meson_irq, 0, drm->driver->name, drm);
 	if (ret)
-		goto exit_afbcd;
+		goto unbind_all;
 
 	drm_mode_config_reset(drm);
 
@@ -352,25 +359,14 @@ static int meson_drv_bind_master(struct device *dev, bool has_components)
 
 uninstall_irq:
 	free_irq(priv->vsync_irq, drm);
+unbind_all:
+	if (has_components)
+		component_unbind_all(drm->dev, drm);
 exit_afbcd:
 	if (priv->afbcd.ops)
 		priv->afbcd.ops->exit(priv);
-free_canvas_vd1_2:
-	meson_canvas_free(priv->canvas, priv->canvas_id_vd1_2);
-free_canvas_vd1_1:
-	meson_canvas_free(priv->canvas, priv->canvas_id_vd1_1);
-free_canvas_vd1_0:
-	meson_canvas_free(priv->canvas, priv->canvas_id_vd1_0);
-free_canvas_osd1:
-	meson_canvas_free(priv->canvas, priv->canvas_id_osd1);
 free_drm:
 	drm_dev_put(drm);
-
-	meson_encoder_hdmi_remove(priv);
-	meson_encoder_cvbs_remove(priv);
-
-	if (has_components)
-		component_unbind_all(dev, drm);
 
 	return ret;
 }

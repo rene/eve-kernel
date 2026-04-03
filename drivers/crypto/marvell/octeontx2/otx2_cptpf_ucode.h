@@ -23,8 +23,11 @@
 /* Microcode version string length */
 #define OTX2_CPT_UCODE_VER_STR_SZ   44
 
-/* Maximum number of supported engines/cores on OcteonTX2/CN10K platform */
-#define OTX2_CPT_MAX_ENGINES        144
+/*
+ * Maximum number of supported engines/cores on OcteonTX2/CN10K/CN20K
+ * platform
+ */
+#define OTX2_CPT_MAX_ENGINES        256
 
 #define OTX2_CPT_ENGS_BITMASK_LEN   BITS_TO_LONGS(OTX2_CPT_MAX_ENGINES)
 
@@ -39,12 +42,22 @@ enum otx2_cpt_ucode_type {
 				   * Hash + HMAC + FlexiCrypto + RNG +
 				   * Full Feature IPSec + AirCrypto + Kasumi
 				   */
+	OTX2_CPT_SE_UC_TYPE4 = 40,/*
+				   * Non IPsec SE image. Similar to 20, but
+				   * without Air Crypto and Fast Path IPsec.
+				   * Supports Key Wrap mechanisms in addition
+				   */
 	OTX2_CPT_IE_UC_TYPE1 = 30, /* IE-MAIN - combination of 31 and 32 */
 	OTX2_CPT_IE_UC_TYPE2 = 31, /* Fast Path IPSec */
 	OTX2_CPT_IE_UC_TYPE3 = 32, /*
 				    * Hash + HMAC + FlexiCrypto + RNG +
 				    * Full Future IPSec
 				    */
+	OTX2_CPT_IE_UC_TYPE4 = 50, /*
+				    * Non IPsec IE image. Similar to 30, but
+				    * without Fast Path IPsec.
+				    */
+
 };
 
 struct otx2_cpt_bitmap {
@@ -73,7 +86,7 @@ struct otx2_cpt_ucode_hdr {
 };
 
 struct otx2_cpt_ucode {
-	u8 ver_str[OTX2_CPT_UCODE_VER_STR_SZ];/*
+	u8 ver_str[OTX2_CPT_UCODE_VER_STR_SZ + 1];/*
 					       * ucode version in readable
 					       * format
 					       */
@@ -96,9 +109,11 @@ struct otx2_cpt_engs_available {
 	int max_se_cnt;
 	int max_ie_cnt;
 	int max_ae_cnt;
+	int max_re_cnt;
 	int se_cnt;
 	int ie_cnt;
 	int ae_cnt;
+	int re_cnt;
 };
 
 /* Engines reserved to an engine group */
@@ -150,6 +165,7 @@ struct otx2_cpt_eng_grps {
 	int engs_num;			/* total number of engines supported */
 	u8 eng_ref_cnt[OTX2_CPT_MAX_ENGINES];/* engines reference count */
 	bool is_grps_created; /* Is the engine groups are already created */
+	u16 rid;
 };
 struct otx2_cptpf_dev;
 int otx2_cpt_init_eng_grps(struct pci_dev *pdev,

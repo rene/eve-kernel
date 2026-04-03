@@ -8,15 +8,22 @@
 #define CPT_TIMER_HOLD 0x03F
 #define CPT_COUNT_HOLD 32
 
+int otx2_cpt_queue_get_default_pri(struct pci_dev *pdev)
+{
+	return (is_cn20k(pdev)) ? OTX2_CPT_QUEUE_HI_PRI(CN20K_NUM_PRI_BITS)
+				: OTX2_CPT_QUEUE_HI_PRI(CN10K_NUM_PRI_BITS);
+}
+EXPORT_SYMBOL_NS_GPL(otx2_cpt_queue_get_default_pri, CRYPTO_DEV_OCTEONTX2_CPT);
+
 static void cptlf_do_set_done_time_wait(struct otx2_cptlf_info *lf,
 					int time_wait)
 {
 	union otx2_cptx_lf_done_wait done_wait;
 
-	done_wait.u = otx2_cpt_read64(lf->lfs->reg_base, BLKADDR_CPT0, lf->slot,
-				      OTX2_CPT_LF_DONE_WAIT);
+	done_wait.u = otx2_cpt_read64(lf->lfs->reg_base, lf->lfs->blkaddr,
+				      lf->slot, OTX2_CPT_LF_DONE_WAIT);
 	done_wait.s.time_wait = time_wait;
-	otx2_cpt_write64(lf->lfs->reg_base, BLKADDR_CPT0, lf->slot,
+	otx2_cpt_write64(lf->lfs->reg_base, lf->lfs->blkaddr, lf->slot,
 			 OTX2_CPT_LF_DONE_WAIT, done_wait.u);
 }
 
@@ -24,10 +31,10 @@ static void cptlf_do_set_done_num_wait(struct otx2_cptlf_info *lf, int num_wait)
 {
 	union otx2_cptx_lf_done_wait done_wait;
 
-	done_wait.u = otx2_cpt_read64(lf->lfs->reg_base, BLKADDR_CPT0, lf->slot,
-				      OTX2_CPT_LF_DONE_WAIT);
+	done_wait.u = otx2_cpt_read64(lf->lfs->reg_base, lf->lfs->blkaddr,
+				      lf->slot, OTX2_CPT_LF_DONE_WAIT);
 	done_wait.s.num_wait = num_wait;
-	otx2_cpt_write64(lf->lfs->reg_base, BLKADDR_CPT0, lf->slot,
+	otx2_cpt_write64(lf->lfs->reg_base, lf->lfs->blkaddr, lf->slot,
 			 OTX2_CPT_LF_DONE_WAIT, done_wait.u);
 }
 
@@ -46,26 +53,6 @@ static void cptlf_set_done_num_wait(struct otx2_cptlfs_info *lfs, int num_wait)
 
 	for (slot = 0; slot < lfs->lfs_num; slot++)
 		cptlf_do_set_done_num_wait(&lfs->lf[slot], num_wait);
-}
-
-static int cptlf_set_pri(struct otx2_cptlf_info *lf, int pri)
-{
-	struct otx2_cptlfs_info *lfs = lf->lfs;
-	union otx2_cptx_af_lf_ctrl lf_ctrl;
-	int ret;
-
-	ret = otx2_cpt_read_af_reg(lfs->mbox, lfs->pdev,
-				   CPT_AF_LFX_CTL(lf->slot),
-				   &lf_ctrl.u, lfs->blkaddr);
-	if (ret)
-		return ret;
-
-	lf_ctrl.s.pri = pri ? 1 : 0;
-
-	ret = otx2_cpt_write_af_reg(lfs->mbox, lfs->pdev,
-				    CPT_AF_LFX_CTL(lf->slot),
-				    lf_ctrl.u, lfs->blkaddr);
-	return ret;
 }
 
 static int cptlf_set_eng_grps_mask(struct otx2_cptlf_info *lf,
@@ -89,19 +76,42 @@ static int cptlf_set_eng_grps_mask(struct otx2_cptlf_info *lf,
 	return ret;
 }
 
-static int cptlf_set_grp_and_pri(struct otx2_cptlfs_info *lfs,
-				 int eng_grp_mask, int pri)
+static int cptlf_set_grp(struct otx2_cptlfs_info *lfs,
+			 int eng_grp_mask)
 {
 	int slot, ret = 0;
 
 	for (slot = 0; slot < lfs->lfs_num; slot++) {
-		ret = cptlf_set_pri(&lfs->lf[slot], pri);
-		if (ret)
-			return ret;
-
 		ret = cptlf_set_eng_grps_mask(&lfs->lf[slot], eng_grp_mask);
 		if (ret)
 			return ret;
+	}
+	return ret;
+}
+
+static int cptlf_set_ctx_ilen(struct otx2_cptlfs_info *lfs, int ctx_ilen)
+{
+	union otx2_cptx_af_lf_ctrl lf_ctrl;
+	struct otx2_cptlf_info *lf;
+	int slot, ret = 0;
+
+	for (slot = 0; slot < lfs->lfs_num; slot++) {
+		lf = &lfs->lf[slot];
+
+		ret = otx2_cpt_read_af_reg(lfs->mbox, lfs->pdev,
+					   CPT_AF_LFX_CTL(lf->slot),
+					   &lf_ctrl.u, lfs->blkaddr);
+		if (ret)
+			return ret;
+
+		lf_ctrl.s.ctx_ilen = ctx_ilen;
+
+		ret = otx2_cpt_write_af_reg(lfs->mbox, lfs->pdev,
+					    CPT_AF_LFX_CTL(lf->slot),
+					    lf_ctrl.u, lfs->blkaddr);
+		if (ret)
+			return ret;
+
 	}
 	return ret;
 }
@@ -147,37 +157,25 @@ static void cptlf_set_misc_intrs(struct otx2_cptlfs_info *lfs, u8 enable)
 	irq_misc.s.nwrp = 0x1;
 
 	for (slot = 0; slot < lfs->lfs_num; slot++)
-		otx2_cpt_write64(lfs->reg_base, BLKADDR_CPT0, slot, reg,
+		otx2_cpt_write64(lfs->reg_base, lfs->blkaddr, slot, reg,
 				 irq_misc.u);
 }
 
-static void cptlf_enable_intrs(struct otx2_cptlfs_info *lfs)
+static void cptlf_set_done_intrs(struct otx2_cptlfs_info *lfs, u8 enable)
 {
-	int slot;
-
-	/* Enable done interrupts */
-	for (slot = 0; slot < lfs->lfs_num; slot++)
-		otx2_cpt_write64(lfs->reg_base, BLKADDR_CPT0, slot,
-				 OTX2_CPT_LF_DONE_INT_ENA_W1S, 0x1);
-	/* Enable Misc interrupts */
-	cptlf_set_misc_intrs(lfs, true);
-}
-
-static void cptlf_disable_intrs(struct otx2_cptlfs_info *lfs)
-{
+	u64 reg = enable ? OTX2_CPT_LF_DONE_INT_ENA_W1S :
+			   OTX2_CPT_LF_DONE_INT_ENA_W1C;
 	int slot;
 
 	for (slot = 0; slot < lfs->lfs_num; slot++)
-		otx2_cpt_write64(lfs->reg_base, BLKADDR_CPT0, slot,
-				 OTX2_CPT_LF_DONE_INT_ENA_W1C, 0x1);
-	cptlf_set_misc_intrs(lfs, false);
+		otx2_cpt_write64(lfs->reg_base, lfs->blkaddr, slot, reg, 0x1);
 }
 
 static inline int cptlf_read_done_cnt(struct otx2_cptlf_info *lf)
 {
 	union otx2_cptx_lf_done irq_cnt;
 
-	irq_cnt.u = otx2_cpt_read64(lf->lfs->reg_base, BLKADDR_CPT0, lf->slot,
+	irq_cnt.u = otx2_cpt_read64(lf->lfs->reg_base, lf->lfs->blkaddr, lf->slot,
 				    OTX2_CPT_LF_DONE);
 	return irq_cnt.s.done;
 }
@@ -189,8 +187,8 @@ static irqreturn_t cptlf_misc_intr_handler(int __always_unused irq, void *arg)
 	struct device *dev;
 
 	dev = &lf->lfs->pdev->dev;
-	irq_misc.u = otx2_cpt_read64(lf->lfs->reg_base, BLKADDR_CPT0, lf->slot,
-				     OTX2_CPT_LF_MISC_INT);
+	irq_misc.u = otx2_cpt_read64(lf->lfs->reg_base, lf->lfs->blkaddr,
+				     lf->slot, OTX2_CPT_LF_MISC_INT);
 	irq_misc_ack.u = 0x0;
 
 	if (irq_misc.s.fault) {
@@ -222,7 +220,7 @@ static irqreturn_t cptlf_misc_intr_handler(int __always_unused irq, void *arg)
 	}
 
 	/* Acknowledge interrupts */
-	otx2_cpt_write64(lf->lfs->reg_base, BLKADDR_CPT0, lf->slot,
+	otx2_cpt_write64(lf->lfs->reg_base, lf->lfs->blkaddr, lf->slot,
 			 OTX2_CPT_LF_MISC_INT, irq_misc_ack.u);
 
 	return IRQ_HANDLED;
@@ -237,13 +235,13 @@ static irqreturn_t cptlf_done_intr_handler(int irq, void *arg)
 	/* Read the number of completed requests */
 	irq_cnt = cptlf_read_done_cnt(lf);
 	if (irq_cnt) {
-		done_wait.u = otx2_cpt_read64(lf->lfs->reg_base, BLKADDR_CPT0,
+		done_wait.u = otx2_cpt_read64(lf->lfs->reg_base, lf->lfs->blkaddr,
 					      lf->slot, OTX2_CPT_LF_DONE_WAIT);
 		/* Acknowledge the number of completed requests */
-		otx2_cpt_write64(lf->lfs->reg_base, BLKADDR_CPT0, lf->slot,
+		otx2_cpt_write64(lf->lfs->reg_base, lf->lfs->blkaddr, lf->slot,
 				 OTX2_CPT_LF_DONE_ACK, irq_cnt);
 
-		otx2_cpt_write64(lf->lfs->reg_base, BLKADDR_CPT0, lf->slot,
+		otx2_cpt_write64(lf->lfs->reg_base, lf->lfs->blkaddr, lf->slot,
 				 OTX2_CPT_LF_DONE_WAIT, done_wait.u);
 		if (unlikely(!lf->wqe)) {
 			dev_err(&lf->lfs->pdev->dev, "No work for LF %d\n",
@@ -257,24 +255,44 @@ static irqreturn_t cptlf_done_intr_handler(int irq, void *arg)
 	return IRQ_HANDLED;
 }
 
-void otx2_cptlf_unregister_interrupts(struct otx2_cptlfs_info *lfs)
+void otx2_cptlf_unregister_misc_interrupts(struct otx2_cptlfs_info *lfs)
 {
-	int i, offs, vector;
+	int i, irq_offs, vector;
 
+	irq_offs = OTX2_CPT_LF_INT_VEC_E_MISC;
 	for (i = 0; i < lfs->lfs_num; i++) {
-		for (offs = 0; offs < OTX2_CPT_LF_MSIX_VECTORS; offs++) {
-			if (!lfs->lf[i].is_irq_reg[offs])
-				continue;
+		if (!lfs->lf[i].is_irq_reg[irq_offs])
+			continue;
 
-			vector = pci_irq_vector(lfs->pdev,
-						lfs->lf[i].msix_offset + offs);
-			free_irq(vector, &lfs->lf[i]);
-			lfs->lf[i].is_irq_reg[offs] = false;
-		}
+		vector = pci_irq_vector(lfs->pdev,
+					lfs->lf[i].msix_offset + irq_offs);
+		free_irq(vector, &lfs->lf[i]);
+		lfs->lf[i].is_irq_reg[irq_offs] = false;
 	}
-	cptlf_disable_intrs(lfs);
+
+	cptlf_set_misc_intrs(lfs, false);
 }
-EXPORT_SYMBOL_NS_GPL(otx2_cptlf_unregister_interrupts,
+EXPORT_SYMBOL_NS_GPL(otx2_cptlf_unregister_misc_interrupts,
+		     CRYPTO_DEV_OCTEONTX2_CPT);
+
+void otx2_cptlf_unregister_done_interrupts(struct otx2_cptlfs_info *lfs)
+{
+	int i, irq_offs, vector;
+
+	irq_offs = OTX2_CPT_LF_INT_VEC_E_DONE;
+	for (i = 0; i < lfs->lfs_num; i++) {
+		if (!lfs->lf[i].is_irq_reg[irq_offs])
+			continue;
+
+		vector = pci_irq_vector(lfs->pdev,
+					lfs->lf[i].msix_offset + irq_offs);
+		free_irq(vector, &lfs->lf[i]);
+		lfs->lf[i].is_irq_reg[irq_offs] = false;
+	}
+
+	cptlf_set_done_intrs(lfs, false);
+}
+EXPORT_SYMBOL_NS_GPL(otx2_cptlf_unregister_done_interrupts,
 		     CRYPTO_DEV_OCTEONTX2_CPT);
 
 static int cptlf_do_register_interrrupts(struct otx2_cptlfs_info *lfs,
@@ -296,34 +314,53 @@ static int cptlf_do_register_interrrupts(struct otx2_cptlfs_info *lfs,
 	return ret;
 }
 
-int otx2_cptlf_register_interrupts(struct otx2_cptlfs_info *lfs)
+int otx2_cptlf_register_misc_interrupts(struct otx2_cptlfs_info *lfs)
 {
+	bool is_cpt1 = (lfs->blkaddr == BLKADDR_CPT1);
 	int irq_offs, ret, i;
 
+	irq_offs = OTX2_CPT_LF_INT_VEC_E_MISC;
 	for (i = 0; i < lfs->lfs_num; i++) {
-		irq_offs = OTX2_CPT_LF_INT_VEC_E_MISC;
-		snprintf(lfs->lf[i].irq_name[irq_offs], 32, "CPTLF Misc%d", i);
+		snprintf(lfs->lf[i].irq_name[irq_offs], 32, "CPT%dLF Misc%d",
+			 is_cpt1, i);
 		ret = cptlf_do_register_interrrupts(lfs, i, irq_offs,
 						    cptlf_misc_intr_handler);
 		if (ret)
 			goto free_irq;
+	}
+	cptlf_set_misc_intrs(lfs, true);
+	return 0;
 
-		irq_offs = OTX2_CPT_LF_INT_VEC_E_DONE;
-		snprintf(lfs->lf[i].irq_name[irq_offs], 32, "OTX2_CPTLF Done%d",
-			 i);
+free_irq:
+	otx2_cptlf_unregister_misc_interrupts(lfs);
+	return ret;
+}
+EXPORT_SYMBOL_NS_GPL(otx2_cptlf_register_misc_interrupts,
+		     CRYPTO_DEV_OCTEONTX2_CPT);
+
+int otx2_cptlf_register_done_interrupts(struct otx2_cptlfs_info *lfs)
+{
+	bool is_cpt1 = (lfs->blkaddr == BLKADDR_CPT1);
+	int irq_offs, ret, i;
+
+	irq_offs = OTX2_CPT_LF_INT_VEC_E_DONE;
+	for (i = 0; i < lfs->lfs_num; i++) {
+		snprintf(lfs->lf[i].irq_name[irq_offs], 32,
+			 "OTX2_CPT%dLF Done%d", is_cpt1, i);
 		ret = cptlf_do_register_interrrupts(lfs, i, irq_offs,
 						    cptlf_done_intr_handler);
 		if (ret)
 			goto free_irq;
 	}
-	cptlf_enable_intrs(lfs);
+	cptlf_set_done_intrs(lfs, true);
 	return 0;
 
 free_irq:
-	otx2_cptlf_unregister_interrupts(lfs);
+	otx2_cptlf_unregister_done_interrupts(lfs);
 	return ret;
 }
-EXPORT_SYMBOL_NS_GPL(otx2_cptlf_register_interrupts, CRYPTO_DEV_OCTEONTX2_CPT);
+EXPORT_SYMBOL_NS_GPL(otx2_cptlf_register_done_interrupts,
+		     CRYPTO_DEV_OCTEONTX2_CPT);
 
 void otx2_cptlf_free_irqs_affinity(struct otx2_cptlfs_info *lfs)
 {
@@ -342,7 +379,11 @@ EXPORT_SYMBOL_NS_GPL(otx2_cptlf_free_irqs_affinity, CRYPTO_DEV_OCTEONTX2_CPT);
 int otx2_cptlf_set_irqs_affinity(struct otx2_cptlfs_info *lfs)
 {
 	struct otx2_cptlf_info *lf = lfs->lf;
-	int slot, offs, ret;
+	int slot, offs, ret, cpu;
+	struct cpumask mask;
+
+	cpumask_and(&mask, cpu_online_mask, irq_default_affinity);
+	cpu = cpumask_first(&mask);
 
 	for (slot = 0; slot < lfs->lfs_num; slot++) {
 		if (!zalloc_cpumask_var(&lf[slot].affinity_mask, GFP_KERNEL)) {
@@ -352,9 +393,11 @@ int otx2_cptlf_set_irqs_affinity(struct otx2_cptlfs_info *lfs)
 			goto free_affinity_mask;
 		}
 
-		cpumask_set_cpu(cpumask_local_spread(slot,
-				dev_to_node(&lfs->pdev->dev)),
-				lf[slot].affinity_mask);
+		cpumask_set_cpu(cpu, lf[slot].affinity_mask);
+		cpu = slot % cpumask_weight(&mask);
+		cpu = cpumask_next(cpu, &mask);
+		if (cpu >= nr_cpu_ids)
+			cpu = cpumask_first(&mask);
 
 		for (offs = 0; offs < OTX2_CPT_LF_MSIX_VECTORS; offs++) {
 			ret = irq_set_affinity_hint(pci_irq_vector(lfs->pdev,
@@ -372,7 +415,7 @@ free_affinity_mask:
 }
 EXPORT_SYMBOL_NS_GPL(otx2_cptlf_set_irqs_affinity, CRYPTO_DEV_OCTEONTX2_CPT);
 
-int otx2_cptlf_init(struct otx2_cptlfs_info *lfs, u8 eng_grp_mask, int pri,
+int otx2_cptlf_init(struct otx2_cptlfs_info *lfs, u8 eng_grp_mask, u8 pri,
 		    int lfs_num)
 {
 	int slot, ret;
@@ -384,16 +427,13 @@ int otx2_cptlf_init(struct otx2_cptlfs_info *lfs, u8 eng_grp_mask, int pri,
 	for (slot = 0; slot < lfs->lfs_num; slot++) {
 		lfs->lf[slot].lfs = lfs;
 		lfs->lf[slot].slot = slot;
-		if (lfs->lmt_base)
-			lfs->lf[slot].lmtline = lfs->lmt_base +
-						(slot * LMTLINE_SIZE);
-		else
+		if (!lfs->lmt_info.base)
 			lfs->lf[slot].lmtline = lfs->reg_base +
 				OTX2_CPT_RVU_FUNC_ADDR_S(BLKADDR_LMT, slot,
 						 OTX2_CPT_LMT_LF_LMTLINEX(0));
 
 		lfs->lf[slot].ioreg = lfs->reg_base +
-			OTX2_CPT_RVU_FUNC_ADDR_S(BLKADDR_CPT0, slot,
+			OTX2_CPT_RVU_FUNC_ADDR_S(lfs->blkaddr, slot,
 						 OTX2_CPT_LF_NQX(0));
 	}
 	/* Send request to attach LFs */
@@ -410,11 +450,22 @@ int otx2_cptlf_init(struct otx2_cptlfs_info *lfs, u8 eng_grp_mask, int pri,
 	cptlf_hw_init(lfs);
 	/*
 	 * Allow each LF to execute requests destined to any of 8 engine
-	 * groups and set queue priority of each LF to high
+	 * groups
 	 */
-	ret = cptlf_set_grp_and_pri(lfs, eng_grp_mask, pri);
+	ret = cptlf_set_grp(lfs, eng_grp_mask);
 	if (ret)
 		goto free_iq;
+
+	/* set queue priority of each LF to high/default */
+	ret = otx2_cptlf_set_que_pri_msg(lfs, pri);
+	if (ret)
+		goto free_iq;
+
+	if (lfs->ctx_ilen_ovrd) {
+		ret = cptlf_set_ctx_ilen(lfs, lfs->ctx_ilen);
+		if (ret)
+			goto free_iq;
+	}
 
 	return 0;
 

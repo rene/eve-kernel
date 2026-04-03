@@ -3,7 +3,6 @@
  * Copyright (c) 2011-2014, Intel Corporation.
  * Copyright (c) 2017-2021 Christoph Hellwig.
  */
-#include <linux/blk-integrity.h>
 #include <linux/ptrace.h>	/* for force_successful_syscall_return */
 #include <linux/nvme_ioctl.h>
 #include <linux/io_uring.h>
@@ -96,14 +95,9 @@ static int nvme_map_user_request(struct request *req, u64 ubuffer,
 	struct request_queue *q = req->q;
 	struct nvme_ns *ns = q->queuedata;
 	struct block_device *bdev = ns ? ns->disk->part0 : NULL;
-	bool supports_metadata = bdev && blk_get_integrity(bdev->bd_disk);
-	bool has_metadata = meta_buffer && meta_len;
 	struct bio *bio = NULL;
 	void *meta = NULL;
 	int ret;
-
-	if (has_metadata && !supports_metadata)
-		return -EINVAL;
 
 	if (ioucmd && (ioucmd->flags & IORING_URING_CMD_FIXED)) {
 		struct iov_iter iter;
@@ -128,7 +122,7 @@ static int nvme_map_user_request(struct request *req, u64 ubuffer,
 	if (bdev)
 		bio_set_dev(bio, bdev);
 
-	if (has_metadata) {
+	if (bdev && meta_buffer && meta_len) {
 		meta = nvme_add_user_metadata(req, meta_buffer, meta_len,
 				meta_seed);
 		if (IS_ERR(meta)) {
@@ -153,7 +147,6 @@ static int nvme_submit_user_cmd(struct request_queue *q,
 		unsigned bufflen, void __user *meta_buffer, unsigned meta_len,
 		u32 meta_seed, u64 *result, unsigned timeout, bool vec)
 {
-	struct nvme_ns *ns = q->queuedata;
 	struct nvme_ctrl *ctrl;
 	struct request *req;
 	void *meta = NULL;
@@ -188,7 +181,7 @@ static int nvme_submit_user_cmd(struct request_queue *q,
 	blk_mq_free_request(req);
 
 	if (effects)
-		nvme_passthru_end(ctrl, ns, effects, cmd, ret);
+		nvme_passthru_end(ctrl, effects, cmd, ret);
 
 	return ret;
 }
@@ -262,7 +255,8 @@ static bool nvme_validate_passthru_nsid(struct nvme_ctrl *ctrl,
 {
 	if (ns && nsid != ns->head->ns_id) {
 		dev_err(ctrl->device,
-			"%s: nsid (%u) in cmd does not match nsid (%u) of namespace\n",
+			"%s: nsid (%u) in cmd does not match nsid (%u)"
+			"of namespace\n",
 			current->comm, nsid, ns->head->ns_id);
 		return false;
 	}
@@ -438,6 +432,7 @@ static enum rq_end_io_ret nvme_uring_cmd_end_io(struct request *req,
 {
 	struct io_uring_cmd *ioucmd = req->end_io_data;
 	struct nvme_uring_cmd_pdu *pdu = nvme_uring_cmd_pdu(ioucmd);
+	void *cookie = READ_ONCE(ioucmd->cookie);
 
 	req->bio = pdu->bio;
 	if (nvme_req(req)->flags & NVME_REQ_CANCELLED) {
@@ -450,14 +445,14 @@ static enum rq_end_io_ret nvme_uring_cmd_end_io(struct request *req,
 	pdu->u.result = le64_to_cpu(nvme_req(req)->result.u64);
 
 	/*
-	 * IOPOLL could potentially complete this request directly, but
-	 * if multiple rings are polling on the same queue, then it's possible
-	 * for one ring to find completions for another ring. Punting the
-	 * completion via task_work will always direct it to the right
-	 * location, rather than potentially complete requests for ringA
-	 * under iopoll invocations from ringB.
+	 * For iopoll, complete it directly.
+	 * Otherwise, move the completion to task work.
 	 */
-	io_uring_cmd_complete_in_task(ioucmd, nvme_uring_task_cb);
+	if (cookie != NULL && blk_rq_is_poll(req))
+		nvme_uring_task_cb(ioucmd, IO_URING_F_UNLOCKED);
+	else
+		io_uring_cmd_complete_in_task(ioucmd, nvme_uring_task_cb);
+
 	return RQ_END_IO_FREE;
 }
 

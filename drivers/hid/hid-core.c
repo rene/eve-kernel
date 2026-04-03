@@ -1129,8 +1129,6 @@ static void hid_apply_multiplier(struct hid_device *hid,
 	while (multiplier_collection->parent_idx != -1 &&
 	       multiplier_collection->type != HID_COLLECTION_LOGICAL)
 		multiplier_collection = &hid->collection[multiplier_collection->parent_idx];
-	if (multiplier_collection->type != HID_COLLECTION_LOGICAL)
-		multiplier_collection = NULL;
 
 	effective_multiplier = hid_calculate_multiplier(hid, multiplier);
 
@@ -1453,6 +1451,7 @@ static void implement(const struct hid_device *hid, u8 *report,
 			hid_warn(hid,
 				 "%s() called with too large value %d (n: %d)! (%s)\n",
 				 __func__, value, n, current->comm);
+			WARN_ON(1);
 			value &= m;
 		}
 	}
@@ -1876,14 +1875,11 @@ u8 *hid_alloc_report_buf(struct hid_report *report, gfp_t flags)
 	/*
 	 * 7 extra bytes are necessary to achieve proper functionality
 	 * of implement() working on 8 byte chunks
-	 * 1 extra byte for the report ID if it is null (not used) so
-	 * we can reserve that extra byte in the first position of the buffer
-	 * when sending it to .raw_request()
 	 */
 
-	u32 len = hid_report_len(report) + 7 + (report->id == 0);
+	u32 len = hid_report_len(report) + 7;
 
-	return kzalloc(len, flags);
+	return kmalloc(len, flags);
 }
 EXPORT_SYMBOL_GPL(hid_alloc_report_buf);
 
@@ -1944,7 +1940,7 @@ static struct hid_report *hid_get_report(struct hid_report_enum *report_enum,
 int __hid_request(struct hid_device *hid, struct hid_report *report,
 		enum hid_class_request reqtype)
 {
-	char *buf, *data_buf;
+	char *buf;
 	int ret;
 	u32 len;
 
@@ -1952,19 +1948,13 @@ int __hid_request(struct hid_device *hid, struct hid_report *report,
 	if (!buf)
 		return -ENOMEM;
 
-	data_buf = buf;
 	len = hid_report_len(report);
 
-	if (report->id == 0) {
-		/* reserve the first byte for the report ID */
-		data_buf++;
-		len++;
-	}
-
 	if (reqtype == HID_REQ_SET_REPORT)
-		hid_output_report(report, data_buf);
+		hid_output_report(report, buf);
 
-	ret = hid_hw_raw_request(hid, report->id, buf, len, report->type, reqtype);
+	ret = hid->ll_driver->raw_request(hid, report->id, buf, len,
+					  report->type, reqtype);
 	if (ret < 0) {
 		dbg_hid("unable to complete request: %d\n", ret);
 		goto out;

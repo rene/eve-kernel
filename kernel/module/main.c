@@ -699,16 +699,14 @@ SYSCALL_DEFINE2(delete_module, const char __user *, name_user,
 	struct module *mod;
 	char name[MODULE_NAME_LEN];
 	char buf[MODULE_FLAGS_BUF_SIZE];
-	int ret, len, forced = 0;
+	int ret, forced = 0;
 
 	if (!capable(CAP_SYS_MODULE) || modules_disabled)
 		return -EPERM;
 
-	len = strncpy_from_user(name, name_user, MODULE_NAME_LEN);
-	if (len == 0 || len == MODULE_NAME_LEN)
-		return -ENOENT;
-	if (len < 0)
-		return len;
+	if (strncpy_from_user(name, name_user, MODULE_NAME_LEN-1) < 0)
+		return -EFAULT;
+	name[MODULE_NAME_LEN-1] = '\0';
 
 	audit_log_kern_module(name);
 
@@ -2436,11 +2434,6 @@ static void do_free_init(struct work_struct *w)
 	}
 }
 
-void flush_module_init_free_work(void)
-{
-	flush_work(&init_free_wq);
-}
-
 #undef MODULE_PARAM_PREFIX
 #define MODULE_PARAM_PREFIX "module."
 /* Default value for module->async_probe_requested */
@@ -2531,8 +2524,8 @@ static noinline int do_init_module(struct module *mod)
 	 * Note that module_alloc() on most architectures creates W+X page
 	 * mappings which won't be cleaned up until do_free_init() runs.  Any
 	 * code such as mark_rodata_ro() which depends on those mappings to
-	 * be cleaned up needs to sync with the queued work by invoking
-	 * flush_module_init_free_work().
+	 * be cleaned up needs to sync with the queued work - ie
+	 * rcu_barrier()
 	 */
 	if (llist_add(&freeinit->node, &init_free_list))
 		schedule_work(&init_free_wq);

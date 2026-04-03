@@ -26,8 +26,10 @@ static const struct reg_sequence adv7533_cec_fixed_registers[] = {
 
 static void adv7511_dsi_config_timing_gen(struct adv7511 *adv)
 {
+	struct mipi_dsi_device *dsi = adv->dsi;
 	struct drm_display_mode *mode = &adv->curr_mode;
 	unsigned int hsw, hfp, hbp, vsw, vfp, vbp;
+	static const u8 clock_div_by_lanes[] = { 6, 4, 3 };	/* 2, 3, 4 lanes */
 
 	hsw = mode->hsync_end - mode->hsync_start;
 	hfp = mode->hsync_start - mode->hdisplay;
@@ -36,10 +38,9 @@ static void adv7511_dsi_config_timing_gen(struct adv7511 *adv)
 	vfp = mode->vsync_start - mode->vdisplay;
 	vbp = mode->vtotal - mode->vsync_end;
 
-	/* 03-01 Enable Internal Timing Generator */
-	regmap_write(adv->regmap_cec, 0x27, 0xcb);
-
-	/* 03-08 Timing Configuration */
+	/* set pixel clock divider mode */
+	regmap_write(adv->regmap_cec, 0x16,
+		     clock_div_by_lanes[dsi->lanes - 2] << 3);
 
 	/* horizontal porch params */
 	regmap_write(adv->regmap_cec, 0x28, mode->htotal >> 4);
@@ -60,66 +61,35 @@ static void adv7511_dsi_config_timing_gen(struct adv7511 *adv)
 	regmap_write(adv->regmap_cec, 0x35, (vfp << 4) & 0xff);
 	regmap_write(adv->regmap_cec, 0x36, vbp >> 4);
 	regmap_write(adv->regmap_cec, 0x37, (vbp << 4) & 0xff);
-
-	/* 03-03 Reset Internal Timing Generator */
-	regmap_write(adv->regmap_cec, 0x27, 0xcb);
-	regmap_write(adv->regmap_cec, 0x27, 0x8b);
-	regmap_write(adv->regmap_cec, 0x27, 0xcb);
-
 }
 
 void adv7533_dsi_power_on(struct adv7511 *adv)
 {
 	struct mipi_dsi_device *dsi = adv->dsi;
-	struct drm_display_mode *mode = &adv->curr_mode;
-	u8 clock_div_by_lanes[] = { 6, 4, 3 };	/* 2, 3, 4 lanes */
-
-	/* Gate DSI LP Oscillator */
-	regmap_update_bits(adv->regmap_cec, 0x03, 0x02, 0x00);
-
-	/* 01-03 Initialisation (Fixed) Registers */
-	regmap_register_patch(adv->regmap_cec, adv7533_cec_fixed_registers,
-			      ARRAY_SIZE(adv7533_cec_fixed_registers));
-
-	/* 02-04 DSI Lanes */
-	regmap_write(adv->regmap_cec, 0x1c, dsi->lanes << 4);
-
-	/* 02-05 DSI Pixel Clock Divider */
-	regmap_write(adv->regmap_cec, 0x16,
-		     clock_div_by_lanes[dsi->lanes - 2] << 3);
 
 	if (adv->use_timing_gen)
 		adv7511_dsi_config_timing_gen(adv);
-	else
+
+	/* set number of dsi lanes */
+	regmap_write(adv->regmap_cec, 0x1c, dsi->lanes << 4);
+
+	if (adv->use_timing_gen) {
+		/* reset internal timing generator */
+		regmap_write(adv->regmap_cec, 0x27, 0xcb);
+		regmap_write(adv->regmap_cec, 0x27, 0x8b);
+		regmap_write(adv->regmap_cec, 0x27, 0xcb);
+	} else {
+		/* disable internal timing generator */
 		regmap_write(adv->regmap_cec, 0x27, 0x0b);
+	}
 
-	/* 04-01 HDMI Output */
-	regmap_write(adv->regmap, 0xaf, 0x16);
-
-	/* 09-03 AVI Infoframe - RGB - 16-9 Aspect Ratio */
-	regmap_write(adv->regmap, ADV7511_REG_AVI_INFOFRAME(0), 0x10);
-	if (FORMAT_RATIO(mode->hdisplay, mode->vdisplay) == RATIO_16_9)
-		regmap_write(adv->regmap, ADV7511_REG_AVI_INFOFRAME(1), 0x28);
-	else if (FORMAT_RATIO(mode->hdisplay, mode->vdisplay) == RATIO_4_3)
-		regmap_write(adv->regmap, ADV7511_REG_AVI_INFOFRAME(1), 0x18);
-
-	/* 04-04 GC Packet Enable */
-	regmap_write(adv->regmap, ADV7511_REG_PACKET_ENABLE0, 0x80);
-
-	/* 04-06 GC Colour Depth - 24 Bit */
-	regmap_write(adv->regmap, 0x4c, 0x04);
-
-	/* 04-09 Down Dither Output Colour Depth - 8 Bit (default) */
-	regmap_write(adv->regmap, 0x49, 0x00);
-
-	/* 07-01 CEC Power Mode - Always Active */
-	regmap_write(adv->regmap_cec, 0xbe, 0x3d);
-
-	/* 04-03 HDMI Output Enable  */
+	/* enable hdmi */
 	regmap_write(adv->regmap_cec, 0x03, 0x89);
 	/* disable test mode */
 	regmap_write(adv->regmap_cec, 0x55, 0x00);
 
+	regmap_register_patch(adv->regmap_cec, adv7533_cec_fixed_registers,
+			      ARRAY_SIZE(adv7533_cec_fixed_registers));
 }
 
 void adv7533_dsi_power_off(struct adv7511 *adv)
@@ -171,19 +141,21 @@ int adv7533_attach_dsi(struct adv7511 *adv)
 	struct mipi_dsi_device *dsi;
 	int ret = 0;
 	const struct mipi_dsi_device_info info = { .type = "adv7533",
-						   .channel = adv->channel_id,
+						   .channel = 0,
 						   .node = NULL,
 						 };
 
 	host = of_find_mipi_dsi_host_by_node(adv->host_node);
-	if (!host)
-		return dev_err_probe(dev, -EPROBE_DEFER,
-				     "failed to find dsi host\n");
+	if (!host) {
+		dev_err(dev, "failed to find dsi host\n");
+		return -EPROBE_DEFER;
+	}
 
 	dsi = devm_mipi_dsi_device_register_full(dev, host, &info);
-	if (IS_ERR(dsi))
-		return dev_err_probe(dev, PTR_ERR(dsi),
-				     "failed to create dsi device\n");
+	if (IS_ERR(dsi)) {
+		dev_err(dev, "failed to create dsi device\n");
+		return PTR_ERR(dsi);
+	}
 
 	adv->dsi = dsi;
 
@@ -193,43 +165,33 @@ int adv7533_attach_dsi(struct adv7511 *adv)
 			  MIPI_DSI_MODE_NO_EOT_PACKET | MIPI_DSI_MODE_VIDEO_HSE;
 
 	ret = devm_mipi_dsi_attach(dev, dsi);
-	if (ret < 0)
-		return dev_err_probe(dev, ret, "failed to attach dsi to host\n");
+	if (ret < 0) {
+		dev_err(dev, "failed to attach dsi to host\n");
+		return ret;
+	}
 
 	return 0;
 }
 
 int adv7533_parse_dt(struct device_node *np, struct adv7511 *adv)
 {
-	struct device *dev = &adv->i2c_main->dev;
-	u32 num_lanes = 0, channel_id = 0;
+	u32 num_lanes;
 
-	of_property_read_u32(np, "adi,dsi-channel", &channel_id);
 	of_property_read_u32(np, "adi,dsi-lanes", &num_lanes);
 
-	if (num_lanes < 1 || num_lanes > 4) {
-		dev_err(dev, "Invalid dsi-lanes: %d\n", num_lanes);
+	if (num_lanes < 1 || num_lanes > 4)
 		return -EINVAL;
-	}
-
-	if (channel_id > 3) {
-		dev_err(dev, "Invalid dsi-channel: %d\n", channel_id);
-		return -EINVAL;
-	}
 
 	adv->num_dsi_lanes = num_lanes;
-	adv->channel_id = channel_id;
 
 	adv->host_node = of_graph_get_remote_node(np, 0, 0);
 	if (!adv->host_node)
 		return -ENODEV;
 
+	of_node_put(adv->host_node);
+
 	adv->use_timing_gen = !of_property_read_bool(np,
 						"adi,disable-timing-generator");
-
-	of_property_read_u32(np, "adi,addr-cec", &adv->addr_cec);
-	of_property_read_u32(np, "adi,addr-edid", &adv->addr_edid);
-	of_property_read_u32(np, "adi,addr-pkt", &adv->addr_pkt);
 
 	/* TODO: Check if these need to be parsed by DT or not */
 	adv->rgb = true;

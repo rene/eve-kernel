@@ -42,13 +42,6 @@ static void mpi3mr_send_event_ack(struct mpi3mr_ioc *mrioc, u8 event,
 
 #define MPI3_EVENT_WAIT_FOR_DEVICES_TO_REFRESH	(0xFFFE)
 
-/*
- * SAS Log info code for a NCQ collateral abort after an NCQ error:
- * IOC_LOGINFO_PREFIX_PL | PL_LOGINFO_CODE_SATA_NCQ_FAIL_ALL_CMDS_AFTR_ERR
- * See: drivers/message/fusion/lsi/mpi_log_sas.h
- */
-#define IOC_LOGINFO_SATA_NCQ_FAIL_AFTER_ERR	0x31080000
-
 /**
  * mpi3mr_host_tag_for_scmd - Get host tag for a scmd
  * @mrioc: Adapter instance reference
@@ -1051,14 +1044,8 @@ void mpi3mr_rfresh_tgtdevs(struct mpi3mr_ioc *mrioc)
 	tgtdev = NULL;
 	list_for_each_entry(tgtdev, &mrioc->tgtdev_list, list) {
 		if ((tgtdev->dev_handle != MPI3MR_INVALID_DEV_HANDLE) &&
-		    !tgtdev->is_hidden) {
-			if (!tgtdev->host_exposed)
-				mpi3mr_report_tgtdev_to_host(mrioc,
-							     tgtdev->perst_id);
-			else if (tgtdev->starget)
-				starget_for_each_device(tgtdev->starget,
-							(void *)tgtdev, mpi3mr_update_sdev);
-	}
+		    !tgtdev->is_hidden && !tgtdev->host_exposed)
+			mpi3mr_report_tgtdev_to_host(mrioc, tgtdev->perst_id);
 	}
 }
 
@@ -3218,18 +3205,7 @@ void mpi3mr_process_op_reply_desc(struct mpi3mr_ioc *mrioc,
 		scmd->result = DID_NO_CONNECT << 16;
 		break;
 	case MPI3_IOCSTATUS_SCSI_IOC_TERMINATED:
-		if (ioc_loginfo == IOC_LOGINFO_SATA_NCQ_FAIL_AFTER_ERR) {
-			/*
-			 * This is a ATA NCQ command aborted due to another NCQ
-			 * command failure. We must retry this command
-			 * immediately but without incrementing its retry
-			 * counter.
-			 */
-			WARN_ON_ONCE(xfer_count != 0);
-			scmd->result = DID_IMM_RETRY << 16;
-		} else {
-			scmd->result = DID_SOFT_ERROR << 16;
-		}
+		scmd->result = DID_SOFT_ERROR << 16;
 		break;
 	case MPI3_IOCSTATUS_SCSI_TASK_TERMINATED:
 	case MPI3_IOCSTATUS_SCSI_EXT_TERMINATED:
@@ -3407,17 +3383,6 @@ static int mpi3mr_prepare_sg_scmd(struct mpi3mr_ioc *mrioc,
 		    scmd->sc_data_direction);
 		priv->meta_sg_valid = 1; /* To unmap meta sg DMA */
 	} else {
-		/*
-		 * Some firmware versions byte-swap the REPORT ZONES command
-		 * reply from ATA-ZAC devices by directly accessing in the host
-		 * buffer. This does not respect the default command DMA
-		 * direction and causes IOMMU page faults on some architectures
-		 * with an IOMMU enforcing write mappings (e.g. AMD hosts).
-		 * Avoid such issue by making the REPORT ZONES buffer mapping
-		 * bi-directional.
-		 */
-		if (scmd->cmnd[0] == ZBC_IN && scmd->cmnd[1] == ZI_REPORT_ZONES)
-			scmd->sc_data_direction = DMA_BIDIRECTIONAL;
 		sg_scmd = scsi_sglist(scmd);
 		sges_left = scsi_dma_map(scmd);
 	}
@@ -4966,8 +4931,6 @@ mpi3mr_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	spin_lock_init(&mrioc->tgtdev_lock);
 	spin_lock_init(&mrioc->watchdog_lock);
 	spin_lock_init(&mrioc->chain_buf_lock);
-	spin_lock_init(&mrioc->adm_req_q_bar_writeq_lock);
-	spin_lock_init(&mrioc->adm_reply_q_bar_writeq_lock);
 	spin_lock_init(&mrioc->sas_node_lock);
 
 	INIT_LIST_HEAD(&mrioc->fwevt_list);
@@ -4994,10 +4957,7 @@ mpi3mr_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		mpi3mr_init_drv_cmd(&mrioc->evtack_cmds[i],
 				    MPI3MR_HOSTTAG_EVTACKCMD_MIN + i);
 
-	if ((pdev->device == MPI3_MFGPAGE_DEVID_SAS4116) &&
-		!pdev->revision)
-		mrioc->enable_segqueue = false;
-	else
+	if (pdev->revision)
 		mrioc->enable_segqueue = true;
 
 	init_waitqueue_head(&mrioc->reset_waitq);

@@ -18,11 +18,13 @@
 #include <linux/percpu.h>
 #include <linux/refcount.h>
 #include <linux/slab.h>
+#include <linux/isolation.h>
 
 #include <linux/irqchip.h>
 #include <linux/irqchip/arm-gic-common.h>
 #include <linux/irqchip/arm-gic-v3.h>
 #include <linux/irqchip/irq-partition-percpu.h>
+#include <linux/irqchip/irq-gic-v3-fixes.h>
 #include <linux/bitfield.h>
 #include <linux/bits.h>
 #include <linux/arm-smccc.h>
@@ -39,8 +41,6 @@
 #define FLAGS_WORKAROUND_GICR_WAKER_MSM8996	(1ULL << 0)
 #define FLAGS_WORKAROUND_CAVIUM_ERRATUM_38539	(1ULL << 1)
 #define FLAGS_WORKAROUND_MTK_GICR_SAVE		(1ULL << 2)
-
-#define GIC_IRQ_TYPE_PARTITION	(GIC_IRQ_TYPE_LPI + 1)
 
 struct redist_region {
 	void __iomem		*redist_base;
@@ -69,6 +69,7 @@ static DEFINE_STATIC_KEY_FALSE(gic_nvidia_t241_erratum);
 
 static struct gic_chip_data gic_data __read_mostly;
 static DEFINE_STATIC_KEY_TRUE(supports_deactivate_key);
+static DEFINE_STATIC_KEY_FALSE(gic_ipimiss_quirk);
 
 #define GIC_ID_NR	(1U << GICD_TYPER_ID_BITS(gic_data.rdists.gicd_typer))
 #define GIC_LINE_NR	min(GICD_TYPER_SPIS(gic_data.rdists.gicd_typer), 1020U)
@@ -141,6 +142,13 @@ static DEFINE_PER_CPU(bool, has_rss);
 #define gic_data_rdist_rd_base()	(gic_data_rdist()->rd_base)
 #define gic_data_rdist_sgi_base()	(gic_data_rdist_rd_base() + SZ_64K)
 
+#define gic_data_rdist_cpu(cpu)		\
+				(per_cpu_ptr(gic_data.rdists.rdist, cpu))
+#define gic_data_rdist_rd_base_cpu(cpu)	\
+				(gic_data_rdist_cpu(cpu)->rd_base)
+#define gic_data_rdist_sgi_base_cpu(cpu)\
+				(gic_data_rdist_rd_base_cpu(cpu) + SZ_64K)
+
 /* Our default, arbitrary priority value. Linux only uses one anyway. */
 #define DEFAULT_PMR_VALUE	0xf0
 
@@ -153,6 +161,29 @@ enum gic_intid_range {
 	LPI_RANGE,
 	__INVALID_RANGE__
 };
+
+void gic_v3_enable_ipimiss_quirk(void)
+{
+	static_branch_enable(&gic_ipimiss_quirk);
+}
+
+u32 gic_rdist_pend_reg(int cpu, int offset)
+{
+	void __iomem *base;
+
+	base = gic_data_rdist_sgi_base_cpu(cpu);
+
+	return readl_relaxed(base + GICR_ISPENDR0 + offset);
+}
+
+u32 gic_rdist_active_reg(int cpu, int offset)
+{
+	void __iomem *base;
+
+	base = gic_data_rdist_sgi_base_cpu(cpu);
+
+	return readl_relaxed(base + GICR_ISACTIVER0 + offset);
+}
 
 static enum gic_intid_range __get_intid_range(irq_hw_number_t hwirq)
 {
@@ -473,13 +504,6 @@ static int gic_irq_set_irqchip_state(struct irq_data *d,
 	}
 
 	gic_poke_irq(d, reg);
-
-	/*
-	 * Force read-back to guarantee that the active state has taken
-	 * effect, and won't race with a guest-driven deactivation.
-	 */
-	if (reg == GICD_ISACTIVER)
-		gic_peek_irq(d, reg);
 	return 0;
 }
 
@@ -739,6 +763,14 @@ static void __gic_handle_irq(u32 irqnr, struct pt_regs *regs)
 	if (gic_irqnr_is_special(irqnr))
 		return;
 
+	if (static_branch_unlikely(&gic_ipimiss_quirk)) {
+		if (irqnr < 16) {
+			gic_ipi_rxcount_inc(smp_processor_id(), irqnr);
+			/* Force increment is done before deactivate */
+			wmb();
+		}
+	}
+
 	gic_complete_ack(irqnr);
 
 	if (generic_handle_domain_irq(gic_data.domain, irqnr)) {
@@ -833,6 +865,8 @@ static void __gic_handle_irq_from_irqsoff(struct pt_regs *regs)
 
 static asmlinkage void __exception_irq_entry gic_handle_irq(struct pt_regs *regs)
 {
+	task_isolation_kernel_enter();
+
 	if (unlikely(gic_supports_nmi() && !interrupts_enabled(regs)))
 		__gic_handle_irq_from_irqsoff(regs);
 	else
@@ -883,6 +917,8 @@ static void __init gic_dist_init(void)
 	u64 affinity;
 	void __iomem *base = gic_data.dist_base;
 	u32 val;
+
+	gic_v3_enable_quirks(base);
 
 	/* Disable the distributor */
 	writel_relaxed(0, base + GICD_CTLR);
@@ -1284,6 +1320,10 @@ static u16 gic_compute_target_list(int *base_cpu, const struct cpumask *mask,
 	while (cpu < nr_cpu_ids) {
 		tlist |= 1 << (mpidr & 0xf);
 
+		if (static_branch_unlikely(&gic_ipimiss_quirk))
+			/* Force only one target at a time */
+			goto out;
+
 		next_cpu = cpumask_next(cpu, mask);
 		if (next_cpu >= nr_cpu_ids)
 			goto out;
@@ -1304,8 +1344,8 @@ out:
 #define MPIDR_TO_SGI_AFFINITY(cluster_id, level) \
 	(MPIDR_AFFINITY_LEVEL(cluster_id, level) \
 		<< ICC_SGI1R_AFFINITY_## level ##_SHIFT)
-
-static void gic_send_sgi(u64 cluster_id, u16 tlist, unsigned int irq)
+static void gic_send_sgi(int dest_cpu, u64 cluster_id, u16 tlist,
+			 unsigned int irq)
 {
 	u64 val;
 
@@ -1317,7 +1357,10 @@ static void gic_send_sgi(u64 cluster_id, u16 tlist, unsigned int irq)
 	       tlist << ICC_SGI1R_TARGET_LIST_SHIFT);
 
 	pr_devel("CPU%d: ICC_SGI1R_EL1 %llx\n", smp_processor_id(), val);
-	gic_write_sgi1r(val);
+	if (static_branch_unlikely(&gic_ipimiss_quirk))
+		gic_write_sgi1r_retry(dest_cpu, irq, val);
+	else
+		gic_write_sgi1r(val);
 }
 
 static void gic_ipi_send_mask(struct irq_data *d, const struct cpumask *mask)
@@ -1338,7 +1381,7 @@ static void gic_ipi_send_mask(struct irq_data *d, const struct cpumask *mask)
 		u16 tlist;
 
 		tlist = gic_compute_target_list(&cpu, mask, cluster_id);
-		gic_send_sgi(cluster_id, tlist, d->hwirq);
+		gic_send_sgi(cpu, cluster_id, tlist, d->hwirq);
 	}
 
 	/* Force the above writes to ICC_SGI1R_EL1 to be executed */
@@ -1424,7 +1467,7 @@ static int gic_retrigger(struct irq_data *data)
 static int gic_cpu_pm_notifier(struct notifier_block *self,
 			       unsigned long cmd, void *v)
 {
-	if (cmd == CPU_PM_EXIT || cmd == CPU_PM_ENTER_FAILED) {
+	if (cmd == CPU_PM_EXIT) {
 		if (gic_dist_security_disabled())
 			gic_enable_redist(true);
 		gic_cpu_sys_reg_init();
@@ -1538,7 +1581,8 @@ static int gic_irq_domain_translate(struct irq_domain *d,
 		return 0;
 	}
 
-	if (is_of_node(fwspec->fwnode)) {
+	if (is_of_node(fwspec->fwnode) ||
+	    is_fwnode_irqchip(fwspec->fwnode)) {
 		if (fwspec->param_count < 3)
 			return -EINVAL;
 
@@ -1555,7 +1599,14 @@ static int gic_irq_domain_translate(struct irq_domain *d,
 		case 3:			/* EPPI */
 			*hwirq = fwspec->param[1] + EPPI_BASE_INTID;
 			break;
+		case GIC_IRQ_TYPE_GSI:	/* GSI */
 		case GIC_IRQ_TYPE_LPI:	/* LPI */
+			if (fwspec->param[1] < 16) {
+				pr_err(FW_BUG "Illegal GSI%d translation request\n",
+				       fwspec->param[0]);
+				return -EINVAL;
+			}
+
 			*hwirq = fwspec->param[1];
 			break;
 		case GIC_IRQ_TYPE_PARTITION:
@@ -1570,30 +1621,12 @@ static int gic_irq_domain_translate(struct irq_domain *d,
 		}
 
 		*type = fwspec->param[2] & IRQ_TYPE_SENSE_MASK;
-
 		/*
 		 * Make it clear that broken DTs are... broken.
 		 * Partitioned PPIs are an unfortunate exception.
 		 */
 		WARN_ON(*type == IRQ_TYPE_NONE &&
 			fwspec->param[0] != GIC_IRQ_TYPE_PARTITION);
-		return 0;
-	}
-
-	if (is_fwnode_irqchip(fwspec->fwnode)) {
-		if(fwspec->param_count != 2)
-			return -EINVAL;
-
-		if (fwspec->param[0] < 16) {
-			pr_err(FW_BUG "Illegal GSI%d translation request\n",
-			       fwspec->param[0]);
-			return -EINVAL;
-		}
-
-		*hwirq = fwspec->param[0];
-		*type = fwspec->param[1];
-
-		WARN_ON(*type == IRQ_TYPE_NONE);
 		return 0;
 	}
 
@@ -1641,10 +1674,11 @@ static bool fwspec_is_partitioned_ppi(struct irq_fwspec *fwspec,
 	if (!gic_data.ppi_descs)
 		return false;
 
-	if (!is_of_node(fwspec->fwnode))
+	if (fwspec->param_count < 4)
 		return false;
 
-	if (fwspec->param_count < 4 || !fwspec->param[3])
+	/* '0' us a valid UID for ACPI */
+	if (is_of_node(fwspec->fwnode) && !fwspec->param[3])
 		return false;
 
 	range = __get_intid_range(hwirq);
@@ -1664,10 +1698,6 @@ static int gic_irq_domain_select(struct irq_domain *d,
 	/* Not for us */
         if (fwspec->fwnode != d->fwnode)
 		return 0;
-
-	/* If this is not DT, then we have a single domain */
-	if (!is_of_node(fwspec->fwnode))
-		return 1;
 
 	ret = gic_irq_domain_translate(d, fwspec, &hwirq, &type);
 	if (WARN_ON_ONCE(ret))
@@ -1699,22 +1729,27 @@ static int partition_domain_translate(struct irq_domain *d,
 	unsigned long ppi_intid;
 	struct device_node *np;
 	unsigned int ppi_idx;
+	void *part_id;
 	int ret;
 
 	if (!gic_data.ppi_descs)
 		return -ENOMEM;
 
-	np = of_find_node_by_phandle(fwspec->param[3]);
-	if (WARN_ON(!np))
-		return -EINVAL;
+	if (is_of_node(fwspec->fwnode)) {
+		np = of_find_node_by_phandle(fwspec->param[3]);
+		if (WARN_ON(!np))
+			return -EINVAL;
+		part_id = of_node_to_fwnode(np);
+	} else {
+		part_id = (void *)(long)fwspec->param[3];
+	}
 
 	ret = gic_irq_domain_translate(d, fwspec, &ppi_intid, type);
 	if (WARN_ON_ONCE(ret))
 		return 0;
 
 	ppi_idx = __gic_get_ppi_index(ppi_intid);
-	ret = partition_translate_id(gic_data.ppi_descs[ppi_idx],
-				     of_node_to_fwnode(np));
+	ret = partition_translate_id(gic_data.ppi_descs[ppi_idx], part_id);
 	if (ret < 0)
 		return ret;
 
@@ -2034,8 +2069,37 @@ static int __init gic_validate_dist_version(void __iomem *dist_base)
 	return 0;
 }
 
+static void __partition_ppis(struct partition_affinity *parts, int nr_parts)
+{
+	int i;
+	unsigned int irq;
+	struct partition_desc *desc;
+
+	for (i = 0; i < gic_data.ppi_nr; i++) {
+		struct irq_fwspec ppi_fwspec = {
+			.fwnode		= gic_data.fwnode,
+			.param_count	= 3,
+			.param		= {
+				[0]	= GIC_IRQ_TYPE_PARTITION,
+				[1]	= i,
+				[2]	= IRQ_TYPE_NONE,
+			},
+		};
+
+		irq = irq_create_fwspec_mapping(&ppi_fwspec);
+		if (WARN_ON_ONCE(!irq))
+			continue;
+		desc = partition_create_desc(gic_data.fwnode, parts, nr_parts,
+					     irq, &partition_domain_ops);
+		if (WARN_ON_ONCE(!desc))
+			continue;
+
+		gic_data.ppi_descs[i] = desc;
+	}
+}
+
 /* Create all possible partitions at boot time */
-static void __init gic_populate_ppi_partitions(struct device_node *gic_node)
+static void __init gic_populate_of_ppi_partitions(struct device_node *gic_node)
 {
 	struct device_node *parts_node, *child_part;
 	int part_idx = 0, i;
@@ -2066,10 +2130,6 @@ static void __init gic_populate_ppi_partitions(struct device_node *gic_node)
 		part = &parts[part_idx];
 
 		part->partition_id = of_node_to_fwnode(child_part);
-
-		pr_info("GIC: PPI partition %pOFn[%d] { ",
-			child_part, part_idx);
-
 		n = of_property_count_elems_of_size(child_part, "affinity",
 						    sizeof(u32));
 		WARN_ON(n <= 0);
@@ -2094,39 +2154,16 @@ static void __init gic_populate_ppi_partitions(struct device_node *gic_node)
 				continue;
 			}
 
-			pr_cont("%pOF[%d] ", cpu_node, cpu);
-
 			cpumask_set_cpu(cpu, &part->mask);
 			of_node_put(cpu_node);
 		}
 
-		pr_cont("}\n");
+		pr_info("GIC: PPI partition:%pOFn [%d] { CPUs:<%*pbl> }",
+			child_part, part_idx, cpumask_pr_args(&part->mask));
 		part_idx++;
 	}
 
-	for (i = 0; i < gic_data.ppi_nr; i++) {
-		unsigned int irq;
-		struct partition_desc *desc;
-		struct irq_fwspec ppi_fwspec = {
-			.fwnode		= gic_data.fwnode,
-			.param_count	= 3,
-			.param		= {
-				[0]	= GIC_IRQ_TYPE_PARTITION,
-				[1]	= i,
-				[2]	= IRQ_TYPE_NONE,
-			},
-		};
-
-		irq = irq_create_fwspec_mapping(&ppi_fwspec);
-		if (WARN_ON(!irq))
-			continue;
-		desc = partition_create_desc(gic_data.fwnode, parts, nr_parts,
-					     irq, &partition_domain_ops);
-		if (WARN_ON(!desc))
-			continue;
-
-		gic_data.ppi_descs[i] = desc;
-	}
+	__partition_ppis(parts, nr_parts);
 
 out_put_node:
 	of_node_put(parts_node);
@@ -2236,7 +2273,7 @@ static int __init gic_of_init(struct device_node *node, struct device_node *pare
 	if (err)
 		goto out_unmap_rdist;
 
-	gic_populate_ppi_partitions(node);
+	gic_populate_of_ppi_partitions(node);
 
 	if (static_branch_likely(&supports_deactivate_key))
 		gic_of_setup_kvm_info(node);
@@ -2507,6 +2544,57 @@ static struct fwnode_handle *gic_v3_get_gsi_domain_id(u32 gsi)
 	return gsi_domain_handle;
 }
 
+struct acpi_ppi_partition_arg
+{
+	struct partition_affinity *parts;
+	int part_idx;
+};
+
+static int __init __alloc_ppi_partition(struct acpi_pptt_processor *container,
+					void *arg)
+{
+	struct acpi_ppi_partition_arg *data = arg;
+	struct partition_affinity *parts = data->parts;
+	struct partition_affinity *part;
+
+	if (!(container->flags & ACPI_PPTT_ACPI_PROCESSOR_ID_VALID))
+		return -1;
+
+	part = &parts[data->part_idx];
+	part->partition_id = (void *)(long)container->acpi_processor_id;
+	acpi_pptt_get_child_cpus(container, &part->mask);
+
+	pr_info("GIC: PPI partition:0x%x [%d] { CPUs:<%*pbl> }",
+		container->acpi_processor_id, data->part_idx,
+		cpumask_pr_args(&part->mask));
+
+	data->part_idx++;
+	return 0;
+}
+
+static void __init gic_populate_acpi_ppi_partitions(void)
+{
+	struct acpi_ppi_partition_arg arg = { 0 };
+	int nr_parts, ret;
+
+	nr_parts = acpi_pptt_count_containers();
+	if (!nr_parts)
+		return;
+
+	gic_data.ppi_descs = kcalloc(gic_data.ppi_nr,
+				     sizeof(*gic_data.ppi_descs), GFP_KERNEL);
+	if (!gic_data.ppi_descs)
+		return;
+
+	arg.parts = kcalloc(nr_parts, sizeof(*arg.parts), GFP_KERNEL);
+	if (WARN_ON(!arg.parts))
+		return;
+
+	ret = acpi_pptt_for_each_container(&__alloc_ppi_partition, &arg);
+	if (!ret)
+		__partition_ppis(arg.parts, nr_parts);
+}
+
 static int __init
 gic_acpi_init(union acpi_subtable_headers *header, const unsigned long end)
 {
@@ -2555,6 +2643,8 @@ gic_acpi_init(union acpi_subtable_headers *header, const unsigned long end)
 		goto out_fwhandle_free;
 
 	acpi_set_irq_model(ACPI_IRQ_MODEL_GIC, gic_v3_get_gsi_domain_id);
+
+	gic_populate_acpi_ppi_partitions();
 
 	if (static_branch_likely(&supports_deactivate_key))
 		gic_acpi_setup_kvm_info();

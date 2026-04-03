@@ -142,6 +142,7 @@ EXPORT_SYMBOL(synchronize_irq);
 
 #ifdef CONFIG_SMP
 cpumask_var_t irq_default_affinity;
+EXPORT_SYMBOL(irq_default_affinity);
 
 static bool __irq_can_set_affinity(struct irq_desc *desc)
 {
@@ -1324,7 +1325,7 @@ static int irq_thread(void *data)
 	 * synchronize_hardirq(). So neither IRQTF_RUNTHREAD nor the
 	 * oneshot mask bit can be set.
 	 */
-	task_work_cancel_func(current, irq_thread_dtor);
+	task_work_cancel(current, irq_thread_dtor);
 	return 0;
 }
 

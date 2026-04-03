@@ -100,20 +100,6 @@ static inline bool is_hest_type_generic_v2(struct ghes *ghes)
 }
 
 /*
- * A platform may describe one error source for the handling of synchronous
- * errors (e.g. MCE or SEA), or for handling asynchronous errors (e.g. SCI
- * or External Interrupt). On x86, the HEST notifications are always
- * asynchronous, so only SEA on ARM is delivered as a synchronous
- * notification.
- */
-static inline bool is_hest_sync_notify(struct ghes *ghes)
-{
-	u8 notify_type = ghes->generic->notify.type;
-
-	return notify_type == ACPI_HEST_NOTIFY_SEA;
-}
-
-/*
  * This driver isn't really modular, however for the time being,
  * continuing to use module_param is the easiest way to remain
  * compatible with existing boot arg use cases.
@@ -154,6 +140,8 @@ static unsigned long ghes_estatus_pool_size_request;
 
 static struct ghes_estatus_cache *ghes_estatus_caches[GHES_ESTATUS_CACHES_SIZE];
 static atomic_t ghes_estatus_cache_alloced;
+
+static int ghes_panic_timeout __read_mostly = 30;
 
 static void __iomem *ghes_map(u64 pfn, enum fixed_addresses fixmap_idx)
 {
@@ -473,7 +461,7 @@ static bool ghes_do_memory_failure(u64 physical_addr, int flags)
 }
 
 static bool ghes_handle_memory_failure(struct acpi_hest_generic_data *gdata,
-				       int sev, bool sync)
+				       int sev)
 {
 	int flags = -1;
 	int sec_sev = ghes_severity(gdata->error_severity);
@@ -487,7 +475,7 @@ static bool ghes_handle_memory_failure(struct acpi_hest_generic_data *gdata,
 	    (gdata->flags & CPER_SEC_ERROR_THRESHOLD_EXCEEDED))
 		flags = MF_SOFT_OFFLINE;
 	if (sev == GHES_SEV_RECOVERABLE && sec_sev == GHES_SEV_RECOVERABLE)
-		flags = sync ? MF_ACTION_REQUIRED : 0;
+		flags = 0;
 
 	if (flags != -1)
 		return ghes_do_memory_failure(mem_err->physical_addr, flags);
@@ -495,11 +483,9 @@ static bool ghes_handle_memory_failure(struct acpi_hest_generic_data *gdata,
 	return false;
 }
 
-static bool ghes_handle_arm_hw_error(struct acpi_hest_generic_data *gdata,
-				       int sev, bool sync)
+static bool ghes_handle_arm_hw_error(struct acpi_hest_generic_data *gdata, int sev)
 {
 	struct cper_sec_proc_arm *err = acpi_hest_get_payload(gdata);
-	int flags = sync ? MF_ACTION_REQUIRED : 0;
 	bool queued = false;
 	int sec_sev, i;
 	char *p;
@@ -524,7 +510,7 @@ static bool ghes_handle_arm_hw_error(struct acpi_hest_generic_data *gdata,
 		 * and don't filter out 'corrected' error here.
 		 */
 		if (is_cache && has_pa) {
-			queued = ghes_do_memory_failure(err_info->physical_fault_addr, flags);
+			queued = ghes_do_memory_failure(err_info->physical_fault_addr, 0);
 			p += err_info->length;
 			continue;
 		}
@@ -645,7 +631,6 @@ static bool ghes_do_proc(struct ghes *ghes,
 	const guid_t *fru_id = &guid_null;
 	char *fru_text = "";
 	bool queued = false;
-	bool sync = is_hest_sync_notify(ghes);
 
 	sev = ghes_severity(estatus->error_severity);
 	apei_estatus_for_each_section(estatus, gdata) {
@@ -663,13 +648,13 @@ static bool ghes_do_proc(struct ghes *ghes,
 			ghes_edac_report_mem_error(sev, mem_err);
 
 			arch_apei_report_mem_error(sev, mem_err);
-			queued = ghes_handle_memory_failure(gdata, sev, sync);
+			queued = ghes_handle_memory_failure(gdata, sev);
 		}
 		else if (guid_equal(sec_type, &CPER_SEC_PCIE)) {
 			ghes_handle_aer(gdata);
 		}
 		else if (guid_equal(sec_type, &CPER_SEC_PROC_ARM)) {
-			queued = ghes_handle_arm_hw_error(gdata, sev, sync);
+			queued = ghes_handle_arm_hw_error(gdata, sev);
 		} else {
 			void *err = acpi_hest_get_payload(gdata);
 
@@ -856,18 +841,14 @@ static void __ghes_panic(struct ghes *ghes,
 			 struct acpi_hest_generic_status *estatus,
 			 u64 buf_paddr, enum fixed_addresses fixmap_idx)
 {
-	const char *msg = GHES_PFX "Fatal hardware error";
-
 	__ghes_print_estatus(KERN_EMERG, ghes->generic, estatus);
-
-	add_taint(TAINT_MACHINE_CHECK, LOCKDEP_STILL_OK);
 
 	ghes_clear_estatus(ghes, estatus, buf_paddr, fixmap_idx);
 
+	/* reboot to log the error! */
 	if (!panic_timeout)
-		pr_emerg("%s but panic disabled\n", msg);
-
-	panic(msg);
+		panic_timeout = ghes_panic_timeout;
+	panic("Fatal hardware error!");
 }
 
 static int ghes_proc(struct ghes *ghes)
@@ -1480,7 +1461,7 @@ void __init acpi_ghes_init(void)
 {
 	int rc;
 
-	acpi_sdei_init();
+	sdei_init();
 
 	if (acpi_disabled)
 		return;

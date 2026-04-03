@@ -9,14 +9,6 @@
 #
 source "arch/$(SRCARCH)/Kconfig"
 
-config ARCH_CONFIGURES_CPU_MITIGATIONS
-	bool
-
-if !ARCH_CONFIGURES_CPU_MITIGATIONS
-config CPU_MITIGATIONS
-	def_bool y
-endif
-
 menu "General architecture-dependent options"
 
 config CRASH_CORE
@@ -40,9 +32,6 @@ config ARCH_HAS_SUBPAGE_FAULTS
 	  must be implemented.
 
 config HOTPLUG_SMT
-	bool
-
-config SMT_NUM_THREADS_DYNAMIC
 	bool
 
 config GENERIC_ENTRY
@@ -650,7 +639,6 @@ config SHADOW_CALL_STACK
 	bool "Shadow Call Stack"
 	depends on ARCH_SUPPORTS_SHADOW_CALL_STACK
 	depends on DYNAMIC_FTRACE_WITH_ARGS || DYNAMIC_FTRACE_WITH_REGS || !FUNCTION_GRAPH_TRACER
-	depends on MMU
 	help
 	  This option enables the compiler's Shadow Call Stack, which
 	  uses a shadow stack to protect function return addresses from
@@ -1283,6 +1271,14 @@ config STRICT_MODULE_RWX
 # select if the architecture provides an asm/dma-direct.h header
 config ARCH_HAS_PHYS_TO_DMA
 	bool
+
+config ARCH_HAS_CPU_RESCTRL
+	bool
+	help
+	  The 'resctrl' filesystem allows cpu controls of shared resources
+	  such as caches and memory bandwidth to be configured. An architecture
+	  selects this if it provides the arch-specific hooks for the filesystem
+	  and needs the per-task closid/rmid properties.
 
 config HAVE_ARCH_COMPILER_H
 	bool

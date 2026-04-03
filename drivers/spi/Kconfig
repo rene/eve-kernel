@@ -251,6 +251,44 @@ config SPI_CADENCE_XSPI
 	  device with a Cadence XSPI controller and want to access the
 	  Flash as an MTD device.
 
+config SPI_CADENCE_MRVL_XSPI
+	tristate "Marvell mods for XSPI controller"
+	depends on SPI_CADENCE_XSPI
+	depends on GPIOLIB
+
+	help
+	  Enable support for Marvell XSPI modifications
+
+	  During implementation of Cadence XSPI core Marvell
+	  has added some additional features like clock divider,
+	  PHY config support or non-memory SPI capabilities.
+	  Enable that option if you want to enable these features.
+
+	  Some I/O operations may require a workaround in order to perform
+	  write followed by read operations.  The driver will automatically
+	  detect whether this can be performed in hardware or software if
+	  the workaround is enabled.
+
+
+config SPI_CADENCE_IO_WO
+	bool "Cadence XSPI controller xfer workaround"
+	depends on SPI_CADENCE_MRVL_XSPI
+	depends on DEBUG_FS
+	default y
+	help
+	  Enable workaround for Cadence xSPI controller
+
+	  Without full-duplex mode, the workaround can do only write or
+	  write then read operation
+
+	  The workaround uses specific xspi commands to create requested
+	  waveform. Workaround is not supporting full duplex mode.
+	  Workaround will use combination of generic instruction and
+	  data transfer STIG commands.  Early silicon will use a software
+	  approach whereas newer hardware will use a hardware approach.
+
+	  If unsure, select y.
+
 config SPI_CLPS711X
 	tristate "CLPS711X host SPI controller"
 	depends on ARCH_CLPS711X || COMPILE_TEST
@@ -672,6 +710,15 @@ config SPI_OCTEON
 	help
 	  SPI host driver for the hardware found on some Cavium OCTEON
 	  SOCs.
+
+config SPI_OCTEONTX2
+	tristate "Marvell OcteonTX2 SPI controller"
+	depends on PCI && 64BIT && (ARM64 || COMPILE_TEST)
+	help
+	  This driver supports the OcteonTX2 SPI controller in master
+	  mode. It supports single, dual and quad mode transfers.
+	  This controller hardware is found on some of Marvell
+	  OcteonTX2 SoCs.
 
 config SPI_OMAP_UWIRE
 	tristate "OMAP1 MicroWire"
@@ -1101,10 +1148,9 @@ config SPI_ZYNQ_QSPI
 
 config SPI_ZYNQMP_GQSPI
 	tristate "Xilinx ZynqMP GQSPI controller"
-	depends on (SPI_MEM && HAS_DMA) || COMPILE_TEST
+	depends on (SPI_MASTER && HAS_DMA) || COMPILE_TEST
 	help
 	  Enables Xilinx GQSPI controller driver for Zynq UltraScale+ MPSoC.
-	  This controller only supports SPI memory interface.
 
 config SPI_AMD
 	tristate "AMD SPI controller"

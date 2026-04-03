@@ -304,16 +304,14 @@ cifs_dir_info_to_fattr(struct cifs_fattr *fattr, FILE_DIRECTORY_INFO *info,
 }
 
 static void cifs_fulldir_info_to_fattr(struct cifs_fattr *fattr,
-				       const void *info,
+				       SEARCH_ID_FULL_DIR_INFO *info,
 				       struct cifs_sb_info *cifs_sb)
 {
-	const FILE_FULL_DIRECTORY_INFO *di = info;
-
 	__dir_info_to_fattr(fattr, info);
 
-	/* See MS-FSCC 2.4.14, 2.4.19 */
+	/* See MS-FSCC 2.4.19 FileIdFullDirectoryInformation */
 	if (fattr->cf_cifsattrs & ATTR_REPARSE)
-		fattr->cf_cifstag = le32_to_cpu(di->EaSize);
+		fattr->cf_cifstag = le32_to_cpu(info->EaSize);
 	cifs_fill_common_info(fattr, cifs_sb);
 }
 
@@ -427,7 +425,7 @@ ffirst_retry:
 	} else if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_SERVER_INUM) {
 		cifsFile->srch_inf.info_level = SMB_FIND_FILE_ID_FULL_DIR_INFO;
 	} else /* not srvinos - BB fixme add check for backlevel? */ {
-		cifsFile->srch_inf.info_level = SMB_FIND_FILE_FULL_DIRECTORY_INFO;
+		cifsFile->srch_inf.info_level = SMB_FIND_FILE_DIRECTORY_INFO;
 	}
 
 	search_flags = CIFS_SEARCH_CLOSE_AT_END | CIFS_SEARCH_RETURN_RESUME;
@@ -497,7 +495,7 @@ static char *nxt_dir_entry(char *old_entry, char *end_of_smb, int level)
 		FIND_FILE_STANDARD_INFO *pfData;
 		pfData = (FIND_FILE_STANDARD_INFO *)pDirInfo;
 
-		new_entry = old_entry + sizeof(FIND_FILE_STANDARD_INFO) + 1 +
+		new_entry = old_entry + sizeof(FIND_FILE_STANDARD_INFO) +
 				pfData->FileNameLength;
 	} else {
 		u32 next_offset = le32_to_cpu(pDirInfo->NextEntryOffset);
@@ -515,9 +513,9 @@ static char *nxt_dir_entry(char *old_entry, char *end_of_smb, int level)
 			 new_entry, end_of_smb, old_entry);
 		return NULL;
 	} else if (((level == SMB_FIND_FILE_INFO_STANDARD) &&
-		    (new_entry + sizeof(FIND_FILE_STANDARD_INFO) + 1 > end_of_smb))
+		    (new_entry + sizeof(FIND_FILE_STANDARD_INFO) > end_of_smb))
 		  || ((level != SMB_FIND_FILE_INFO_STANDARD) &&
-		   (new_entry + sizeof(FILE_DIRECTORY_INFO) + 1 > end_of_smb)))  {
+		   (new_entry + sizeof(FILE_DIRECTORY_INFO) > end_of_smb)))  {
 		cifs_dbg(VFS, "search entry %p extends after end of SMB %p\n",
 			 new_entry, end_of_smb);
 		return NULL;
@@ -765,10 +763,7 @@ find_cifs_entry(const unsigned int xid, struct cifs_tcon *tcon, loff_t pos,
 			else
 				cifs_buf_release(cfile->srch_inf.
 						ntwrk_buf_start);
-			/* Reset all pointers to the network buffer to prevent stale references */
 			cfile->srch_inf.ntwrk_buf_start = NULL;
-			cfile->srch_inf.srch_entries_start = NULL;
-			cfile->srch_inf.last_entry = NULL;
 		}
 		rc = initiate_cifs_search(xid, file, full_path);
 		if (rc) {
@@ -791,11 +786,11 @@ find_cifs_entry(const unsigned int xid, struct cifs_tcon *tcon, loff_t pos,
 		rc = server->ops->query_dir_next(xid, tcon, &cfile->fid,
 						 search_flags,
 						 &cfile->srch_inf);
-		if (rc)
-			return -ENOENT;
 		/* FindFirst/Next set last_entry to NULL on malformed reply */
 		if (cfile->srch_inf.last_entry)
 			cifs_save_resume_key(cfile->srch_inf.last_entry, cfile);
+		if (rc)
+			return -ENOENT;
 	}
 	if (index_to_find < cfile->srch_inf.index_of_last_entry) {
 		/* we found the buffer that contains the entry */
@@ -882,9 +877,9 @@ static bool emit_cached_dirents(struct cached_dirents *cde,
 }
 
 static void update_cached_dirents_count(struct cached_dirents *cde,
-					struct file *file)
+					struct dir_context *ctx)
 {
-	if (cde->file != file)
+	if (cde->ctx != ctx)
 		return;
 	if (cde->is_valid || cde->is_failed)
 		return;
@@ -893,9 +888,9 @@ static void update_cached_dirents_count(struct cached_dirents *cde,
 }
 
 static void finished_cached_dirents_count(struct cached_dirents *cde,
-					struct dir_context *ctx, struct file *file)
+					struct dir_context *ctx)
 {
-	if (cde->file != file)
+	if (cde->ctx != ctx)
 		return;
 	if (cde->is_valid || cde->is_failed)
 		return;
@@ -908,12 +903,11 @@ static void finished_cached_dirents_count(struct cached_dirents *cde,
 static void add_cached_dirent(struct cached_dirents *cde,
 			      struct dir_context *ctx,
 			      const char *name, int namelen,
-			      struct cifs_fattr *fattr,
-				  struct file *file)
+			      struct cifs_fattr *fattr)
 {
 	struct cached_dirent *de;
 
-	if (cde->file != file)
+	if (cde->ctx != ctx)
 		return;
 	if (cde->is_valid || cde->is_failed)
 		return;
@@ -943,8 +937,7 @@ static void add_cached_dirent(struct cached_dirents *cde,
 static bool cifs_dir_emit(struct dir_context *ctx,
 			  const char *name, int namelen,
 			  struct cifs_fattr *fattr,
-			  struct cached_fid *cfid,
-			  struct file *file)
+			  struct cached_fid *cfid)
 {
 	bool rc;
 	ino_t ino = cifs_uniqueid_to_ino_t(fattr->cf_uniqueid);
@@ -956,7 +949,7 @@ static bool cifs_dir_emit(struct dir_context *ctx,
 	if (cfid) {
 		mutex_lock(&cfid->dirents.de_mutex);
 		add_cached_dirent(&cfid->dirents, ctx, name, namelen,
-				  fattr, file);
+				  fattr);
 		mutex_unlock(&cfid->dirents.de_mutex);
 	}
 
@@ -1026,9 +1019,10 @@ static int cifs_filldir(char *find_entry, struct file *file,
 				       (FIND_FILE_STANDARD_INFO *)find_entry,
 				       cifs_sb);
 		break;
-	case SMB_FIND_FILE_FULL_DIRECTORY_INFO:
 	case SMB_FIND_FILE_ID_FULL_DIR_INFO:
-		cifs_fulldir_info_to_fattr(&fattr, find_entry, cifs_sb);
+		cifs_fulldir_info_to_fattr(&fattr,
+					   (SEARCH_ID_FULL_DIR_INFO *)find_entry,
+					   cifs_sb);
 		break;
 	default:
 		cifs_dir_info_to_fattr(&fattr,
@@ -1056,7 +1050,7 @@ static int cifs_filldir(char *find_entry, struct file *file,
 	cifs_prime_dcache(file_dentry(file), &name, &fattr);
 
 	return !cifs_dir_emit(ctx, name.name, name.len,
-			      &fattr, cfid, file);
+			      &fattr, cfid);
 }
 
 
@@ -1107,8 +1101,8 @@ int cifs_readdir(struct file *file, struct dir_context *ctx)
 	 * we need to initialize scanning and storing the
 	 * directory content.
 	 */
-	if (ctx->pos == 0 && cfid->dirents.file == NULL) {
-		cfid->dirents.file = file;
+	if (ctx->pos == 0 && cfid->dirents.ctx == NULL) {
+		cfid->dirents.ctx = ctx;
 		cfid->dirents.pos = 2;
 	}
 	/*
@@ -1176,7 +1170,7 @@ int cifs_readdir(struct file *file, struct dir_context *ctx)
 	} else {
 		if (cfid) {
 			mutex_lock(&cfid->dirents.de_mutex);
-			finished_cached_dirents_count(&cfid->dirents, ctx, file);
+			finished_cached_dirents_count(&cfid->dirents, ctx);
 			mutex_unlock(&cfid->dirents.de_mutex);
 		}
 		cifs_dbg(FYI, "Could not find entry\n");
@@ -1217,7 +1211,7 @@ int cifs_readdir(struct file *file, struct dir_context *ctx)
 		ctx->pos++;
 		if (cfid) {
 			mutex_lock(&cfid->dirents.de_mutex);
-			update_cached_dirents_count(&cfid->dirents, file);
+			update_cached_dirents_count(&cfid->dirents, ctx);
 			mutex_unlock(&cfid->dirents.de_mutex);
 		}
 

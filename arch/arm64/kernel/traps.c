@@ -27,6 +27,7 @@
 #include <linux/mm_types.h>
 #include <linux/kasan.h>
 #include <linux/cfi.h>
+#include <linux/isolation.h>
 
 #include <asm/atomic.h>
 #include <asm/bug.h>
@@ -394,30 +395,22 @@ void unregister_undef_hook(struct undef_hook *hook)
 	raw_spin_unlock_irqrestore(&undef_lock, flags);
 }
 
-static int call_undef_hook(struct pt_regs *regs)
+static int user_insn_read(struct pt_regs *regs, u32 *insnp)
 {
-	struct undef_hook *hook;
-	unsigned long flags;
 	u32 instr;
-	int (*fn)(struct pt_regs *regs, u32 instr) = NULL;
 	unsigned long pc = instruction_pointer(regs);
 
-	if (!user_mode(regs)) {
-		__le32 instr_le;
-		if (get_kernel_nofault(instr_le, (__le32 *)pc))
-			goto exit;
-		instr = le32_to_cpu(instr_le);
-	} else if (compat_thumb_mode(regs)) {
+	if (compat_thumb_mode(regs)) {
 		/* 16-bit Thumb instruction */
 		__le16 instr_le;
 		if (get_user(instr_le, (__le16 __user *)pc))
-			goto exit;
+			return -EFAULT;
 		instr = le16_to_cpu(instr_le);
 		if (aarch32_insn_is_wide(instr)) {
 			u32 instr2;
 
 			if (get_user(instr_le, (__le16 __user *)(pc + 2)))
-				goto exit;
+				return -EFAULT;
 			instr2 = le16_to_cpu(instr_le);
 			instr = (instr << 16) | instr2;
 		}
@@ -425,9 +418,19 @@ static int call_undef_hook(struct pt_regs *regs)
 		/* 32-bit ARM instruction */
 		__le32 instr_le;
 		if (get_user(instr_le, (__le32 __user *)pc))
-			goto exit;
+			return -EFAULT;
 		instr = le32_to_cpu(instr_le);
 	}
+
+	*insnp = instr;
+	return 0;
+}
+
+static int call_undef_hook(struct pt_regs *regs, u32 instr)
+{
+	struct undef_hook *hook;
+	unsigned long flags;
+	int (*fn)(struct pt_regs *regs, u32 instr) = NULL;
 
 	raw_spin_lock_irqsave(&undef_lock, flags);
 	list_for_each_entry(hook, &undef_hook, node)
@@ -436,7 +439,7 @@ static int call_undef_hook(struct pt_regs *regs)
 			fn = hook->fn;
 
 	raw_spin_unlock_irqrestore(&undef_lock, flags);
-exit:
+
 	return fn ? fn(regs, instr) : 1;
 }
 
@@ -486,21 +489,42 @@ void arm64_notify_segfault(unsigned long addr)
 	force_signal_inject(SIGSEGV, code, addr, 0);
 }
 
-void do_undefinstr(struct pt_regs *regs, unsigned long esr)
+void do_el0_undef(struct pt_regs *regs, unsigned long esr)
 {
+	u32 insn;
+
+	task_isolation_kernel_enter();
+
 	/* check for AArch32 breakpoint instructions */
 	if (!aarch32_break_handler(regs))
 		return;
 
-	if (call_undef_hook(regs) == 0)
+	if (user_insn_read(regs, &insn))
+		goto out_err;
+
+	if (try_emulate_mrs(regs, insn))
 		return;
 
-	if (!user_mode(regs))
-		die("Oops - Undefined instruction", regs, esr);
+	if (call_undef_hook(regs, insn) == 0)
+		return;
 
+out_err:
 	force_signal_inject(SIGILL, ILL_ILLOPC, regs->pc, 0);
 }
-NOKPROBE_SYMBOL(do_undefinstr);
+
+void do_el1_undef(struct pt_regs *regs, unsigned long esr)
+{
+	u32 insn;
+
+	if (aarch64_insn_read((void *)regs->pc, &insn))
+		goto out_err;
+
+	if (try_emulate_el1_ssbs(regs, insn))
+		return;
+
+out_err:
+	die("Oops - Undefined instruction", regs, esr);
+}
 
 void do_el0_bti(struct pt_regs *regs)
 {
@@ -511,7 +535,6 @@ void do_el1_bti(struct pt_regs *regs, unsigned long esr)
 {
 	die("Oops - BTI", regs, esr);
 }
-NOKPROBE_SYMBOL(do_el1_bti);
 
 void do_el0_fpac(struct pt_regs *regs, unsigned long esr)
 {
@@ -526,7 +549,6 @@ void do_el1_fpac(struct pt_regs *regs, unsigned long esr)
 	 */
 	die("Oops - FPAC", regs, esr);
 }
-NOKPROBE_SYMBOL(do_el1_fpac)
 
 #define __user_cache_maint(insn, address, res)			\
 	if (address >= TASK_SIZE_MAX) {				\
@@ -543,30 +565,59 @@ NOKPROBE_SYMBOL(do_el1_fpac)
 		uaccess_ttbr0_disable();			\
 	}
 
-#define __user_cache_maint_ivau(insn, address, res)			\
-	do {								\
-		if (address >= TASK_SIZE_MAX) {			\
-			res = -EFAULT;					\
-		} else {						\
-			uaccess_ttbr0_enable();				\
-			asm volatile (					\
-				"1:	" insn "\n"			\
-				"	mov	%w0, #0\n"		\
-				"2:\n"					\
-				"	.pushsection .text.fixup,\"ax\"\n"	\
-				"	.align	2\n"			\
-				"3:	mov	%w0, %w2\n"		\
-				"	b	2b\n"			\
-				"	.popsection\n"			\
-				_ASM_EXTABLE_UACCESS_ERR(1b, 3b, %w0)			\
-				: "=r" (res)				\
-				: "r" (address), "i" (-EFAULT));	\
-			uaccess_ttbr0_disable();			\
-		}							\
-	} while (0)
+void
+user_cache_maint_handler_errtaum_38891(unsigned long esr, struct pt_regs *regs)
+{
+	unsigned long tagged_address, address;
+	int rt = ESR_ELx_SYS64_ISS_RT(esr);
+	int crm = (esr & ESR_ELx_SYS64_ISS_CRM_MASK) >> ESR_ELx_SYS64_ISS_CRM_SHIFT;
+	unsigned long flags;
+	int ret = 0;
 
-extern bool TKT340553_SW_WORKAROUND;
-static void user_cache_maint_handler(unsigned long esr, struct pt_regs *regs)
+	tagged_address = pt_regs_read_reg(regs, rt);
+	address = untagged_addr(tagged_address);
+
+	switch (crm) {
+	case ESR_ELx_SYS64_ISS_CRM_DC_CVAU:	/* DC CVAU, gets promoted */
+		__user_cache_maint("dc civac", address, ret);
+		break;
+	case ESR_ELx_SYS64_ISS_CRM_DC_CVAC:	/* DC CVAC, gets promoted */
+		__user_cache_maint("dc civac", address, ret);
+		break;
+	case ESR_ELx_SYS64_ISS_CRM_DC_CVADP:	/* DC CVADP, gets promoted */
+		local_irq_save(flags);
+		__user_cache_maint("dc civac", address, ret);
+		dsb(sy);
+		isb();
+		__user_cache_maint("sys 3, c7, c12, 1", address, ret);
+		local_irq_restore(flags);
+		break;
+	case ESR_ELx_SYS64_ISS_CRM_DC_CVAP:	/* DC CVAP */
+		local_irq_save(flags);
+		__user_cache_maint("dc civac", address, ret);
+		dsb(sy);
+		isb();
+		__user_cache_maint("sys 3, c7, c12, 1", address, ret);
+		local_irq_restore(flags);
+		break;
+	case ESR_ELx_SYS64_ISS_CRM_DC_CIVAC:	/* DC CIVAC */
+		__user_cache_maint("dc civac", address, ret);
+		break;
+	case ESR_ELx_SYS64_ISS_CRM_IC_IVAU:	/* IC IVAU */
+		__user_cache_maint("ic ivau", address, ret);
+		break;
+	default:
+		force_signal_inject(SIGILL, ILL_ILLOPC, regs->pc, 0);
+		return;
+	}
+
+	if (ret)
+		arm64_notify_segfault(tagged_address);
+	else
+		arm64_skip_faulting_instruction(regs, AARCH64_INSN_SIZE);
+}
+
+void user_cache_maint_handler_generic(unsigned long esr, struct pt_regs *regs)
 {
 	unsigned long tagged_address, address;
 	int rt = ESR_ELx_SYS64_ISS_RT(esr);
@@ -593,10 +644,7 @@ static void user_cache_maint_handler(unsigned long esr, struct pt_regs *regs)
 		__user_cache_maint("dc civac", address, ret);
 		break;
 	case ESR_ELx_SYS64_ISS_CRM_IC_IVAU:	/* IC IVAU */
-		if (TKT340553_SW_WORKAROUND)
-			__user_cache_maint_ivau("ic ialluis", address, ret);
-		else
-			__user_cache_maint("ic ivau", address, ret);
+		__user_cache_maint("ic ivau", address, ret);
 		break;
 	default:
 		force_signal_inject(SIGILL, ILL_ILLOPC, regs->pc, 0);
@@ -607,6 +655,14 @@ static void user_cache_maint_handler(unsigned long esr, struct pt_regs *regs)
 		arm64_notify_segfault(tagged_address);
 	else
 		arm64_skip_faulting_instruction(regs, AARCH64_INSN_SIZE);
+}
+
+static void user_cache_maint_handler(unsigned long esr, struct pt_regs *regs)
+{
+	if (cpus_have_cap(ARM64_WORKAROUND_MARVELL_38891))
+		user_cache_maint_handler_errtaum_38891(esr, regs);
+	else
+		user_cache_maint_handler_generic(esr, regs);
 }
 
 static void ctr_read_handler(unsigned long esr, struct pt_regs *regs)
@@ -774,7 +830,7 @@ static const struct sys64_hook cp15_64_hooks[] = {
 	{},
 };
 
-void do_cp15instr(unsigned long esr, struct pt_regs *regs)
+void do_el0_cp15(unsigned long esr, struct pt_regs *regs)
 {
 	const struct sys64_hook *hook, *hook_base;
 
@@ -787,6 +843,8 @@ void do_cp15instr(unsigned long esr, struct pt_regs *regs)
 		return;
 	}
 
+	task_isolation_kernel_enter();
+
 	switch (ESR_ELx_EC(esr)) {
 	case ESR_ELx_EC_CP15_32:
 		hook_base = cp15_32_hooks;
@@ -795,7 +853,7 @@ void do_cp15instr(unsigned long esr, struct pt_regs *regs)
 		hook_base = cp15_64_hooks;
 		break;
 	default:
-		do_undefinstr(regs, esr);
+		do_el0_undef(regs, esr);
 		return;
 	}
 
@@ -810,14 +868,15 @@ void do_cp15instr(unsigned long esr, struct pt_regs *regs)
 	 * EL0. Fall back to our usual undefined instruction handler
 	 * so that we handle these consistently.
 	 */
-	do_undefinstr(regs, esr);
+	do_el0_undef(regs, esr);
 }
-NOKPROBE_SYMBOL(do_cp15instr);
 #endif
 
-void do_sysinstr(unsigned long esr, struct pt_regs *regs)
+void do_el0_sys(unsigned long esr, struct pt_regs *regs)
 {
 	const struct sys64_hook *hook;
+
+	task_isolation_kernel_enter();
 
 	for (hook = sys64_hooks; hook->handler; hook++)
 		if ((hook->esr_mask & esr) == hook->esr_val) {
@@ -830,9 +889,8 @@ void do_sysinstr(unsigned long esr, struct pt_regs *regs)
 	 * back to our usual undefined instruction handler so that we handle
 	 * these consistently.
 	 */
-	do_undefinstr(regs, esr);
+	do_el0_undef(regs, esr);
 }
-NOKPROBE_SYMBOL(do_sysinstr);
 
 static const char *esr_class_str[] = {
 	[0 ... ESR_ELx_EC_MAX]		= "UNRECOGNIZED EC",
@@ -893,6 +951,8 @@ void bad_el0_sync(struct pt_regs *regs, int reason, unsigned long esr)
 {
 	unsigned long pc = instruction_pointer(regs);
 
+	task_isolation_kernel_enter();
+
 	current->thread.fault_address = 0;
 	current->thread.fault_code = esr;
 
@@ -937,7 +997,6 @@ void panic_bad_stack(struct pt_regs *regs, unsigned long esr, unsigned long far)
 
 void __noreturn arm64_serror_panic(struct pt_regs *regs, unsigned long esr)
 {
-	add_taint(TAINT_MACHINE_CHECK, LOCKDEP_STILL_OK);
 	console_verbose();
 
 	pr_crit("SError Interrupt on CPU%d, code 0x%016lx -- %s\n",

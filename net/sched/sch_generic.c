@@ -502,44 +502,34 @@ static void dev_watchdog(struct timer_list *t)
 		if (netif_device_present(dev) &&
 		    netif_running(dev) &&
 		    netif_carrier_ok(dev)) {
-			unsigned int timedout_ms = 0;
+			int some_queue_timedout = 0;
 			unsigned int i;
 			unsigned long trans_start;
-			unsigned long oldest_start = jiffies;
 
 			for (i = 0; i < dev->num_tx_queues; i++) {
 				struct netdev_queue *txq;
 
 				txq = netdev_get_tx_queue(dev, i);
-				if (!netif_xmit_stopped(txq))
-					continue;
-
-				/* Paired with WRITE_ONCE() + smp_mb...() in
-				 * netdev_tx_sent_queue() and netif_tx_stop_queue().
-				 */
-				smp_mb();
 				trans_start = READ_ONCE(txq->trans_start);
-
-				if (time_after(jiffies, trans_start + dev->watchdog_timeo)) {
-					timedout_ms = jiffies_to_msecs(jiffies - trans_start);
+				if (netif_xmit_stopped(txq) &&
+				    time_after(jiffies, (trans_start +
+							 dev->watchdog_timeo))) {
+					some_queue_timedout = 1;
 					atomic_long_inc(&txq->trans_timeout);
 					break;
 				}
-				if (time_after(oldest_start, trans_start))
-					oldest_start = trans_start;
 			}
 
-			if (unlikely(timedout_ms)) {
+			if (unlikely(some_queue_timedout)) {
 				trace_net_dev_xmit_timeout(dev, i);
-				netdev_crit(dev, "NETDEV WATCHDOG: CPU: %d: transmit queue %u timed out %u ms\n",
-					    raw_smp_processor_id(),
-					    i, timedout_ms);
+				WARN_ONCE(1, KERN_INFO "NETDEV WATCHDOG: %s (%s): transmit queue %u timed out\n",
+				       dev->name, netdev_drivername(dev), i);
 				netif_freeze_queues(dev);
 				dev->netdev_ops->ndo_tx_timeout(dev, i);
 				netif_unfreeze_queues(dev);
 			}
 			if (!mod_timer(&dev->watchdog_timer,
-				       round_jiffies(oldest_start +
+				       round_jiffies(jiffies +
 						     dev->watchdog_timeo)))
 				release = false;
 		}
@@ -952,9 +942,7 @@ struct Qdisc *qdisc_alloc(struct netdev_queue *dev_queue,
 	__skb_queue_head_init(&sch->gso_skb);
 	__skb_queue_head_init(&sch->skb_bad_txq);
 	gnet_stats_basic_sync_init(&sch->bstats);
-	lockdep_register_key(&sch->root_lock_key);
 	spin_lock_init(&sch->q.lock);
-	lockdep_set_class(&sch->q.lock, &sch->root_lock_key);
 
 	if (ops->static_flags & TCQ_F_CPUSTATS) {
 		sch->cpu_bstats =
@@ -988,7 +976,6 @@ struct Qdisc *qdisc_alloc(struct netdev_queue *dev_queue,
 
 	return sch;
 errout1:
-	lockdep_unregister_key(&sch->root_lock_key);
 	kfree(sch);
 errout:
 	return ERR_PTR(err);
@@ -1075,7 +1062,6 @@ static void __qdisc_destroy(struct Qdisc *qdisc)
 	if (ops->destroy)
 		ops->destroy(qdisc);
 
-	lockdep_unregister_key(&qdisc->root_lock_key);
 	module_put(ops->owner);
 	netdev_put(qdisc_dev(qdisc), &qdisc->dev_tracker);
 

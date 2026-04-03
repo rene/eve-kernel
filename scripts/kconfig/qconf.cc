@@ -478,7 +478,7 @@ void ConfigList::updateListAllForAll()
 	while (it.hasNext()) {
 		ConfigList *list = it.next();
 
-		list->updateListAll();
+		list->updateList();
 	}
 }
 
@@ -1172,7 +1172,7 @@ void ConfigInfoView::clicked(const QUrl &url)
 {
 	QByteArray str = url.toEncoded();
 	const std::size_t count = str.size();
-	char *data = new char[count + 2];  // '$' + '\0'
+	char *data = new char[count + 1];
 	struct symbol **result;
 	struct menu *m = NULL;
 

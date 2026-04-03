@@ -45,12 +45,6 @@ struct ksmbd_conn {
 	struct mutex			srv_mutex;
 	int				status;
 	unsigned int			cli_cap;
-	union {
-		__be32			inet_addr;
-#if IS_ENABLED(CONFIG_IPV6)
-		u8			inet6_addr[16];
-#endif
-	};
 	char				*request_buf;
 	struct ksmbd_transport		*transport;
 	struct nls_table		*local_nls;
@@ -94,7 +88,6 @@ struct ksmbd_conn {
 	__u16				dialect;
 
 	char				*mechToken;
-	unsigned int			mechTokenLen;
 
 	struct ksmbd_conn_ops	*conn_ops;
 
@@ -141,6 +134,7 @@ struct ksmbd_transport_ops {
 struct ksmbd_transport {
 	struct ksmbd_conn		*conn;
 	struct ksmbd_transport_ops	*ops;
+	struct task_struct		*handler;
 };
 
 #define KSMBD_TCP_RECV_TIMEOUT	(7 * HZ)
@@ -165,7 +159,7 @@ int ksmbd_conn_rdma_write(struct ksmbd_conn *conn,
 			  struct smb2_buffer_desc_v1 *desc,
 			  unsigned int desc_len);
 void ksmbd_conn_enqueue_request(struct ksmbd_work *work);
-void ksmbd_conn_try_dequeue_request(struct ksmbd_work *work);
+int ksmbd_conn_try_dequeue_request(struct ksmbd_work *work);
 void ksmbd_conn_init_server_callbacks(struct ksmbd_conn_ops *ops);
 int ksmbd_conn_handler_loop(void *p);
 int ksmbd_conn_transport_init(void);

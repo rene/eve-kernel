@@ -1087,12 +1087,6 @@ static int nf_ct_resolve_clash_harder(struct sk_buff *skb, u32 repl_idx)
 
 	hlist_nulls_add_head_rcu(&loser_ct->tuplehash[IP_CT_DIR_REPLY].hnnode,
 				 &nf_conntrack_hash[repl_idx]);
-	/* confirmed bit must be set after hlist add, not before:
-	 * loser_ct can still be visible to other cpu due to
-	 * SLAB_TYPESAFE_BY_RCU.
-	 */
-	smp_mb__before_atomic();
-	set_bit(IPS_CONFIRMED_BIT, &loser_ct->status);
 
 	NF_CT_STAT_INC(net, clash_resolve);
 	return NF_ACCEPT;
@@ -1230,6 +1224,8 @@ __nf_conntrack_confirm(struct sk_buff *skb)
 	 * user context, else we insert an already 'dead' hash, blocking
 	 * further use of that particular connection -JM.
 	 */
+	ct->status |= IPS_CONFIRMED;
+
 	if (unlikely(nf_ct_is_dying(ct))) {
 		NF_CT_STAT_INC(net, insert_failed);
 		goto dying;
@@ -1261,7 +1257,7 @@ chaintoolong:
 		}
 	}
 
-	/* Timeout is relative to confirmation time, not original
+	/* Timer relative to confirmation time, not original
 	   setting time, otherwise we'd get timer wrap in
 	   weird delay cases. */
 	ct->timeout += nfct_time_stamp;
@@ -1269,21 +1265,11 @@ chaintoolong:
 	__nf_conntrack_insert_prepare(ct);
 
 	/* Since the lookup is lockless, hash insertion must be done after
-	 * setting ct->timeout. The RCU barriers guarantee that no other CPU
-	 * can find the conntrack before the above stores are visible.
+	 * starting the timer and setting the CONFIRMED bit. The RCU barriers
+	 * guarantee that no other CPU can find the conntrack before the above
+	 * stores are visible.
 	 */
 	__nf_conntrack_hash_insert(ct, hash, reply_hash);
-
-	/* IPS_CONFIRMED unset means 'ct not (yet) in hash', conntrack lookups
-	 * skip entries that lack this bit.  This happens when a CPU is looking
-	 * at a stale entry that is being recycled due to SLAB_TYPESAFE_BY_RCU
-	 * or when another CPU encounters this entry right after the insertion
-	 * but before the set-confirm-bit below.  This bit must not be set until
-	 * after __nf_conntrack_hash_insert().
-	 */
-	smp_mb__before_atomic();
-	set_bit(IPS_CONFIRMED_BIT, &ct->status);
-
 	nf_conntrack_double_unlock(hash, reply_hash);
 	local_bh_enable();
 
@@ -1784,7 +1770,7 @@ init_conntrack(struct net *net, struct nf_conn *tmpl,
 	cnet = nf_ct_pernet(net);
 	if (cnet->expect_count) {
 		spin_lock_bh(&nf_conntrack_expect_lock);
-		exp = nf_ct_find_expectation(net, zone, tuple, !tmpl || nf_ct_is_confirmed(tmpl));
+		exp = nf_ct_find_expectation(net, zone, tuple);
 		if (exp) {
 			pr_debug("expectation arrives ct=%p exp=%p\n",
 				 ct, exp);
@@ -2605,14 +2591,11 @@ void *nf_ct_alloc_hashtable(unsigned int *sizep, int nulls)
 	struct hlist_nulls_head *hash;
 	unsigned int nr_slots, i;
 
-	if (*sizep > (INT_MAX / sizeof(struct hlist_nulls_head)))
+	if (*sizep > (UINT_MAX / sizeof(struct hlist_nulls_head)))
 		return NULL;
 
 	BUILD_BUG_ON(sizeof(struct hlist_nulls_head) != sizeof(struct hlist_head));
 	nr_slots = *sizep = roundup(*sizep, PAGE_SIZE / sizeof(struct hlist_nulls_head));
-
-	if (nr_slots > (INT_MAX / sizeof(struct hlist_nulls_head)))
-		return NULL;
 
 	hash = kvcalloc(nr_slots, sizeof(struct hlist_nulls_head), GFP_KERNEL);
 
@@ -2789,24 +2772,11 @@ err_cachep:
 	return ret;
 }
 
-static void nf_conntrack_set_closing(struct nf_conntrack *nfct)
-{
-	struct nf_conn *ct = nf_ct_to_nf_conn(nfct);
-
-	switch (nf_ct_protonum(ct)) {
-	case IPPROTO_TCP:
-		nf_conntrack_tcp_set_closing(ct);
-		break;
-	}
-}
-
 static const struct nf_ct_hook nf_conntrack_hook = {
 	.update		= nf_conntrack_update,
 	.destroy	= nf_ct_destroy,
 	.get_tuple_skb  = nf_conntrack_get_tuple_skb,
 	.attach		= nf_conntrack_attach,
-	.set_closing	= nf_conntrack_set_closing,
-	.confirm	= __nf_conntrack_confirm,
 };
 
 void nf_conntrack_init_end(void)

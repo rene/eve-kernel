@@ -209,18 +209,13 @@ int smc_ib_find_route(struct net *net, __be32 saddr, __be32 daddr,
 	if (IS_ERR(rt))
 		goto out;
 	if (rt->rt_uses_gateway && rt->rt_gw_family != AF_INET)
-		goto out_rt;
-	neigh = dst_neigh_lookup(&rt->dst, &fl4.daddr);
-	if (!neigh)
-		goto out_rt;
-	memcpy(nexthop_mac, neigh->ha, ETH_ALEN);
-	*uses_gateway = rt->rt_uses_gateway;
-	neigh_release(neigh);
-	ip_rt_put(rt);
-	return 0;
-
-out_rt:
-	ip_rt_put(rt);
+		goto out;
+	neigh = rt->dst.ops->neigh_lookup(&rt->dst, NULL, &fl4.daddr);
+	if (neigh) {
+		memcpy(nexthop_mac, neigh->ha, ETH_ALEN);
+		*uses_gateway = rt->rt_uses_gateway;
+		return 0;
+	}
 out:
 	return -ENOENT;
 }
@@ -742,9 +737,6 @@ bool smc_ib_is_sg_need_sync(struct smc_link *lnk,
 	struct scatterlist *sg;
 	unsigned int i;
 	bool ret = false;
-
-	if (!lnk->smcibdev->ibdev->dma_device)
-		return ret;
 
 	/* for now there is just one DMA address */
 	for_each_sg(buf_slot->sgt[lnk->link_idx].sgl, sg,

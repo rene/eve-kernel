@@ -50,8 +50,7 @@ static int __init early_init_dt_alloc_reserved_memory_arch(phys_addr_t size,
 			memblock_phys_free(base, size);
 	}
 
-	if (!err)
-		kmemleak_ignore_phys(base);
+	kmemleak_ignore_phys(base);
 
 	return err;
 }

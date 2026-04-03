@@ -149,7 +149,7 @@ int open_cached_dir(unsigned int xid, struct cifs_tcon *tcon,
 		return -EOPNOTSUPP;
 
 	ses = tcon->ses;
-	server = cifs_pick_channel(ses);
+	server = ses->server;
 	cfids = tcon->cfids;
 
 	if (!server->ops->new_lease_key)
@@ -218,8 +218,7 @@ int open_cached_dir(unsigned int xid, struct cifs_tcon *tcon,
 		.tcon = tcon,
 		.path = path,
 		.create_options = cifs_create_options(cifs_sb, CREATE_NOT_FILE),
-		.desired_access =  FILE_READ_DATA | FILE_READ_ATTRIBUTES |
-				   FILE_READ_EA,
+		.desired_access =  FILE_READ_DATA | FILE_READ_ATTRIBUTES,
 		.disposition = FILE_OPEN,
 		.fid = pfid,
 	};
@@ -269,12 +268,10 @@ int open_cached_dir(unsigned int xid, struct cifs_tcon *tcon,
 	if (o_rsp->OplockLevel != SMB2_OPLOCK_LEVEL_LEASE)
 		goto oshr_free;
 
-	rc = smb2_parse_contexts(server, rsp_iov,
+	smb2_parse_contexts(server, o_rsp,
 			    &oparms.fid->epoch,
-			    oparms.fid->lease_key,
-			    &oplock, NULL, NULL);
-	if (rc)
-		goto oshr_free;
+			    oparms.fid->lease_key, &oplock,
+			    NULL, NULL);
 	if (!(oplock & SMB2_LEASE_READ_CACHING_HE))
 		goto oshr_free;
 	qi_rsp = (struct smb2_query_info_rsp *)rsp_iov[1].iov_base;
@@ -354,7 +351,7 @@ int open_cached_dir_by_dentry(struct cifs_tcon *tcon,
 	spin_lock(&cfids->cfid_list_lock);
 	list_for_each_entry(cfid, &cfids->entries, entry) {
 		if (dentry && cfid->dentry == dentry) {
-			cifs_dbg(FYI, "found a cached file handle by dentry\n");
+			cifs_dbg(FYI, "found a cached root file handle by dentry\n");
 			kref_get(&cfid->refcount);
 			*ret_cfid = cfid;
 			spin_unlock(&cfids->cfid_list_lock);
@@ -370,7 +367,6 @@ smb2_close_cached_fid(struct kref *ref)
 {
 	struct cached_fid *cfid = container_of(ref, struct cached_fid,
 					       refcount);
-	int rc;
 
 	spin_lock(&cfid->cfids->cfid_list_lock);
 	if (cfid->on_list) {
@@ -384,10 +380,9 @@ smb2_close_cached_fid(struct kref *ref)
 	cfid->dentry = NULL;
 
 	if (cfid->is_open) {
-		rc = SMB2_close(0, cfid->tcon, cfid->fid.persistent_fid,
+		SMB2_close(0, cfid->tcon, cfid->fid.persistent_fid,
 			   cfid->fid.volatile_fid);
-		if (rc) /* should we retry on -EBUSY or -EAGAIN? */
-			cifs_dbg(VFS, "close cached dir rc %d\n", rc);
+		atomic_dec(&cfid->tcon->num_remote_opens);
 	}
 
 	free_cached_dir(cfid);

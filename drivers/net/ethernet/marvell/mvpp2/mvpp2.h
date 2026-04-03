@@ -59,6 +59,8 @@
 
 /* Top Registers */
 #define MVPP2_MH_REG(port)			(0x5040 + 4 * (port))
+#define MVPP2_MH				BIT(0)
+#define MVPP2_DSA_NON_EXTENDED			BIT(4)
 #define MVPP2_DSA_EXTENDED			BIT(5)
 #define MVPP2_VER_ID_REG			0x50b0
 #define MVPP2_VER_PP22				0x10
@@ -698,7 +700,8 @@
 #define MVPP2_ETH_TYPE_LEN		2
 #define MVPP2_PPPOE_HDR_SIZE		8
 #define MVPP2_VLAN_TAG_LEN		4
-#define MVPP2_VLAN_TAG_EDSA_LEN		8
+#define MVPP2_EXTENDED_DSA_LEN		8
+#define MVPP2_EBRIDGE_DSA_LEN		16
 
 /* Lbtd 802.3 type */
 #define MVPP2_IP_LBDT_TYPE		0xfffa
@@ -865,6 +868,7 @@
 /* Port flags */
 #define MVPP2_F_LOOPBACK		BIT(0)
 #define MVPP2_F_DT_COMPAT		BIT(1)
+#define MVPP22_F_IF_MUSDK		BIT(2) /* musdk port */
 
 /* Marvell tag types */
 enum mvpp2_tag_type {
@@ -938,9 +942,9 @@ enum mvpp22_ptp_packet_format {
 #define MVPP2_BM_COOKIE_POOL_OFFS	8
 #define MVPP2_BM_COOKIE_CPU_OFFS	24
 
-#define MVPP2_BM_SHORT_FRAME_SIZE	736	/* frame size 128 */
-#define MVPP2_BM_LONG_FRAME_SIZE	2240	/* frame size 1664 */
-#define MVPP2_BM_JUMBO_FRAME_SIZE	10432	/* frame size 9856 */
+#define MVPP2_BM_SHORT_FRAME_SIZE	1024	/* frame size 128 */
+#define MVPP2_BM_LONG_FRAME_SIZE	2048	/* frame size 1664 */
+#define MVPP2_BM_JUMBO_FRAME_SIZE	10240	/* frame size 9856 */
 /* BM short pool packet size
  * These value assure that for SWF the total number
  * of bytes allocated for each buffer will be 512
@@ -1088,7 +1092,7 @@ struct mvpp2 {
 	unsigned int max_port_rxqs;
 
 	/* Workqueue to gather hardware statistics */
-	char queue_name[31];
+	char queue_name[30];
 	struct workqueue_struct *stats_queue;
 
 	/* Debugfs root entry */
@@ -1108,9 +1112,6 @@ struct mvpp2 {
 
 	/* Spinlocks for CM3 shared memory configuration */
 	spinlock_t mss_spinlock;
-
-	/* Spinlock for shared PRS parser memory and shadow table */
-	spinlock_t prs_spinlock;
 };
 
 struct mvpp2_pcpu_stats {
@@ -1262,6 +1263,9 @@ struct mvpp2_port {
 	struct mvpp2_ethtool_fs *rfs_rules[MVPP2_N_RFS_ENTRIES_PER_FLOW];
 	int n_rfs_rules;
 
+	/* us private storage, allocated/used by User/Kernel mode toggling */
+	void *us_cfg;
+
 	/* Each port has its own view of the rss contexts, so that it can number
 	 * them from 0
 	 */
@@ -1274,6 +1278,12 @@ struct mvpp2_port {
 
 	/* Firmware TX flow control */
 	bool tx_fc;
+
+	enum mvpp2_tag_type tag_type;
+	u8 edsa_len;
+
+	/* Notifier required when the port is connected to the switch */
+	struct notifier_block netdev_notifier;
 };
 
 /* The mvpp2_tx_desc and mvpp2_rx_desc structures describe the

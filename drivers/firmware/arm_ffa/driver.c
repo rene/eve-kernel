@@ -306,8 +306,7 @@ __ffa_partition_info_get(u32 uuid0, u32 uuid1, u32 uuid2, u32 uuid3,
 			memcpy(buffer + idx, drv_info->rx_buffer + idx * sz,
 			       buf_sz);
 
-	if (!(flags & PARTITION_INFO_GET_RETURN_COUNT_ONLY))
-		ffa_rx_release();
+	ffa_rx_release();
 
 	mutex_unlock(&drv_info->rx_lock);
 

@@ -60,6 +60,10 @@ struct flow_match_tcp {
 	struct flow_dissector_key_tcp *key, *mask;
 };
 
+struct flow_match_ipsec {
+	struct flow_dissector_key_ipsec *key, *mask;
+};
+
 struct flow_match_mpls {
 	struct flow_dissector_key_mpls *key, *mask;
 };
@@ -110,6 +114,8 @@ void flow_rule_match_ports_range(const struct flow_rule *rule,
 				 struct flow_match_ports_range *out);
 void flow_rule_match_tcp(const struct flow_rule *rule,
 			 struct flow_match_tcp *out);
+void flow_rule_match_ipsec(const struct flow_rule *rule,
+			   struct flow_match_ipsec *out);
 void flow_rule_match_icmp(const struct flow_rule *rule,
 			  struct flow_match_icmp *out);
 void flow_rule_match_mpls(const struct flow_rule *rule,
@@ -155,6 +161,7 @@ enum flow_action_id {
 	FLOW_ACTION_MARK,
 	FLOW_ACTION_PTYPE,
 	FLOW_ACTION_PRIORITY,
+	FLOW_ACTION_RX_QUEUE_MAPPING,
 	FLOW_ACTION_WAKE,
 	FLOW_ACTION_QUEUE,
 	FLOW_ACTION_SAMPLE,
@@ -247,6 +254,7 @@ struct flow_action_entry {
 		u32			csum_flags;	/* FLOW_ACTION_CSUM */
 		u32			mark;		/* FLOW_ACTION_MARK */
 		u16                     ptype;          /* FLOW_ACTION_PTYPE */
+		u16			rx_queue;	/* FLOW_ACTION_RX_QUEUE_MAPPING */
 		u32			priority;	/* FLOW_ACTION_PRIORITY */
 		struct {				/* FLOW_ACTION_QUEUE */
 			u32		ctx;

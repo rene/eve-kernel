@@ -83,6 +83,7 @@
 #include <asm/insn.h>
 #include <asm/kvm_host.h>
 #include <asm/mmu_context.h>
+#include <asm/mpam.h>
 #include <asm/mte.h>
 #include <asm/processor.h>
 #include <asm/smp.h>
@@ -212,6 +213,8 @@ static const struct arm64_ftr_bits ftr_id_aa64isar1[] = {
 };
 
 static const struct arm64_ftr_bits ftr_id_aa64isar2[] = {
+        ARM64_FTR_BITS(FTR_VISIBLE, FTR_NONSTRICT, FTR_LOWER_SAFE, ID_AA64ISAR2_EL1_CSSC_SHIFT, 4, 0),
+	ARM64_FTR_BITS(FTR_VISIBLE, FTR_NONSTRICT, FTR_LOWER_SAFE, ID_AA64ISAR2_EL1_RPRFM_SHIFT, 4, 0),
 	ARM64_FTR_BITS(FTR_HIDDEN, FTR_STRICT, FTR_LOWER_SAFE, ID_AA64ISAR2_EL1_CLRBHB_SHIFT, 4, 0),
 	ARM64_FTR_BITS(FTR_HIDDEN, FTR_STRICT, FTR_LOWER_SAFE, ID_AA64ISAR2_EL1_BC_SHIFT, 4, 0),
 	ARM64_FTR_BITS(FTR_VISIBLE_IF_IS_ENABLED(CONFIG_ARM64_PTR_AUTH),
@@ -343,7 +346,6 @@ static const struct arm64_ftr_bits ftr_id_aa64mmfr0[] = {
 };
 
 static const struct arm64_ftr_bits ftr_id_aa64mmfr1[] = {
-	ARM64_FTR_BITS(FTR_HIDDEN, FTR_STRICT, FTR_LOWER_SAFE, ID_AA64MMFR1_EL1_ECBHB_SHIFT, 4, 0),
 	ARM64_FTR_BITS(FTR_HIDDEN, FTR_NONSTRICT, FTR_LOWER_SAFE, ID_AA64MMFR1_EL1_TIDCP1_SHIFT, 4, 0),
 	ARM64_FTR_BITS(FTR_VISIBLE, FTR_STRICT, FTR_LOWER_SAFE, ID_AA64MMFR1_EL1_AFP_SHIFT, 4, 0),
 	ARM64_FTR_BITS(FTR_HIDDEN, FTR_STRICT, FTR_LOWER_SAFE, ID_AA64MMFR1_EL1_ETS_SHIFT, 4, 0),
@@ -596,6 +598,18 @@ static const struct arm64_ftr_bits ftr_smcr[] = {
 	ARM64_FTR_END,
 };
 
+static const struct arm64_ftr_bits ftr_mpamidr[] = {
+	ARM64_FTR_BITS(FTR_HIDDEN, FTR_NONSTRICT, FTR_LOWER_SAFE,
+		MPAMIDR_PMG_MAX_SHIFT, MPAMIDR_PMG_MAX_LEN, 0),        /* PMG_MAX */
+	ARM64_FTR_BITS(FTR_HIDDEN, FTR_NONSTRICT, FTR_LOWER_SAFE,
+		MPAMIDR_VPMR_MAX_SHIFT, MPAMIDR_VPMR_MAX_LEN, 0),      /* VPMR_MAX */
+	ARM64_FTR_BITS(FTR_HIDDEN, FTR_STRICT, FTR_LOWER_SAFE,
+		MPAMIDR_HAS_HCR_SHIFT, 1, 0), /* HAS_HCR */
+	ARM64_FTR_BITS(FTR_HIDDEN, FTR_NONSTRICT, FTR_LOWER_SAFE,
+		MPAMIDR_PARTID_MAX_SHIFT, MPAMIDR_PARTID_MAX_LEN, 0),  /* PARTID_MAX */
+	ARM64_FTR_END,
+};
+
 /*
  * Common ftr bits for a 32bit register with all hidden, strict
  * attributes, with 4bit feature fields and a default safe value of
@@ -708,6 +722,9 @@ static const struct __ftr_reg_entry {
 	/* Op1 = 0, CRn = 1, CRm = 2 */
 	ARM64_FTR_REG(SYS_ZCR_EL1, ftr_zcr),
 	ARM64_FTR_REG(SYS_SMCR_EL1, ftr_smcr),
+
+	/* Op1 = 0, CRn = 10, CRm = 4 */
+	ARM64_FTR_REG(SYS_MPAMIDR_EL1, ftr_mpamidr),
 
 	/* Op1 = 1, CRn = 0, CRm = 0 */
 	ARM64_FTR_REG(SYS_GMID_EL1, ftr_gmid),
@@ -950,22 +967,9 @@ init_cpu_hwcaps_indirect_list_from_array(const struct arm64_cpu_capabilities *ca
 	}
 }
 
-bool TKT340553_SW_WORKAROUND;
 static void __init init_cpu_hwcaps_indirect_list(void)
 {
 	init_cpu_hwcaps_indirect_list_from_array(arm64_features);
-#ifdef CONFIG_ARM64_WORKAROUND_CLEAN_CACHE
-#if	defined(CONFIG_ARM64_ERRATUM_826319) || \
-	defined(CONFIG_ARM64_ERRATUM_827319) || \
-	defined(CONFIG_ARM64_ERRATUM_824069)
-	if (TKT340553_SW_WORKAROUND) {
-		struct midr_range *midr_range_list =
-			(struct midr_range *)(arm64_errata[0].midr_range_list);
-
-		midr_range_list[0].rv_max = MIDR_CPU_VAR_REV(0, 4);
-	}
-#endif
-#endif
 	init_cpu_hwcaps_indirect_list_from_array(arm64_errata);
 }
 
@@ -1039,6 +1043,9 @@ void __init init_cpu_features(struct cpuinfo_arm64 *info)
 		init_cpu_ftr_reg(SYS_SMCR_EL1, info->reg_smcr);
 		vec_init_vq_map(ARM64_VEC_SME);
 	}
+
+	if (id_aa64pfr0_mpam(info->reg_id_aa64pfr0))
+		init_cpu_ftr_reg(SYS_MPAMIDR_EL1, info->reg_mpamidr);
 
 	if (id_aa64pfr1_mte(info->reg_id_aa64pfr1))
 		init_cpu_ftr_reg(SYS_GMID_EL1, info->reg_gmid);
@@ -1295,6 +1302,11 @@ void update_cpu_features(int cpu,
 		/* Probe vector lengths */
 		if (!system_capabilities_finalized())
 			vec_update_vq_map(ARM64_VEC_SME);
+	}
+
+	if (id_aa64pfr0_mpam(info->reg_id_aa64pfr0)) {
+		taint |= check_update_ftr_reg(SYS_MPAMIDR_EL1, cpu,
+					info->reg_mpamidr, boot->reg_mpamidr);
 	}
 
 	/*
@@ -2098,17 +2110,6 @@ static void cpu_enable_mte(struct arm64_cpu_capabilities const *cap)
 }
 #endif /* CONFIG_ARM64_MTE */
 
-static void user_feature_fixup(void)
-{
-	if (cpus_have_cap(ARM64_WORKAROUND_SPECULATIVE_SSBS)) {
-		struct arm64_ftr_reg *regp;
-
-		regp = get_arm64_ftr_reg(SYS_ID_AA64PFR1_EL1);
-		if (regp)
-			regp->user_mask &= ~ID_AA64PFR1_EL1_SSBS_MASK;
-	}
-}
-
 static void elf_hwcap_fixup(void)
 {
 #ifdef CONFIG_ARM64_ERRATUM_1742098
@@ -2129,6 +2130,11 @@ static void cpu_trap_el0_impdef(const struct arm64_cpu_capabilities *__unused)
 	sysreg_clear_set(sctlr_el1, 0, SCTLR_EL1_TIDCP);
 }
 
+static void cpu_enable_dit(const struct arm64_cpu_capabilities *__unused)
+{
+	set_pstate_dit(1);
+}
+
 /* Internal helper functions to match cpu capability type */
 static bool
 cpucap_late_cpu_optional(const struct arm64_cpu_capabilities *cap)
@@ -2146,6 +2152,39 @@ static bool
 cpucap_panic_on_conflict(const struct arm64_cpu_capabilities *cap)
 {
 	return !!(cap->type & ARM64_CPUCAP_PANIC_ON_CONFLICT);
+}
+
+static bool __maybe_unused
+test_has_mpam(const struct arm64_cpu_capabilities *entry, int scope)
+{
+	if (!has_cpuid_feature(entry, scope))
+		return false;
+
+	/* Check firmware actually enabled MPAM on this cpu. */
+	return (read_sysreg_s(SYS_MPAM1_EL1) & MPAM_SYSREG_EN);
+}
+
+static void __maybe_unused
+cpu_enable_mpam(const struct arm64_cpu_capabilities *entry)
+{
+	/*
+	 * Access by the kernel (at EL1) should use the resrved PARTID
+	 * which is configured unrestricted. This avoids priority-inversion
+	 * where latency sensitive tasks have to wait for a task that has
+	 * been throttled to release the lock.
+	 */
+	write_sysreg_s(0, SYS_MPAM1_EL1);
+}
+
+static void mpam_extra_caps(void)
+{
+	u64 idr = read_sanitised_ftr_reg(SYS_MPAMIDR_EL1);
+
+	if (!IS_ENABLED(CONFIG_ARM64_MPAM))
+		return;
+
+	if (idr & MPAMIDR_HAS_HCR)
+		__enable_mpam_hcr();
 }
 
 static const struct arm64_cpu_capabilities arm64_features[] = {
@@ -2692,6 +2731,32 @@ static const struct arm64_cpu_capabilities arm64_features[] = {
 		.matches = has_cpuid_feature,
 		.cpu_enable = cpu_trap_el0_impdef,
 	},
+	{
+		.desc = "Data independent timing control (DIT)",
+		.capability = ARM64_HAS_DIT,
+		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
+		.sys_reg = SYS_ID_AA64PFR0_EL1,
+		.sign = FTR_UNSIGNED,
+		.field_pos = ID_AA64PFR0_EL1_DIT_SHIFT,
+		.field_width = 4,
+		.min_field_value = ID_AA64PFR0_EL1_DIT_IMP,
+		.matches = has_cpuid_feature,
+		.cpu_enable = cpu_enable_dit,
+	},
+#ifdef CONFIG_ARM64_MPAM
+	{
+		.desc = "Memory Partitioning And Monitoring",
+		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
+		.capability = ARM64_MPAM,
+		.matches = test_has_mpam,
+		.cpu_enable = cpu_enable_mpam,
+		.sys_reg = SYS_ID_AA64PFR0_EL1,
+		.field_pos = ID_AA64PFR0_EL1_MPAM_SHIFT,
+		.field_width = 4,
+		.sign = FTR_UNSIGNED,
+		.min_field_value = 1,
+	},
+#endif /* CONFIG_ARM64_MPAM */
 	{},
 };
 
@@ -2800,6 +2865,7 @@ static const struct arm64_cpu_capabilities arm64_elf_hwcaps[] = {
 	HWCAP_CAP(SYS_ID_AA64MMFR2_EL1, ID_AA64MMFR2_EL1_AT_SHIFT, 4, FTR_UNSIGNED, 1, CAP_HWCAP, KERNEL_HWCAP_USCAT),
 #ifdef CONFIG_ARM64_SVE
 	HWCAP_CAP(SYS_ID_AA64PFR0_EL1, ID_AA64PFR0_EL1_SVE_SHIFT, 4, FTR_UNSIGNED, ID_AA64PFR0_EL1_SVE_IMP, CAP_HWCAP, KERNEL_HWCAP_SVE),
+	HWCAP_CAP(SYS_ID_AA64ZFR0_EL1, ID_AA64ZFR0_EL1_SVEver_SHIFT, 4, FTR_UNSIGNED, ID_AA64ZFR0_EL1_SVEver_SVE2p1, CAP_HWCAP, KERNEL_HWCAP_SVE2P1),
 	HWCAP_CAP(SYS_ID_AA64ZFR0_EL1, ID_AA64ZFR0_EL1_SVEver_SHIFT, 4, FTR_UNSIGNED, ID_AA64ZFR0_EL1_SVEver_SVE2, CAP_HWCAP, KERNEL_HWCAP_SVE2),
 	HWCAP_CAP(SYS_ID_AA64ZFR0_EL1, ID_AA64ZFR0_EL1_AES_SHIFT, 4, FTR_UNSIGNED, ID_AA64ZFR0_EL1_AES_IMP, CAP_HWCAP, KERNEL_HWCAP_SVEAES),
 	HWCAP_CAP(SYS_ID_AA64ZFR0_EL1, ID_AA64ZFR0_EL1_AES_SHIFT, 4, FTR_UNSIGNED, ID_AA64ZFR0_EL1_AES_PMULL128, CAP_HWCAP, KERNEL_HWCAP_SVEPMULL),
@@ -2826,6 +2892,8 @@ static const struct arm64_cpu_capabilities arm64_elf_hwcaps[] = {
 #endif /* CONFIG_ARM64_MTE */
 	HWCAP_CAP(SYS_ID_AA64MMFR0_EL1, ID_AA64MMFR0_EL1_ECV_SHIFT, 4, FTR_UNSIGNED, 1, CAP_HWCAP, KERNEL_HWCAP_ECV),
 	HWCAP_CAP(SYS_ID_AA64MMFR1_EL1, ID_AA64MMFR1_EL1_AFP_SHIFT, 4, FTR_UNSIGNED, 1, CAP_HWCAP, KERNEL_HWCAP_AFP),
+	HWCAP_CAP(SYS_ID_AA64ISAR2_EL1, ID_AA64ISAR2_EL1_CSSC_SHIFT, 4, FTR_UNSIGNED, ID_AA64ISAR2_EL1_CSSC_IMP, CAP_HWCAP, KERNEL_HWCAP_CSSC),
+	HWCAP_CAP(SYS_ID_AA64ISAR2_EL1, ID_AA64ISAR2_EL1_RPRFM_SHIFT, 4, FTR_UNSIGNED, ID_AA64ISAR2_EL1_RPRFM_IMP, CAP_HWCAP, KERNEL_HWCAP_RPRFM),
 	HWCAP_CAP(SYS_ID_AA64ISAR2_EL1, ID_AA64ISAR2_EL1_RPRES_SHIFT, 4, FTR_UNSIGNED, 1, CAP_HWCAP, KERNEL_HWCAP_RPRES),
 	HWCAP_CAP(SYS_ID_AA64ISAR2_EL1, ID_AA64ISAR2_EL1_WFxT_SHIFT, 4, FTR_UNSIGNED, ID_AA64ISAR2_EL1_WFxT_IMP, CAP_HWCAP, KERNEL_HWCAP_WFXT),
 #ifdef CONFIG_ARM64_SME
@@ -3309,7 +3377,6 @@ void __init setup_cpu_features(void)
 	u32 cwg;
 
 	setup_system_capabilities();
-	user_feature_fixup();
 	setup_elf_hwcaps(arm64_elf_hwcaps);
 
 	if (system_supports_32bit_el0()) {
@@ -3323,6 +3390,7 @@ void __init setup_cpu_features(void)
 	sve_setup();
 	sme_setup();
 	minsigstksz_setup();
+	mpam_extra_caps();
 
 	/*
 	 * Check for sane CTR_EL0.CWG value.
@@ -3440,8 +3508,22 @@ static int emulate_sys_reg(u32 id, u64 *valp)
 		return emulate_id_reg(id, valp);
 
 	regp = get_arm64_ftr_reg_nowarn(id);
-	if (regp)
+	if (regp) {
 		*valp = arm64_ftr_reg_user_value(regp);
+		preempt_disable();
+		if (IS_ENABLED(CONFIG_ARM64_ERRATUM_SSBS2) &&
+		    this_cpu_has_cap(ARM64_WORKAROUND_SSBS2) &&
+		    (id ==  SYS_ID_AA64PFR1_EL1)) {
+			/* Dont expose the SSBS2 feature to EL0.
+			 * Hence override SSBS field with SSBS_IMP
+			 * insead of SSBS2.
+			 */
+			*valp &= ~ID_AA64PFR1_EL1_SSBS_MASK;
+			*valp |= ID_AA64PFR1_EL1_SSBS_IMP <<
+				ID_AA64PFR1_EL1_SSBS_SHIFT;
+		}
+		preempt_enable();
+	}
 	else
 		/*
 		 * The untracked registers are either IMPLEMENTATION DEFINED
@@ -3464,9 +3546,12 @@ int do_emulate_mrs(struct pt_regs *regs, u32 sys_reg, u32 rt)
 	return rc;
 }
 
-static int emulate_mrs(struct pt_regs *regs, u32 insn)
+bool try_emulate_mrs(struct pt_regs *regs, u32 insn)
 {
 	u32 sys_reg, rt;
+
+	if (compat_user_mode(regs) || !aarch64_insn_is_mrs(insn))
+		return false;
 
 	/*
 	 * sys_reg values are defined as used in mrs/msr instruction.
@@ -3474,24 +3559,8 @@ static int emulate_mrs(struct pt_regs *regs, u32 insn)
 	 */
 	sys_reg = (u32)aarch64_insn_decode_immediate(AARCH64_INSN_IMM_16, insn) << 5;
 	rt = aarch64_insn_decode_register(AARCH64_INSN_REGTYPE_RT, insn);
-	return do_emulate_mrs(regs, sys_reg, rt);
+	return do_emulate_mrs(regs, sys_reg, rt) == 0;
 }
-
-static struct undef_hook mrs_hook = {
-	.instr_mask = 0xffff0000,
-	.instr_val  = 0xd5380000,
-	.pstate_mask = PSR_AA32_MODE_MASK,
-	.pstate_val = PSR_MODE_EL0t,
-	.fn = emulate_mrs,
-};
-
-static int __init enable_mrs_emulation(void)
-{
-	register_undef_hook(&mrs_hook);
-	return 0;
-}
-
-core_initcall(enable_mrs_emulation);
 
 enum mitigation_state arm64_get_meltdown_state(void)
 {

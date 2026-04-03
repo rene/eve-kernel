@@ -23,10 +23,8 @@
 #include <linux/platform_device.h>
 #include <linux/io.h>
 #include <linux/psp-sev.h>
-#include <linux/dmi.h>
 #include <uapi/linux/sev-guest.h>
 
-#include <asm/init.h>
 #include <asm/cpu_entry_area.h>
 #include <asm/stacktrace.h>
 #include <asm/sev.h>
@@ -676,12 +674,10 @@ static u64 __init get_jump_table_addr(void)
 
 static void pvalidate_pages(unsigned long vaddr, unsigned long npages, bool validate)
 {
-	unsigned long vaddr_begin, vaddr_end;
+	unsigned long vaddr_end;
 	int rc;
 
 	vaddr = vaddr & PAGE_MASK;
-
-	vaddr_begin = vaddr;
 	vaddr_end = vaddr + (npages << PAGE_SHIFT);
 
 	while (vaddr < vaddr_end) {
@@ -691,16 +687,9 @@ static void pvalidate_pages(unsigned long vaddr, unsigned long npages, bool vali
 
 		vaddr = vaddr + PAGE_SIZE;
 	}
-
-	/*
-	 * If validating memory (making it private) and affected by the
-	 * cache-coherency vulnerability, perform the cache eviction mitigation.
-	 */
-	if (validate && !cpu_feature_enabled(X86_FEATURE_COHERENCY_SFW_NO))
-		sev_evict_cache((void *)vaddr_begin, npages);
 }
 
-static void __head early_set_pages_state(unsigned long paddr, unsigned long npages, enum psc_op op)
+static void __init early_set_pages_state(unsigned long paddr, unsigned long npages, enum psc_op op)
 {
 	unsigned long paddr_end;
 	u64 val;
@@ -738,7 +727,7 @@ e_term:
 	sev_es_terminate(SEV_TERM_SET_LINUX, GHCB_TERM_PSC);
 }
 
-void __head early_snp_set_memory_private(unsigned long vaddr, unsigned long paddr,
+void __init early_snp_set_memory_private(unsigned long vaddr, unsigned long paddr,
 					 unsigned long npages)
 {
 	/*
@@ -747,7 +736,7 @@ void __head early_snp_set_memory_private(unsigned long vaddr, unsigned long padd
 	 * This eliminates worries about jump tables or checking boot_cpu_data
 	 * in the cc_platform_has() function.
 	 */
-	if (!(RIP_REL_REF(sev_status) & MSR_AMD64_SEV_SNP_ENABLED))
+	if (!(sev_status & MSR_AMD64_SEV_SNP_ENABLED))
 		return;
 
 	 /*
@@ -769,7 +758,7 @@ void __init early_snp_set_memory_shared(unsigned long vaddr, unsigned long paddr
 	 * This eliminates worries about jump tables or checking boot_cpu_data
 	 * in the cc_platform_has() function.
 	 */
-	if (!(RIP_REL_REF(sev_status) & MSR_AMD64_SEV_SNP_ENABLED))
+	if (!(sev_status & MSR_AMD64_SEV_SNP_ENABLED))
 		return;
 
 	/* Invalidate the memory pages before they are marked shared in the RMP table. */
@@ -777,6 +766,21 @@ void __init early_snp_set_memory_shared(unsigned long vaddr, unsigned long paddr
 
 	 /* Ask hypervisor to mark the memory pages shared in the RMP table. */
 	early_set_pages_state(paddr, npages, SNP_PAGE_STATE_SHARED);
+}
+
+void __init snp_prep_memory(unsigned long paddr, unsigned int sz, enum psc_op op)
+{
+	unsigned long vaddr, npages;
+
+	vaddr = (unsigned long)__va(paddr);
+	npages = PAGE_ALIGN(sz) >> PAGE_SHIFT;
+
+	if (op == SNP_PAGE_STATE_PRIVATE)
+		early_snp_set_memory_private(vaddr, paddr, npages);
+	else if (op == SNP_PAGE_STATE_SHARED)
+		early_snp_set_memory_shared(vaddr, paddr, npages);
+	else
+		WARN(1, "invalid memory op %d\n", op);
 }
 
 static int vmgexit_psc(struct snp_psc_desc *desc)
@@ -1275,6 +1279,10 @@ void setup_ghcb(void)
 	if (!cc_platform_has(CC_ATTR_GUEST_STATE_ENCRYPT))
 		return;
 
+	/* First make sure the hypervisor talks a supported protocol. */
+	if (!sev_es_negotiate_protocol())
+		sev_es_terminate(SEV_TERM_SET_GEN, GHCB_SEV_ES_GEN_REQ);
+
 	/*
 	 * Check whether the runtime #VC exception handler is active. It uses
 	 * the per-CPU GHCB page which is set up by sev_es_init_vc_handling().
@@ -1288,13 +1296,6 @@ void setup_ghcb(void)
 
 		return;
 	}
-
-	/*
-	 * Make sure the hypervisor talks a supported protocol.
-	 * This gets called only in the BSP boot phase.
-	 */
-	if (!sev_es_negotiate_protocol())
-		sev_es_terminate(SEV_TERM_SET_GEN, GHCB_SEV_ES_GEN_REQ);
 
 	/*
 	 * Clear the boot_ghcb. The first exception comes in before the bss
@@ -2095,7 +2096,7 @@ fail:
  *
  * Scan for the blob in that order.
  */
-static __head struct cc_blob_sev_info *find_cc_blob(struct boot_params *bp)
+static __init struct cc_blob_sev_info *find_cc_blob(struct boot_params *bp)
 {
 	struct cc_blob_sev_info *cc_info;
 
@@ -2121,7 +2122,7 @@ found_cc_info:
 	return cc_info;
 }
 
-bool __head snp_init(struct boot_params *bp)
+bool __init snp_init(struct boot_params *bp)
 {
 	struct cc_blob_sev_info *cc_info;
 
@@ -2143,20 +2144,9 @@ bool __head snp_init(struct boot_params *bp)
 	return true;
 }
 
-void __head __noreturn snp_abort(void)
+void __init __noreturn snp_abort(void)
 {
 	sev_es_terminate(SEV_TERM_SET_GEN, GHCB_SNP_UNSUPPORTED);
-}
-
-/*
- * SEV-SNP guests should only execute dmi_setup() if EFI_CONFIG_TABLES are
- * enabled, as the alternative (fallback) logic for DMI probing in the legacy
- * ROM region can cause a crash since this region is not pre-validated.
- */
-void __init snp_dmi_setup(void)
-{
-	if (efi_enabled(EFI_CONFIG_TABLES))
-		dmi_setup();
 }
 
 static void dump_cpuid_table(void)

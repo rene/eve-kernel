@@ -483,16 +483,14 @@ static int amdgpu_bo_move(struct ttm_buffer_object *bo, bool evict,
 
 	if (!old_mem || (old_mem->mem_type == TTM_PL_SYSTEM &&
 			 bo->ttm == NULL)) {
-		amdgpu_bo_move_notify(bo, evict, new_mem);
 		ttm_bo_move_null(bo, new_mem);
-		return 0;
+		goto out;
 	}
 	if (old_mem->mem_type == TTM_PL_SYSTEM &&
 	    (new_mem->mem_type == TTM_PL_TT ||
 	     new_mem->mem_type == AMDGPU_PL_PREEMPT)) {
-		amdgpu_bo_move_notify(bo, evict, new_mem);
 		ttm_bo_move_null(bo, new_mem);
-		return 0;
+		goto out;
 	}
 	if ((old_mem->mem_type == TTM_PL_TT ||
 	     old_mem->mem_type == AMDGPU_PL_PREEMPT) &&
@@ -502,10 +500,9 @@ static int amdgpu_bo_move(struct ttm_buffer_object *bo, bool evict,
 			return r;
 
 		amdgpu_ttm_backend_unbind(bo->bdev, bo->ttm);
-		amdgpu_bo_move_notify(bo, evict, new_mem);
 		ttm_resource_free(bo, &bo->resource);
 		ttm_bo_assign_mem(bo, new_mem);
-		return 0;
+		goto out;
 	}
 
 	if (old_mem->mem_type == AMDGPU_PL_GDS ||
@@ -515,9 +512,8 @@ static int amdgpu_bo_move(struct ttm_buffer_object *bo, bool evict,
 	    new_mem->mem_type == AMDGPU_PL_GWS ||
 	    new_mem->mem_type == AMDGPU_PL_OA) {
 		/* Nothing to save here */
-		amdgpu_bo_move_notify(bo, evict, new_mem);
 		ttm_bo_move_null(bo, new_mem);
-		return 0;
+		goto out;
 	}
 
 	if (bo->type == ttm_bo_type_device &&
@@ -529,23 +525,22 @@ static int amdgpu_bo_move(struct ttm_buffer_object *bo, bool evict,
 		abo->flags &= ~AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED;
 	}
 
-	if (adev->mman.buffer_funcs_enabled &&
-	    ((old_mem->mem_type == TTM_PL_SYSTEM &&
-	      new_mem->mem_type == TTM_PL_VRAM) ||
-	     (old_mem->mem_type == TTM_PL_VRAM &&
-	      new_mem->mem_type == TTM_PL_SYSTEM))) {
-		hop->fpfn = 0;
-		hop->lpfn = 0;
-		hop->mem_type = TTM_PL_TT;
-		hop->flags = TTM_PL_FLAG_TEMPORARY;
-		return -EMULTIHOP;
-	}
+	if (adev->mman.buffer_funcs_enabled) {
+		if (((old_mem->mem_type == TTM_PL_SYSTEM &&
+		      new_mem->mem_type == TTM_PL_VRAM) ||
+		     (old_mem->mem_type == TTM_PL_VRAM &&
+		      new_mem->mem_type == TTM_PL_SYSTEM))) {
+			hop->fpfn = 0;
+			hop->lpfn = 0;
+			hop->mem_type = TTM_PL_TT;
+			hop->flags = TTM_PL_FLAG_TEMPORARY;
+			return -EMULTIHOP;
+		}
 
-	amdgpu_bo_move_notify(bo, evict, new_mem);
-	if (adev->mman.buffer_funcs_enabled)
 		r = amdgpu_move_blit(bo, evict, new_mem, old_mem);
-	else
+	} else {
 		r = -ENODEV;
+	}
 
 	if (r) {
 		/* Check that all memory is CPU accessible */
@@ -560,10 +555,10 @@ static int amdgpu_bo_move(struct ttm_buffer_object *bo, bool evict,
 			return r;
 	}
 
-	/* update statistics after the move */
-	if (evict)
-		atomic64_inc(&adev->num_evictions);
+out:
+	/* update statistics */
 	atomic64_add(bo->base.size, &adev->num_bytes_moved);
+	amdgpu_bo_move_notify(bo, evict, new_mem);
 	return 0;
 }
 
@@ -776,7 +771,7 @@ static int amdgpu_ttm_tt_pin_userptr(struct ttm_device *bdev,
 	/* Map SG to device */
 	r = dma_map_sgtable(adev->dev, ttm->sg, direction, 0);
 	if (r)
-		goto release_sg_table;
+		goto release_sg;
 
 	/* convert SG to linear array of pages and dma addresses */
 	drm_prime_sg_to_dma_addr_array(ttm->sg, gtt->ttm.dma_address,
@@ -784,8 +779,6 @@ static int amdgpu_ttm_tt_pin_userptr(struct ttm_device *bdev,
 
 	return 0;
 
-release_sg_table:
-	sg_free_table(ttm->sg);
 release_sg:
 	kfree(ttm->sg);
 	ttm->sg = NULL;
@@ -844,7 +837,6 @@ static void amdgpu_ttm_gart_bind(struct amdgpu_device *adev,
 		amdgpu_gart_bind(adev, gtt->offset, ttm->num_pages,
 				 gtt->ttm.dma_address, flags);
 	}
-	gtt->bound = true;
 }
 
 /*
@@ -1732,7 +1724,6 @@ int amdgpu_ttm_init(struct amdgpu_device *adev)
 
 	mutex_init(&adev->mman.gtt_window_lock);
 
-	dma_set_max_seg_size(adev->dev, UINT_MAX);
 	/* No others user of address space so set it to 0 */
 	r = ttm_device_init(&adev->mman.bdev, &amdgpu_bo_driver, adev->dev,
 			       adev_to_drm(adev)->anon_inode->i_mapping,

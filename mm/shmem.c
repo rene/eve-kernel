@@ -1024,24 +1024,7 @@ whole_folios:
 				}
 				VM_BUG_ON_FOLIO(folio_test_writeback(folio),
 						folio);
-
-				if (!folio_test_large(folio)) {
-					truncate_inode_folio(mapping, folio);
-				} else if (truncate_inode_partial_folio(folio, lstart, lend)) {
-					/*
-					 * If we split a page, reset the loop so
-					 * that we pick up the new sub pages.
-					 * Otherwise the THP was entirely
-					 * dropped or the target range was
-					 * zeroed, so just continue the loop as
-					 * is.
-					 */
-					if (!folio_test_large(folio)) {
-						folio_unlock(folio);
-						index = start;
-						break;
-					}
-				}
+				truncate_inode_folio(mapping, folio);
 			}
 			index = folio->index + folio_nr_pages(folio) - 1;
 			folio_unlock(folio);
@@ -2302,9 +2285,12 @@ static int shmem_mmap(struct file *file, struct vm_area_struct *vma)
 	struct shmem_inode_info *info = SHMEM_I(file_inode(file));
 	int ret;
 
-	ret = seal_check_write(info->seals, vma);
+	ret = seal_check_future_write(info->seals, vma);
 	if (ret)
 		return ret;
+
+	/* arm64 - allow memory tagging on RAM-based files */
+	vma->vm_flags |= VM_MTE_ALLOWED;
 
 	file_accessed(file);
 	vma->vm_ops = &shmem_vm_ops;

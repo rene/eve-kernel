@@ -87,14 +87,6 @@ static struct tcp_transport *alloc_transport(struct socket *client_sk)
 		return NULL;
 	}
 
-#if IS_ENABLED(CONFIG_IPV6)
-	if (client_sk->sk->sk_family == AF_INET6)
-		memcpy(&conn->inet6_addr, &client_sk->sk->sk_v6_daddr, 16);
-	else
-		conn->inet_addr = inet_sk(client_sk->sk)->inet_daddr;
-#else
-	conn->inet_addr = inet_sk(client_sk->sk)->inet_daddr;
-#endif
 	conn->transport = KSMBD_TRANS(t);
 	KSMBD_TRANS(t)->conn = conn;
 	KSMBD_TRANS(t)->ops = &ksmbd_tcp_transport_ops;
@@ -193,7 +185,6 @@ static int ksmbd_tcp_new_connection(struct socket *client_sk)
 	struct sockaddr *csin;
 	int rc = 0;
 	struct tcp_transport *t;
-	struct task_struct *handler;
 
 	t = alloc_transport(client_sk);
 	if (!t) {
@@ -208,13 +199,13 @@ static int ksmbd_tcp_new_connection(struct socket *client_sk)
 		goto out_error;
 	}
 
-	handler = kthread_run(ksmbd_conn_handler_loop,
-			      KSMBD_TRANS(t)->conn,
-			      "ksmbd:%u",
-			      ksmbd_tcp_get_port(csin));
-	if (IS_ERR(handler)) {
+	KSMBD_TRANS(t)->handler = kthread_run(ksmbd_conn_handler_loop,
+					      KSMBD_TRANS(t)->conn,
+					      "ksmbd:%u",
+					      ksmbd_tcp_get_port(csin));
+	if (IS_ERR(KSMBD_TRANS(t)->handler)) {
 		pr_err("cannot start conn thread\n");
-		rc = PTR_ERR(handler);
+		rc = PTR_ERR(KSMBD_TRANS(t)->handler);
 		free_transport(t);
 	}
 	return rc;
@@ -234,7 +225,6 @@ static int ksmbd_kthread_fn(void *p)
 {
 	struct socket *client_sk = NULL;
 	struct interface *iface = (struct interface *)p;
-	struct ksmbd_conn *conn;
 	int ret;
 
 	while (!kthread_should_stop()) {
@@ -252,34 +242,6 @@ static int ksmbd_kthread_fn(void *p)
 				schedule_timeout_interruptible(HZ / 10);
 			continue;
 		}
-
-		/*
-		 * Limits repeated connections from clients with the same IP.
-		 */
-		down_read(&conn_list_lock);
-		list_for_each_entry(conn, &conn_list, conns_list)
-#if IS_ENABLED(CONFIG_IPV6)
-			if (client_sk->sk->sk_family == AF_INET6) {
-				if (memcmp(&client_sk->sk->sk_v6_daddr,
-					   &conn->inet6_addr, 16) == 0) {
-					ret = -EAGAIN;
-					break;
-				}
-			} else if (inet_sk(client_sk->sk)->inet_daddr ==
-				 conn->inet_addr) {
-				ret = -EAGAIN;
-				break;
-			}
-#else
-			if (inet_sk(client_sk->sk)->inet_daddr ==
-			    conn->inet_addr) {
-				ret = -EAGAIN;
-				break;
-			}
-#endif
-		up_read(&conn_list_lock);
-		if (ret == -EAGAIN)
-			continue;
 
 		if (server_conf.max_connections &&
 		    atomic_inc_return(&active_num_conn) >= server_conf.max_connections) {
@@ -483,10 +445,6 @@ static int create_socket(struct interface *iface)
 		sin6.sin6_family = PF_INET6;
 		sin6.sin6_addr = in6addr_any;
 		sin6.sin6_port = htons(server_conf.tcp_port);
-
-		lock_sock(ksmbd_socket->sk);
-		ksmbd_socket->sk->sk_ipv6only = false;
-		release_sock(ksmbd_socket->sk);
 	}
 
 	ksmbd_tcp_nodelay(ksmbd_socket);
@@ -659,10 +617,8 @@ int ksmbd_tcp_set_interfaces(char *ifc_list, int ifc_list_sz)
 		for_each_netdev(&init_net, netdev) {
 			if (netif_is_bridge_port(netdev))
 				continue;
-			if (!alloc_iface(kstrdup(netdev->name, GFP_KERNEL))) {
-				rtnl_unlock();
+			if (!alloc_iface(kstrdup(netdev->name, GFP_KERNEL)))
 				return -ENOMEM;
-			}
 		}
 		rtnl_unlock();
 		bind_additional_ifaces = 1;

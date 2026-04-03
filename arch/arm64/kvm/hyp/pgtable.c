@@ -475,7 +475,7 @@ static int hyp_unmap_walker(u64 addr, u64 end, u32 level, kvm_pte_t *ptep,
 
 		kvm_clear_pte(ptep);
 		dsb(ishst);
-		__tlbi_level(vae2is, __TLBI_VADDR(addr, 0), 0);
+		__tlbi_level(vae2is, __TLBI_VADDR(addr, 0), level);
 	} else {
 		if (end - addr < granule)
 			return -EINVAL;
@@ -699,14 +699,8 @@ static void stage2_put_pte(kvm_pte_t *ptep, struct kvm_s2_mmu *mmu, u64 addr,
 	 * Clear the existing PTE, and perform break-before-make with
 	 * TLB maintenance if it was valid.
 	 */
-	kvm_pte_t pte = *ptep;
-
-	if (kvm_pte_valid(pte)) {
+	if (kvm_pte_valid(*ptep)) {
 		kvm_clear_pte(ptep);
-
-		if (kvm_pte_table(pte, level))
-			level = 0;
-
 		kvm_call_hyp(__kvm_tlb_flush_vmid_ipa, mmu, addr, level);
 	}
 

@@ -166,6 +166,7 @@ config ARM64
 	select HAVE_ARCH_RANDOMIZE_KSTACK_OFFSET
 	select HAVE_ARCH_SECCOMP_FILTER
 	select HAVE_ARCH_STACKLEAK
+	select HAVE_ARCH_TASK_ISOLATION
 	select HAVE_ARCH_THREAD_STRUCT_WHITELIST
 	select HAVE_ARCH_TRACEHOOK
 	select HAVE_ARCH_TRANSPARENT_HUGEPAGE
@@ -177,6 +178,7 @@ config ARM64
 	select HAVE_CMPXCHG_DOUBLE
 	select HAVE_CMPXCHG_LOCAL
 	select HAVE_CONTEXT_TRACKING_USER
+	select HAVE_TIF_NOHZ if TASK_ISOLATION
 	select HAVE_DEBUG_KMEMLEAK
 	select HAVE_DMA_CONTIGUOUS
 	select HAVE_DYNAMIC_FTRACE
@@ -280,9 +282,9 @@ config ARCH_MMAP_RND_BITS_MAX
 	default 24 if ARM64_VA_BITS=39
 	default 27 if ARM64_VA_BITS=42
 	default 30 if ARM64_VA_BITS=47
-	default 29 if (ARM64_VA_BITS=48 || ARM64_VA_BITS=52) && ARM64_64K_PAGES
-	default 31 if (ARM64_VA_BITS=48 || ARM64_VA_BITS=52) && ARM64_16K_PAGES
-	default 33 if (ARM64_VA_BITS=48 || ARM64_VA_BITS=52)
+	default 29 if ARM64_VA_BITS=48 && ARM64_64K_PAGES
+	default 31 if ARM64_VA_BITS=48 && ARM64_16K_PAGES
+	default 33 if ARM64_VA_BITS=48
 	default 14 if ARM64_64K_PAGES
 	default 16 if ARM64_16K_PAGES
 	default 18
@@ -419,6 +421,23 @@ config ARM64_ERRATUM_826319
 	  the kernel if an affected CPU is detected.
 
 	  If unsure, say Y.
+
+config ARM64_WORKAROUND_MARVELL_38891
+       bool "Marvell CN10K TAD Errata 38891"
+       default y
+       help
+	  This option adds an alternative code sequence to work around Marvell
+	  CN10K TAD erratum 38891 and also enables kernel trap for execution of
+	  cache maintenance instruction in user space.
+
+	  An issue exists whereby if one core (core A) is accessing a cache line
+	  and a certain set of race cases occur when a second core (Core B) is
+	  executing a DC CVAC, DC CVAP or DC CVADP to the same cache line, the
+	  second core B may respond to the Last Level Cache (TAD's) request for
+	  data with an unexpected transaction type. This will cause the TAD to
+	  ignore the response, response will never come to Core A, so as soon
+	  as Core A reaches an instruction that requires that response to
+	  complete it will hang. Core B and other cores will remain responsive.
 
 config ARM64_ERRATUM_827319
 	bool "Cortex-A53: 827319: Data cache clean instructions might cause overlapping transactions to the interconnect"
@@ -983,12 +1002,8 @@ config ARM64_ERRATUM_2457168
 
 	  If unsure, say Y.
 
-config ARM64_WORKAROUND_SPECULATIVE_UNPRIV_LOAD
-	bool
-
 config ARM64_ERRATUM_2966298
 	bool "Cortex-A520: 2966298: workaround for speculatively executed unprivileged load"
-	select ARM64_WORKAROUND_SPECULATIVE_UNPRIV_LOAD
 	default y
 	help
 	  This option adds the workaround for ARM Cortex-A520 erratum 2966298.
@@ -1000,43 +1015,19 @@ config ARM64_ERRATUM_2966298
 
 	  If unsure, say Y.
 
-config ARM64_ERRATUM_3194386
-	bool "Cortex-*/Neoverse-*: workaround for MSR SSBS not self-synchronizing"
+config ARM64_ERRATUM_SSBS2
+	bool "Neoverse-N2: SSBS2: Workaround for SSBS2"
 	default y
 	help
-	  This option adds the workaround for the following errata:
+	  This option adds the workaround for Neoverse-N2 erratum SSBS2.
 
-	  * ARM Cortex-A76 erratum 3324349
-	  * ARM Cortex-A77 erratum 3324348
-	  * ARM Cortex-A78 erratum 3324344
-	  * ARM Cortex-A78C erratum 3324346
-	  * ARM Cortex-A78C erratum 3324347
-	  * ARM Cortex-A710 erratam 3324338
-	  * ARM Cortex-A715 errartum 3456084
-	  * ARM Cortex-A720 erratum 3456091
-	  * ARM Cortex-A725 erratum 3456106
-	  * ARM Cortex-X1 erratum 3324344
-	  * ARM Cortex-X1C erratum 3324346
-	  * ARM Cortex-X2 erratum 3324338
-	  * ARM Cortex-X3 erratum 3324335
-	  * ARM Cortex-X4 erratum 3194386
-	  * ARM Cortex-X925 erratum 3324334
-	  * ARM Neoverse-N1 erratum 3324349
-	  * ARM Neoverse N2 erratum 3324339
-	  * ARM Neoverse-N3 erratum 3456111
-	  * ARM Neoverse-V1 erratum 3324341
-	  * ARM Neoverse V2 erratum 3324336
-	  * ARM Neoverse-V3 erratum 3312417
+          Due to an erratum on Neoverse N2 cores, setting of PSTATE.SSBS to 0 is not fully
+          self-synchronizing.
 
-	  On affected cores "MSR SSBS, #0" instructions may not affect
-	  subsequent speculative instructions, which may permit unexepected
-	  speculative store bypassing.
+          Workaround is to add a SB barrier after every write of PSTATE.SSBS=0.
 
-	  Work around this problem by placing a Speculation Barrier (SB) or
-	  Instruction Synchronization Barrier (ISB) after kernel changes to
-	  SSBS. The presence of the SSBS special-purpose register is hidden
-	  from hwcaps and EL0 reads of ID_AA64PFR1_EL1, such that userspace
-	  will use the PR_SPEC_STORE_BYPASS prctl to change SSBS.
+          Also kernel should not advertise the presence of MRS/MSR instructions
+          to read/write SSBS from EL0.
 
 	  If unsure, say Y.
 
@@ -1148,6 +1139,44 @@ config HISILICON_ERRATUM_161600802
 
 	  If unsure, say Y.
 
+config MRVL_ERRATUM_35443
+	bool "Marvell erratum 35443"
+	default y
+	help
+	Enable workaround for erratum.
+
+	This implements gicv3-its errata workaround for 9xx silicons.
+
+	erratum 35443: only alloc 8MB table size.
+
+	Fixes the ITS table size provided by TYPER register.
+
+	If unsure, say Y.
+
+config MRVL_ERRATUM_38500
+	bool "Marvell erratum 38500"
+	default y
+	help
+	  Enable workaround for erratum 38500. T8x ARM CPU can incorrectly
+	  forward data from an older store to a younger load. When this happens
+	  L1 Dcache parity error occurs in hardware and Synchronous parity error
+	  abort is raised to software. To workaround this erratum, nops are
+	  introduced in between loads and stores.
+
+	  If unsure, say Y.
+
+config CAVIUM_ERRATUM_36890
+	bool "Cavium erratum 36890"
+	default y
+	help
+	  Enable workaround for erratum 36890.  On all ThunderX T88xx and
+	  OcteonTX1 T81/T83 and some OcteonTX2 chips, the "dc zva" instruction
+	  does not work all the time.  This happens when there are two VAs
+	  that match up with one PA; including when the two VAs match but have
+	  different asids.  The fix is to disable "dc zva" in userspace.
+
+	  If unsure, say Y.
+
 config QCOM_FALKOR_ERRATUM_1003
 	bool "Falkor E1003: Incorrect translation due to ASID change"
 	default y
@@ -1210,6 +1239,15 @@ config SOCIONEXT_SYNQUACER_PREITS
 	  If unsure, say Y.
 
 endmenu # "ARM errata workarounds via the alternatives framework"
+
+config MRVL_OCTEONTX_EL0_INTR
+	bool "Handle interrupts in EL0 via EL3"
+	default y
+	help
+	  Handle certain interrupts in EL0 with the help of EL3 firmware to achieve
+	  low latency and also not break task isolation.
+	  Generally implemented and tested on OcteonTx and its successive
+	  generation CPUs.
 
 choice
 	prompt "Page size"
@@ -1530,6 +1568,7 @@ config ARCH_FORCE_MAX_ORDER
 	int
 	default "14" if ARM64_64K_PAGES
 	default "12" if ARM64_16K_PAGES
+	default "12" if ARM64_4K_PAGES && OCTEONTX2_AF
 	default "11"
 	help
 	  The kernel memory allocator divides physically contiguous memory
@@ -1552,6 +1591,7 @@ config ARCH_FORCE_MAX_ORDER
 config UNMAP_KERNEL_AT_EL0
 	bool "Unmap kernel when running in userspace (aka \"KAISER\")" if EXPERT
 	default y
+	depends on !GTI_WATCHDOG
 	help
 	  Speculation attacks against some high-performance processors can
 	  be used to bypass MMU permission checks and leak kernel data to
@@ -1792,6 +1832,7 @@ config ARM64_LSE_ATOMICS
 
 config ARM64_USE_LSE_ATOMICS
 	bool "Atomic instructions"
+	depends on JUMP_LABEL
 	default y
 	help
 	  As part of the Large System Extensions, ARMv8.1 introduces new
@@ -1960,7 +2001,27 @@ config ARM64_TLB_RANGE
 	  The feature introduces new assembly instructions, and they were
 	  support when binutils >= 2.30.
 
-endmenu # "ARMv8.4 architectural features"
+config ARM64_MPAM
+	bool "Enable support for MPAM"
+	select ACPI_MPAM if ACPI
+	select ARCH_HAS_CPU_RESCTRL
+	select RESCTRL_FS
+	help
+	  Memory Partitioning and Monitoring is an optional extension
+	  that allows the CPUs to mark load and store transactions with
+	  labels for partition-id and performance-monitoring-group.
+	  System components, such as the caches, can use the partition-id
+	  to apply a performance policy. MPAM monitors can use the
+	  partition-id and performance-monitoring-group to measure the
+	  cache occupancy or data throughput.
+
+	  Use of this extension requires CPU support, support in the
+	  memory system components (MSC), and a description from firmware
+	  of where the MSC are in the address space.
+
+	  MPAM is exposed to user-space via the resctrl pseudo filesystem.
+
+endmenu
 
 menu "ARMv8.5 architectural features"
 
@@ -2113,7 +2174,6 @@ config ARM64_SME
 	bool "ARM Scalable Matrix Extension support"
 	default y
 	depends on ARM64_SVE
-	depends on BROKEN
 	help
 	  The Scalable Matrix Extension (SME) is an extension to the AArch64
 	  execution state which utilises a substantial subset of the SVE

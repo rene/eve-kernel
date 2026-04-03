@@ -43,20 +43,6 @@ static void rx_callback(struct mbox_client *cl, void *m)
 {
 	struct scmi_mailbox *smbox = client_to_scmi_mailbox(cl);
 
-	/*
-	 * An A2P IRQ is NOT valid when received while the platform still has
-	 * the ownership of the channel, because the platform at first releases
-	 * the SMT channel and then sends the completion interrupt.
-	 *
-	 * This addresses a possible race condition in which a spurious IRQ from
-	 * a previous timed-out reply which arrived late could be wrongly
-	 * associated with the next pending transaction.
-	 */
-	if (cl->knows_txdone && !shmem_channel_free(smbox->shmem)) {
-		dev_warn(smbox->cinfo->dev, "Ignoring spurious A2P IRQ !\n");
-		return;
-	}
-
 	scmi_rx_callback(smbox->cinfo, shmem_read_header(smbox->shmem), NULL);
 }
 
@@ -252,7 +238,7 @@ static const struct scmi_transport_ops scmi_mailbox_ops = {
 
 const struct scmi_desc scmi_mailbox_desc = {
 	.ops = &scmi_mailbox_ops,
-	.max_rx_timeout_ms = 30, /* We may increase this if required */
-	.max_msg = 20, /* Limited by MBOX_TX_QUEUE_LEN */
-	.max_msg_size = 128,
+	.max_rx_timeout_ms = 500, /* We may increase this if required */
+	.max_msg = 40, /* Limited by MBOX_TX_QUEUE_LEN */
+	.max_msg_size = 256,
 };

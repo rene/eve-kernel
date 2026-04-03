@@ -40,7 +40,6 @@
 #include "ioapic.h"
 #include "trace.h"
 #include "x86.h"
-#include "xen.h"
 #include "cpuid.h"
 #include "hyperv.h"
 
@@ -339,10 +338,8 @@ static inline void apic_set_spiv(struct kvm_lapic *apic, u32 val)
 	}
 
 	/* Check if there are APF page ready requests pending */
-	if (enabled) {
+	if (enabled)
 		kvm_make_request(KVM_REQ_APF_READY, apic->vcpu);
-		kvm_xen_sw_enable_lapic(apic->vcpu);
-	}
 }
 
 static inline void kvm_apic_set_xapic_id(struct kvm_lapic *apic, u8 id)
@@ -587,7 +584,7 @@ static inline void apic_set_isr(int vec, struct kvm_lapic *apic)
 	 * just set SVI.
 	 */
 	if (unlikely(apic->apicv_active))
-		static_call_cond(kvm_x86_hwapic_isr_update)(apic->vcpu, vec);
+		static_call_cond(kvm_x86_hwapic_isr_update)(vec);
 	else {
 		++apic->isr_count;
 		BUG_ON(apic->isr_count > MAX_APIC_VECTOR);
@@ -632,24 +629,13 @@ static inline void apic_clear_isr(int vec, struct kvm_lapic *apic)
 	 * and must be left alone.
 	 */
 	if (unlikely(apic->apicv_active))
-		static_call_cond(kvm_x86_hwapic_isr_update)(apic->vcpu, apic_find_highest_isr(apic));
+		static_call_cond(kvm_x86_hwapic_isr_update)(apic_find_highest_isr(apic));
 	else {
 		--apic->isr_count;
 		BUG_ON(apic->isr_count < 0);
 		apic->highest_isr_cache = -1;
 	}
 }
-
-void kvm_apic_update_hwapic_isr(struct kvm_vcpu *vcpu)
-{
-	struct kvm_lapic *apic = vcpu->arch.apic;
-
-	if (WARN_ON_ONCE(!lapic_in_kernel(vcpu)) || !apic->apicv_active)
-		return;
-
-	static_call(kvm_x86_hwapic_isr_update)(vcpu, apic_find_highest_isr(apic));
-}
-EXPORT_SYMBOL_GPL(kvm_apic_update_hwapic_isr);
 
 int kvm_lapic_find_highest_irr(struct kvm_vcpu *vcpu)
 {
@@ -683,8 +669,6 @@ static int __pv_send_ipi(unsigned long *ipi_bitmap, struct kvm_apic_map *map,
 
 	if (min > map->max_apic_id)
 		return 0;
-
-	min = array_index_nospec(min, map->max_apic_id + 1);
 
 	for_each_set_bit(i, ipi_bitmap,
 		min((u32)BITS_PER_LONG, (map->max_apic_id - min + 1))) {
@@ -1856,12 +1840,8 @@ static bool set_target_expiration(struct kvm_lapic *apic, u32 count_reg)
 		if (unlikely(count_reg != APIC_TMICT)) {
 			deadline = tmict_to_ns(apic,
 				     kvm_lapic_get_reg(apic, count_reg));
-			if (unlikely(deadline <= 0)) {
-				if (apic_lvtt_period(apic))
-					deadline = apic->lapic_timer.period;
-				else
-					deadline = 0;
-			}
+			if (unlikely(deadline <= 0))
+				deadline = apic->lapic_timer.period;
 			else if (unlikely(deadline > apic->lapic_timer.period)) {
 				pr_info_ratelimited(
 				    "kvm: vcpu %i: requested lapic timer restore with "
@@ -2310,43 +2290,6 @@ void kvm_lapic_set_eoi(struct kvm_vcpu *vcpu)
 }
 EXPORT_SYMBOL_GPL(kvm_lapic_set_eoi);
 
-#define X2APIC_ICR_RESERVED_BITS (GENMASK_ULL(31, 20) | GENMASK_ULL(17, 16) | BIT(13))
-
-int kvm_x2apic_icr_write(struct kvm_lapic *apic, u64 data)
-{
-	if (data & X2APIC_ICR_RESERVED_BITS)
-		return 1;
-
-	/*
-	 * The BUSY bit is reserved on both Intel and AMD in x2APIC mode, but
-	 * only AMD requires it to be zero, Intel essentially just ignores the
-	 * bit.  And if IPI virtualization (Intel) or x2AVIC (AMD) is enabled,
-	 * the CPU performs the reserved bits checks, i.e. the underlying CPU
-	 * behavior will "win".  Arbitrarily clear the BUSY bit, as there is no
-	 * sane way to provide consistent behavior with respect to hardware.
-	 */
-	data &= ~APIC_ICR_BUSY;
-
-	kvm_apic_send_ipi(apic, (u32)data, (u32)(data >> 32));
-	if (kvm_x86_ops.x2apic_icr_is_split) {
-		kvm_lapic_set_reg(apic, APIC_ICR, data);
-		kvm_lapic_set_reg(apic, APIC_ICR2, data >> 32);
-	} else {
-		kvm_lapic_set_reg64(apic, APIC_ICR, data);
-	}
-	trace_kvm_apic_write(APIC_ICR, data);
-	return 0;
-}
-
-static u64 kvm_x2apic_icr_read(struct kvm_lapic *apic)
-{
-	if (kvm_x86_ops.x2apic_icr_is_split)
-		return (u64)kvm_lapic_get_reg(apic, APIC_ICR) |
-		       (u64)kvm_lapic_get_reg(apic, APIC_ICR2) << 32;
-
-	return kvm_lapic_get_reg64(apic, APIC_ICR);
-}
-
 /* emulate APIC access in a trap manner */
 void kvm_apic_write_nodecode(struct kvm_vcpu *vcpu, u32 offset)
 {
@@ -2364,7 +2307,7 @@ void kvm_apic_write_nodecode(struct kvm_vcpu *vcpu, u32 offset)
 	 * maybe-unecessary write, and both are in the noise anyways.
 	 */
 	if (apic_x2apic_mode(apic) && offset == APIC_ICR)
-		WARN_ON_ONCE(kvm_x2apic_icr_write(apic, kvm_x2apic_icr_read(apic)));
+		kvm_x2apic_icr_write(apic, kvm_lapic_get_reg64(apic, APIC_ICR));
 	else
 		kvm_lapic_reg_write(apic, offset, kvm_lapic_get_reg(apic, offset));
 }
@@ -2480,26 +2423,19 @@ void kvm_apic_update_apicv(struct kvm_vcpu *vcpu)
 {
 	struct kvm_lapic *apic = vcpu->arch.apic;
 
-	/*
-	 * When APICv is enabled, KVM must always search the IRR for a pending
-	 * IRQ, as other vCPUs and devices can set IRR bits even if the vCPU
-	 * isn't running.  If APICv is disabled, KVM _should_ search the IRR
-	 * for a pending IRQ.  But KVM currently doesn't ensure *all* hardware,
-	 * e.g. CPUs and IOMMUs, has seen the change in state, i.e. searching
-	 * the IRR at this time could race with IRQ delivery from hardware that
-	 * still sees APICv as being enabled.
-	 *
-	 * FIXME: Ensure other vCPUs and devices observe the change in APICv
-	 *        state prior to updating KVM's metadata caches, so that KVM
-	 *        can safely search the IRR and set irr_pending accordingly.
-	 */
-	apic->irr_pending = true;
-
-	if (apic->apicv_active)
+	if (apic->apicv_active) {
+		/* irr_pending is always true when apicv is activated. */
+		apic->irr_pending = true;
 		apic->isr_count = 1;
-	else
+	} else {
+		/*
+		 * Don't clear irr_pending, searching the IRR can race with
+		 * updates from the CPU as APICv is still active from hardware's
+		 * perspective.  The flag will be cleared as appropriate when
+		 * KVM injects the interrupt.
+		 */
 		apic->isr_count = count_vectors(apic->regs + APIC_ISR);
-
+	}
 	apic->highest_isr_cache = -1;
 }
 EXPORT_SYMBOL_GPL(kvm_apic_update_apicv);
@@ -2567,7 +2503,7 @@ void kvm_lapic_reset(struct kvm_vcpu *vcpu, bool init_event)
 	if (apic->apicv_active) {
 		static_call_cond(kvm_x86_apicv_post_state_restore)(vcpu);
 		static_call_cond(kvm_x86_hwapic_irr_update)(vcpu, -1);
-		static_call_cond(kvm_x86_hwapic_isr_update)(vcpu, -1);
+		static_call_cond(kvm_x86_hwapic_isr_update)(-1);
 	}
 
 	vcpu->arch.apic_arb_prio = 0;
@@ -2609,8 +2545,7 @@ int kvm_apic_local_deliver(struct kvm_lapic *apic, int lvt_type)
 		trig_mode = reg & APIC_LVT_LEVEL_TRIGGER;
 
 		r = __apic_accept_irq(apic, mode, vector, 1, trig_mode, NULL);
-		if (r && lvt_type == APIC_LVTPC &&
-		    guest_cpuid_is_intel_compatible(apic->vcpu))
+		if (r && lvt_type == APIC_LVTPC)
 			kvm_lapic_set_reg(apic, APIC_LVTPC, reg | APIC_LVT_MASKED);
 		return r;
 	}
@@ -2787,22 +2722,18 @@ static int kvm_apic_state_fixup(struct kvm_vcpu *vcpu,
 
 		/*
 		 * In x2APIC mode, the LDR is fixed and based on the id.  And
-		 * if the ICR is _not_ split, ICR is internally a single 64-bit
-		 * register, but needs to be split to ICR+ICR2 in userspace for
-		 * backwards compatibility.
+		 * ICR is internally a single 64-bit register, but needs to be
+		 * split to ICR+ICR2 in userspace for backwards compatibility.
 		 */
-		if (set)
+		if (set) {
 			*ldr = kvm_apic_calc_x2apic_ldr(*id);
 
-		if (!kvm_x86_ops.x2apic_icr_is_split) {
-			if (set) {
-				icr = __kvm_lapic_get_reg(s->regs, APIC_ICR) |
-				      (u64)__kvm_lapic_get_reg(s->regs, APIC_ICR2) << 32;
-				__kvm_lapic_set_reg64(s->regs, APIC_ICR, icr);
-			} else {
-				icr = __kvm_lapic_get_reg64(s->regs, APIC_ICR);
-				__kvm_lapic_set_reg(s->regs, APIC_ICR2, icr >> 32);
-			}
+			icr = __kvm_lapic_get_reg(s->regs, APIC_ICR) |
+			      (u64)__kvm_lapic_get_reg(s->regs, APIC_ICR2) << 32;
+			__kvm_lapic_set_reg64(s->regs, APIC_ICR, icr);
+		} else {
+			icr = __kvm_lapic_get_reg64(s->regs, APIC_ICR);
+			__kvm_lapic_set_reg(s->regs, APIC_ICR2, icr >> 32);
 		}
 	}
 
@@ -2860,7 +2791,7 @@ int kvm_apic_set_state(struct kvm_vcpu *vcpu, struct kvm_lapic_state *s)
 	if (apic->apicv_active) {
 		static_call_cond(kvm_x86_apicv_post_state_restore)(vcpu);
 		static_call_cond(kvm_x86_hwapic_irr_update)(vcpu, apic_find_highest_irr(apic));
-		static_call_cond(kvm_x86_hwapic_isr_update)(vcpu, apic_find_highest_isr(apic));
+		static_call_cond(kvm_x86_hwapic_isr_update)(apic_find_highest_isr(apic));
 	}
 	kvm_make_request(KVM_REQ_EVENT, vcpu);
 	if (ioapic_in_kernel(vcpu->kvm))
@@ -2997,12 +2928,22 @@ int kvm_lapic_set_vapic_addr(struct kvm_vcpu *vcpu, gpa_t vapic_addr)
 	return 0;
 }
 
+int kvm_x2apic_icr_write(struct kvm_lapic *apic, u64 data)
+{
+	data &= ~APIC_ICR_BUSY;
+
+	kvm_apic_send_ipi(apic, (u32)data, (u32)(data >> 32));
+	kvm_lapic_set_reg64(apic, APIC_ICR, data);
+	trace_kvm_apic_write(APIC_ICR, data);
+	return 0;
+}
+
 static int kvm_lapic_msr_read(struct kvm_lapic *apic, u32 reg, u64 *data)
 {
 	u32 low;
 
 	if (reg == APIC_ICR) {
-		*data = kvm_x2apic_icr_read(apic);
+		*data = kvm_lapic_get_reg64(apic, APIC_ICR);
 		return 0;
 	}
 

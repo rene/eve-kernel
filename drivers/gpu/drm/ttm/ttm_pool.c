@@ -383,7 +383,7 @@ static void ttm_pool_free_range(struct ttm_pool *pool, struct ttm_tt *tt,
 				enum ttm_caching caching,
 				pgoff_t start_page, pgoff_t end_page)
 {
-	struct page **pages = &tt->pages[start_page];
+	struct page **pages = tt->pages;
 	unsigned int order;
 	pgoff_t i, nr;
 
@@ -592,6 +592,7 @@ void ttm_pool_fini(struct ttm_pool *pool)
 	synchronize_shrinkers();
 }
 
+/* As long as pages are available make sure to release at least one */
 static unsigned long ttm_pool_shrinker_scan(struct shrinker *shrink,
 					    struct shrink_control *sc)
 {
@@ -599,12 +600,9 @@ static unsigned long ttm_pool_shrinker_scan(struct shrinker *shrink,
 
 	do
 		num_freed += ttm_pool_shrink();
-	while (num_freed < sc->nr_to_scan &&
-	       atomic_long_read(&allocated_pages));
+	while (!num_freed && atomic_long_read(&allocated_pages));
 
-	sc->nr_scanned = num_freed;
-
-	return num_freed ?: SHRINK_STOP;
+	return num_freed;
 }
 
 /* Return the number of pages available or SHRINK_EMPTY if we have none */

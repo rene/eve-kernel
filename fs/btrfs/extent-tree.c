@@ -179,14 +179,6 @@ search_again:
 			ei = btrfs_item_ptr(leaf, path->slots[0],
 					    struct btrfs_extent_item);
 			num_refs = btrfs_extent_refs(leaf, ei);
-			if (unlikely(num_refs == 0)) {
-				ret = -EUCLEAN;
-				btrfs_err(fs_info,
-			"unexpected zero reference count for extent item (%llu %u %llu)",
-					  key.objectid, key.type, key.offset);
-				btrfs_abort_transaction(trans, ret);
-				goto out_free;
-			}
 			extent_flags = btrfs_extent_flags(leaf, ei);
 		} else {
 			ret = -EINVAL;
@@ -198,6 +190,8 @@ search_again:
 
 			goto out_free;
 		}
+
+		BUG_ON(num_refs == 0);
 	} else {
 		num_refs = 0;
 		extent_flags = 0;
@@ -227,19 +221,10 @@ search_again:
 			goto search_again;
 		}
 		spin_lock(&head->lock);
-		if (head->extent_op && head->extent_op->update_flags) {
+		if (head->extent_op && head->extent_op->update_flags)
 			extent_flags |= head->extent_op->flags_to_set;
-		} else if (unlikely(num_refs == 0)) {
-			spin_unlock(&head->lock);
-			mutex_unlock(&head->mutex);
-			spin_unlock(&delayed_refs->lock);
-			ret = -EUCLEAN;
-			btrfs_err(fs_info,
-			  "unexpected zero reference count for extent %llu (%s)",
-				  bytenr, metadata ? "metadata" : "data");
-			btrfs_abort_transaction(trans, ret);
-			goto out_free;
-		}
+		else
+			BUG_ON(num_refs == 0);
 
 		num_refs += head->ref_mod;
 		spin_unlock(&head->lock);
@@ -1224,8 +1209,7 @@ static int btrfs_issue_discard(struct block_device *bdev, u64 start, u64 len,
 	u64 bytes_left, end;
 	u64 aligned_start = ALIGN(start, 1 << 9);
 
-	/* Adjust the range to be aligned to 512B sectors if necessary. */
-	if (start != aligned_start) {
+	if (WARN_ON(start != aligned_start)) {
 		len -= aligned_start - start;
 		len = round_down(len, 1 << 9);
 		start = aligned_start;
@@ -2387,7 +2371,7 @@ int btrfs_cross_ref_exist(struct btrfs_root *root, u64 objectid, u64 offset,
 			goto out;
 
 		ret = check_delayed_ref(root, path, objectid, offset, bytenr);
-	} while (ret == -EAGAIN && !path->nowait);
+	} while (ret == -EAGAIN);
 
 out:
 	btrfs_release_path(path);
@@ -2746,8 +2730,7 @@ static int unpin_extent_range(struct btrfs_fs_info *fs_info,
 			readonly = true;
 		} else if (btrfs_is_zoned(fs_info)) {
 			/* Need reset before reusing in a zoned block group */
-			btrfs_space_info_update_bytes_zone_unusable(fs_info, space_info,
-								    len);
+			space_info->bytes_zone_unusable += len;
 			readonly = true;
 		}
 		spin_unlock(&cache->lock);
@@ -4223,42 +4206,6 @@ static int prepare_allocation_clustered(struct btrfs_fs_info *fs_info,
 	return 0;
 }
 
-static int prepare_allocation_zoned(struct btrfs_fs_info *fs_info,
-				    struct find_free_extent_ctl *ffe_ctl)
-{
-	if (ffe_ctl->for_treelog) {
-		spin_lock(&fs_info->treelog_bg_lock);
-		if (fs_info->treelog_bg)
-			ffe_ctl->hint_byte = fs_info->treelog_bg;
-		spin_unlock(&fs_info->treelog_bg_lock);
-	} else if (ffe_ctl->for_data_reloc) {
-		spin_lock(&fs_info->relocation_bg_lock);
-		if (fs_info->data_reloc_bg)
-			ffe_ctl->hint_byte = fs_info->data_reloc_bg;
-		spin_unlock(&fs_info->relocation_bg_lock);
-	} else if (ffe_ctl->flags & BTRFS_BLOCK_GROUP_DATA) {
-		struct btrfs_block_group *block_group;
-
-		spin_lock(&fs_info->zone_active_bgs_lock);
-		list_for_each_entry(block_group, &fs_info->zone_active_bgs, active_bg_list) {
-			/*
-			 * No lock is OK here because avail is monotinically
-			 * decreasing, and this is just a hint.
-			 */
-			u64 avail = block_group->zone_capacity - block_group->alloc_offset;
-
-			if (block_group_bits(block_group, ffe_ctl->flags) &&
-			    avail >= ffe_ctl->num_bytes) {
-				ffe_ctl->hint_byte = block_group->start;
-				break;
-			}
-		}
-		spin_unlock(&fs_info->zone_active_bgs_lock);
-	}
-
-	return 0;
-}
-
 static int prepare_allocation(struct btrfs_fs_info *fs_info,
 			      struct find_free_extent_ctl *ffe_ctl,
 			      struct btrfs_space_info *space_info,
@@ -4269,7 +4216,19 @@ static int prepare_allocation(struct btrfs_fs_info *fs_info,
 		return prepare_allocation_clustered(fs_info, ffe_ctl,
 						    space_info, ins);
 	case BTRFS_EXTENT_ALLOC_ZONED:
-		return prepare_allocation_zoned(fs_info, ffe_ctl);
+		if (ffe_ctl->for_treelog) {
+			spin_lock(&fs_info->treelog_bg_lock);
+			if (fs_info->treelog_bg)
+				ffe_ctl->hint_byte = fs_info->treelog_bg;
+			spin_unlock(&fs_info->treelog_bg_lock);
+		}
+		if (ffe_ctl->for_data_reloc) {
+			spin_lock(&fs_info->relocation_bg_lock);
+			if (fs_info->data_reloc_bg)
+				ffe_ctl->hint_byte = fs_info->data_reloc_bg;
+			spin_unlock(&fs_info->relocation_bg_lock);
+		}
+		return 0;
 	default:
 		BUG();
 	}
@@ -5156,15 +5115,7 @@ static noinline void reada_walk_down(struct btrfs_trans_handle *trans,
 		/* We don't care about errors in readahead. */
 		if (ret < 0)
 			continue;
-
-		/*
-		 * This could be racey, it's conceivable that we raced and end
-		 * up with a bogus refs count, if that's the case just skip, if
-		 * we are actually corrupt we will notice when we look up
-		 * everything again with our locks.
-		 */
-		if (refs == 0)
-			continue;
+		BUG_ON(refs == 0);
 
 		if (wc->stage == DROP_REFERENCE) {
 			if (refs == 1)
@@ -5223,18 +5174,15 @@ static noinline int walk_down_proc(struct btrfs_trans_handle *trans,
 	if (lookup_info &&
 	    ((wc->stage == DROP_REFERENCE && wc->refs[level] != 1) ||
 	     (wc->stage == UPDATE_BACKREF && !(wc->flags[level] & flag)))) {
-		ASSERT(path->locks[level]);
+		BUG_ON(!path->locks[level]);
 		ret = btrfs_lookup_extent_info(trans, fs_info,
 					       eb->start, level, 1,
 					       &wc->refs[level],
 					       &wc->flags[level]);
+		BUG_ON(ret == -ENOMEM);
 		if (ret)
 			return ret;
-		if (unlikely(wc->refs[level] == 0)) {
-			btrfs_err(fs_info, "bytenr %llu has 0 references, expect > 0",
-				  eb->start);
-			return -EUCLEAN;
-		}
+		BUG_ON(wc->refs[level] == 0);
 	}
 
 	if (wc->stage == DROP_REFERENCE) {
@@ -5250,7 +5198,7 @@ static noinline int walk_down_proc(struct btrfs_trans_handle *trans,
 
 	/* wc->stage == UPDATE_BACKREF */
 	if (!(wc->flags[level] & flag)) {
-		ASSERT(path->locks[level]);
+		BUG_ON(!path->locks[level]);
 		ret = btrfs_inc_ref(trans, root, eb, 1);
 		BUG_ON(ret); /* -ENOMEM */
 		ret = btrfs_dec_ref(trans, root, eb, 0);
@@ -5364,9 +5312,8 @@ static noinline int do_walk_down(struct btrfs_trans_handle *trans,
 		goto out_unlock;
 
 	if (unlikely(wc->refs[level - 1] == 0)) {
-		btrfs_err(fs_info, "bytenr %llu has 0 references, expect > 0",
-			  bytenr);
-		ret = -EUCLEAN;
+		btrfs_err(fs_info, "Missing references.");
+		ret = -EIO;
 		goto out_unlock;
 	}
 	*lookup_info = 0;
@@ -5567,12 +5514,7 @@ static noinline int walk_up_proc(struct btrfs_trans_handle *trans,
 				path->locks[level] = 0;
 				return ret;
 			}
-			if (unlikely(wc->refs[level] == 0)) {
-				btrfs_tree_unlock_rw(eb, path->locks[level]);
-				btrfs_err(fs_info, "bytenr %llu has 0 references, expect > 0",
-					  eb->start);
-				return -EUCLEAN;
-			}
+			BUG_ON(wc->refs[level] == 0);
 			if (wc->refs[level] == 1) {
 				btrfs_tree_unlock_rw(eb, path->locks[level]);
 				path->locks[level] = 0;
@@ -5590,10 +5532,7 @@ static noinline int walk_up_proc(struct btrfs_trans_handle *trans,
 				ret = btrfs_dec_ref(trans, root, eb, 1);
 			else
 				ret = btrfs_dec_ref(trans, root, eb, 0);
-			if (ret) {
-				btrfs_abort_transaction(trans, ret);
-				return ret;
-			}
+			BUG_ON(ret); /* -ENOMEM */
 			if (is_fstree(root->root_key.objectid)) {
 				ret = btrfs_qgroup_trace_leaf_items(trans, eb);
 				if (ret) {

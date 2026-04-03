@@ -410,7 +410,8 @@ out:
 			rb_entry(node, struct regmap_range_node, node);
 
 		/* If there's nothing in the cache there's nothing to sync */
-		if (regcache_read(map, this->selector_reg, &i) != 0)
+		ret = regcache_read(map, this->selector_reg, &i);
+		if (ret != 0)
 			continue;
 
 		ret = _regmap_write(map, this->selector_reg, i);

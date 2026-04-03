@@ -115,6 +115,7 @@ struct intel_sdvo {
 
 	enum port port;
 
+	bool has_hdmi_monitor;
 	bool has_hdmi_audio;
 
 	/* DDC bus used by this SDVO encoder */
@@ -1277,13 +1278,10 @@ static void i9xx_adjust_sdvo_tv_clock(struct intel_crtc_state *pipe_config)
 	pipe_config->clock_set = true;
 }
 
-static bool intel_has_hdmi_sink(struct intel_sdvo_connector *intel_sdvo_connector,
+static bool intel_has_hdmi_sink(struct intel_sdvo *sdvo,
 				const struct drm_connector_state *conn_state)
 {
-	struct drm_connector *connector = conn_state->connector;
-
-	return intel_sdvo_connector->is_hdmi &&
-		connector->display_info.is_hdmi &&
+	return sdvo->has_hdmi_monitor &&
 		READ_ONCE(to_intel_digital_connector_state(conn_state)->force_audio) != HDMI_AUDIO_OFF_DVI;
 }
 
@@ -1362,7 +1360,7 @@ static int intel_sdvo_compute_config(struct intel_encoder *encoder,
 	pipe_config->pixel_multiplier =
 		intel_sdvo_get_pixel_multiplier(adjusted_mode);
 
-	pipe_config->has_hdmi_sink = intel_has_hdmi_sink(intel_sdvo_connector, conn_state);
+	pipe_config->has_hdmi_sink = intel_has_hdmi_sink(intel_sdvo, conn_state);
 
 	if (pipe_config->has_hdmi_sink) {
 		if (intel_sdvo_state->base.force_audio == HDMI_AUDIO_AUTO)
@@ -1873,18 +1871,12 @@ static enum drm_mode_status
 intel_sdvo_mode_valid(struct drm_connector *connector,
 		      struct drm_display_mode *mode)
 {
-	struct drm_i915_private *i915 = to_i915(connector->dev);
 	struct intel_sdvo *intel_sdvo = intel_attached_sdvo(to_intel_connector(connector));
 	struct intel_sdvo_connector *intel_sdvo_connector =
 		to_intel_sdvo_connector(connector);
-	bool has_hdmi_sink = intel_has_hdmi_sink(intel_sdvo_connector, connector->state);
-	int max_dotclk = i915->max_dotclk_freq;
-	enum drm_mode_status status;
+	int max_dotclk = to_i915(connector->dev)->max_dotclk_freq;
+	bool has_hdmi_sink = intel_has_hdmi_sink(intel_sdvo, connector->state);
 	int clock = mode->clock;
-
-	status = intel_cpu_transcoder_mode_valid(i915, mode);
-	if (status != MODE_OK)
-		return status;
 
 	if (mode->flags & DRM_MODE_FLAG_DBLSCAN)
 		return MODE_NO_DBLESCAN;
@@ -2072,6 +2064,7 @@ intel_sdvo_tmds_sink_detect(struct drm_connector *connector)
 		if (edid->input & DRM_EDID_INPUT_DIGITAL) {
 			status = connector_status_connected;
 			if (intel_sdvo_connector->is_hdmi) {
+				intel_sdvo->has_hdmi_monitor = drm_detect_hdmi_monitor(edid);
 				intel_sdvo->has_hdmi_audio = drm_detect_monitor_audio(edid);
 			}
 		} else
@@ -2123,6 +2116,7 @@ intel_sdvo_detect(struct drm_connector *connector, bool force)
 
 	intel_sdvo->attached_output = response;
 
+	intel_sdvo->has_hdmi_monitor = false;
 	intel_sdvo->has_hdmi_audio = false;
 
 	if ((intel_sdvo_connector->output_flag & response) == 0)

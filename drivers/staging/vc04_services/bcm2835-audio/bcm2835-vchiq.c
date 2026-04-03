@@ -101,7 +101,7 @@ static enum vchiq_status audio_vchi_callback(struct vchiq_instance *vchiq_instan
 	struct vc_audio_msg *m;
 
 	if (reason != VCHIQ_MESSAGE_AVAILABLE)
-		return 0;
+		return VCHIQ_SUCCESS;
 
 	m = (void *)header->data;
 	if (m->type == VC_AUDIO_MSG_TYPE_RESULT) {
@@ -119,7 +119,7 @@ static enum vchiq_status audio_vchi_callback(struct vchiq_instance *vchiq_instan
 	}
 
 	vchiq_release_message(vchiq_instance, instance->service_handle, header);
-	return 0;
+	return VCHIQ_SUCCESS;
 }
 
 static int

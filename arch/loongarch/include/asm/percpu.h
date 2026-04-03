@@ -14,11 +14,7 @@
  * loaded. Tell the compiler this fact when using explicit relocs.
  */
 #if defined(MODULE) && defined(CONFIG_AS_HAS_EXPLICIT_RELOCS)
-# if __has_attribute(model)
-#  define PER_CPU_ATTRIBUTES __attribute__((model("extreme")))
-# else
-#  error compiler support for the model attribute is necessary when a recent assembler is used
-# endif
+#define PER_CPU_ATTRIBUTES    __attribute__((model("extreme")))
 #endif
 
 /* Use r21 for fast access */
@@ -29,12 +25,7 @@ static inline void set_my_cpu_offset(unsigned long off)
 	__my_cpu_offset = off;
 	csr_write64(off, PERCPU_BASE_KS);
 }
-
-#define __my_cpu_offset					\
-({							\
-	__asm__ __volatile__("":"+r"(__my_cpu_offset));	\
-	__my_cpu_offset;				\
-})
+#define __my_cpu_offset __my_cpu_offset
 
 #define PERCPU_OP(op, asm_op, c_op)					\
 static __always_inline unsigned long __percpu_##op(void *ptr,		\

@@ -36,54 +36,23 @@ DEFINE_PER_CPU(unsigned long, kvm_hyp_vector);
 
 extern void kvm_nvhe_prepare_backtrace(unsigned long fp, unsigned long pc);
 
-static void __activate_cptr_traps(struct kvm_vcpu *vcpu)
-{
-	u64 val = CPTR_EL2_TAM;	/* Same bit irrespective of E2H */
-
-	if (!guest_owns_fp_regs(vcpu))
-		__activate_traps_fpsimd32(vcpu);
-
-	/* !hVHE case upstream */
-	if (1) {
-		val |= CPTR_EL2_TTA | CPTR_NVHE_EL2_RES1;
-
-		/*
-		 * Always trap SME since it's not supported in KVM.
-		 * TSM is RES1 if SME isn't implemented.
-		 */
-		val |= CPTR_EL2_TSM;
-
-		if (!vcpu_has_sve(vcpu) || !guest_owns_fp_regs(vcpu))
-			val |= CPTR_EL2_TZ;
-
-		if (!guest_owns_fp_regs(vcpu))
-			val |= CPTR_EL2_TFP;
-
-		write_sysreg(val, cptr_el2);
-	}
-}
-
-static void __deactivate_cptr_traps(struct kvm_vcpu *vcpu)
-{
-	/* !hVHE case upstream */
-	if (1) {
-		u64 val = CPTR_NVHE_EL2_RES1;
-
-		if (!cpus_have_final_cap(ARM64_SVE))
-			val |= CPTR_EL2_TZ;
-		if (!cpus_have_final_cap(ARM64_SME))
-			val |= CPTR_EL2_TSM;
-
-		write_sysreg(val, cptr_el2);
-	}
-}
-
 static void __activate_traps(struct kvm_vcpu *vcpu)
 {
+	u64 val;
+
 	___activate_traps(vcpu);
 	__activate_traps_common(vcpu);
-	__activate_cptr_traps(vcpu);
 
+	val = vcpu->arch.cptr_el2;
+	val |= CPTR_EL2_TTA | CPTR_EL2_TAM;
+	if (!guest_owns_fp_regs(vcpu)) {
+		val |= CPTR_EL2_TFP | CPTR_EL2_TZ;
+		__activate_traps_fpsimd32(vcpu);
+	}
+	if (cpus_have_final_cap(ARM64_SME))
+		val |= CPTR_EL2_TSM;
+
+	write_sysreg(val, cptr_el2);
 	write_sysreg(__this_cpu_read(kvm_hyp_vector), vbar_el2);
 
 	if (cpus_have_final_cap(ARM64_WORKAROUND_SPECULATIVE_AT)) {
@@ -104,6 +73,7 @@ static void __activate_traps(struct kvm_vcpu *vcpu)
 static void __deactivate_traps(struct kvm_vcpu *vcpu)
 {
 	extern char __kvm_hyp_host_vector[];
+	u64 cptr;
 
 	___deactivate_traps(vcpu);
 
@@ -128,7 +98,13 @@ static void __deactivate_traps(struct kvm_vcpu *vcpu)
 
 	write_sysreg(this_cpu_ptr(&kvm_init_params)->hcr_el2, hcr_el2);
 
-	__deactivate_cptr_traps(vcpu);
+	cptr = CPTR_EL2_DEFAULT;
+	if (vcpu_has_sve(vcpu) && (vcpu->arch.fp_state == FP_STATE_GUEST_OWNED))
+		cptr |= CPTR_EL2_TZ;
+	if (cpus_have_final_cap(ARM64_SME))
+		cptr &= ~CPTR_EL2_TSM;
+
+	write_sysreg(cptr, cptr_el2);
 	write_sysreg(__kvm_hyp_host_vector, vbar_el2);
 }
 
@@ -233,22 +209,21 @@ static const exit_handler_fn *kvm_get_exit_handler_array(struct kvm_vcpu *vcpu)
 	return hyp_exit_handlers;
 }
 
-static inline bool fixup_guest_exit(struct kvm_vcpu *vcpu, u64 *exit_code)
+/*
+ * Some guests (e.g., protected VMs) are not be allowed to run in AArch32.
+ * The ARMv8 architecture does not give the hypervisor a mechanism to prevent a
+ * guest from dropping to AArch32 EL0 if implemented by the CPU. If the
+ * hypervisor spots a guest in such a state ensure it is handled, and don't
+ * trust the host to spot or fix it.  The check below is based on the one in
+ * kvm_arch_vcpu_ioctl_run().
+ *
+ * Returns false if the guest ran in AArch32 when it shouldn't have, and
+ * thus should exit to the host, or true if a the guest run loop can continue.
+ */
+static void early_exit_filter(struct kvm_vcpu *vcpu, u64 *exit_code)
 {
-	const exit_handler_fn *handlers = kvm_get_exit_handler_array(vcpu);
 	struct kvm *kvm = kern_hyp_va(vcpu->kvm);
 
-	synchronize_vcpu_pstate(vcpu, exit_code);
-
-	/*
-	 * Some guests (e.g., protected VMs) are not be allowed to run in
-	 * AArch32.  The ARMv8 architecture does not give the hypervisor a
-	 * mechanism to prevent a guest from dropping to AArch32 EL0 if
-	 * implemented by the CPU. If the hypervisor spots a guest in such a
-	 * state ensure it is handled, and don't trust the host to spot or fix
-	 * it.  The check below is based on the one in
-	 * kvm_arch_vcpu_ioctl_run().
-	 */
 	if (kvm_vm_is_protected(kvm) && vcpu_mode_is_32bit(vcpu)) {
 		/*
 		 * As we have caught the guest red-handed, decide that it isn't
@@ -261,8 +236,13 @@ static inline bool fixup_guest_exit(struct kvm_vcpu *vcpu, u64 *exit_code)
 		*exit_code &= BIT(ARM_EXIT_WITH_SERROR_BIT);
 		*exit_code |= ARM_EXCEPTION_IL;
 	}
+}
 
-	return __fixup_guest_exit(vcpu, exit_code, handlers);
+/* Use the host thread's partid and pmg for world switch */
+static void __mpam_copy_el1_to_el2(void)
+{
+	if (IS_ENABLED(CONFIG_ARM64_MPAM) && mpam_cpus_have_feature())
+		write_sysreg_s(read_sysreg_s(SYS_MPAM1_EL1), SYS_MPAM2_EL2);
 }
 
 /* Switch to the guest for legacy non-VHE systems */
@@ -273,6 +253,8 @@ int __kvm_vcpu_run(struct kvm_vcpu *vcpu)
 	struct kvm_s2_mmu *mmu;
 	bool pmu_switch_needed;
 	u64 exit_code;
+
+	__mpam_copy_el1_to_el2();
 
 	/*
 	 * Having IRQs masked via PMR when entering the guest means the GIC
@@ -322,6 +304,7 @@ int __kvm_vcpu_run(struct kvm_vcpu *vcpu)
 	__timer_enable_traps(vcpu);
 
 	__debug_switch_to_guest(vcpu);
+	__mpam_guest_load();
 
 	do {
 		/* Jump in the fire! */
@@ -332,6 +315,7 @@ int __kvm_vcpu_run(struct kvm_vcpu *vcpu)
 
 	__sysreg_save_state_nvhe(guest_ctxt);
 	__sysreg32_save_state(vcpu);
+	__mpam_guest_put();
 	__timer_disable_traps(vcpu);
 	__hyp_vgic_save_state(vcpu);
 

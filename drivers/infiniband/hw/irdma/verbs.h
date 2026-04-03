@@ -18,8 +18,7 @@ struct irdma_ucontext {
 	struct list_head qp_reg_mem_list;
 	spinlock_t qp_reg_mem_list_lock; /* protect QP memory list */
 	int abi_ver;
-	u8 legacy_mode : 1;
-	u8 use_raw_attrs : 1;
+	bool legacy_mode;
 };
 
 struct irdma_pd {
@@ -194,7 +193,6 @@ struct irdma_qp {
 	u8 flush_issued : 1;
 	u8 sig_all : 1;
 	u8 pau_mode : 1;
-	u8 suspend_pending : 1;
 	u8 rsvd : 1;
 	u8 iwarp_state;
 	u16 term_sq_flush_code;

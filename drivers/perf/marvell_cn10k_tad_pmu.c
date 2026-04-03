@@ -13,13 +13,19 @@
 #include <linux/cpuhotplug.h>
 #include <linux/perf_event.h>
 #include <linux/platform_device.h>
+#include <linux/acpi.h>
 
 #define TAD_PFC_OFFSET		0x800
 #define TAD_PFC(counter)	(TAD_PFC_OFFSET | (counter << 3))
 #define TAD_PRF_OFFSET		0x900
 #define TAD_PRF(counter)	(TAD_PRF_OFFSET | (counter << 3))
 #define TAD_PRF_CNTSEL_MASK	0xFF
+#define TAD_PRF_MATCH_PARTID	(1 << 8)
+#define TAD_PRF_PARTID_NS	(1 << 10)
 #define TAD_MAX_COUNTERS	8
+
+#define TAD_UNSUPP_PARTID	0x100
+#define TAD_ALLOC_ANY		0x1c
 
 #define to_tad_pmu(p) (container_of(p, struct tad_pmu, pmu))
 
@@ -62,13 +68,21 @@ static void tad_pmu_event_counter_stop(struct perf_event *event, int flags)
 	struct tad_pmu *tad_pmu = to_tad_pmu(event->pmu);
 	struct hw_perf_event *hwc = &event->hw;
 	u32 counter_idx = hwc->idx;
+	u64 reg_val;
 	int i;
+
+	/* Write with unsupported partid before stopping the counter*/
+	reg_val = TAD_PRF_MATCH_PARTID | TAD_PRF_PARTID_NS |
+		  (TAD_UNSUPP_PARTID << 11) | TAD_ALLOC_ANY;
 
 	/* TAD()_PFC() stop counting on the write
 	 * which sets TAD()_PRF()[CNTSEL] == 0
 	 */
 	for (i = 0; i < tad_pmu->region_cnt; i++) {
-		writeq_relaxed(0, tad_pmu->regions[i].base +
+		writeq(reg_val, tad_pmu->regions[i].base +
+			       TAD_PRF(counter_idx));
+
+		writeq(0, tad_pmu->regions[i].base +
 			       TAD_PRF(counter_idx));
 	}
 
@@ -82,21 +96,32 @@ static void tad_pmu_event_counter_start(struct perf_event *event, int flags)
 	struct hw_perf_event *hwc = &event->hw;
 	u32 event_idx = event->attr.config;
 	u32 counter_idx = hwc->idx;
+	u32 partid_filter = 0;
 	u64 reg_val;
+	u32 partid;
 	int i;
 
 	hwc->state = 0;
+
+	/* Extract the partid (if any) passed by user */
+	partid = event->attr.config1 & 0x3f;
 
 	/* Typically TAD_PFC() are zeroed to start counting */
 	for (i = 0; i < tad_pmu->region_cnt; i++)
 		writeq_relaxed(0, tad_pmu->regions[i].base +
 			       TAD_PFC(counter_idx));
 
+	/* Only some counters are filterable by MPAM */
+	if (partid && (event_idx > 0x19) && (event_idx < 0x21))
+		partid_filter = TAD_PRF_MATCH_PARTID | TAD_PRF_PARTID_NS |
+				(partid << 11);
+
 	/* TAD()_PFC() start counting on the write
 	 * which sets TAD()_PRF()[CNTSEL] != 0
 	 */
 	for (i = 0; i < tad_pmu->region_cnt; i++) {
 		reg_val = event_idx & 0xFF;
+		reg_val |= partid_filter;
 		writeq_relaxed(reg_val,	tad_pmu->regions[i].base +
 			       TAD_PRF(counter_idx));
 	}
@@ -215,9 +240,11 @@ static const struct attribute_group tad_pmu_events_attr_group = {
 };
 
 PMU_FORMAT_ATTR(event, "config:0-7");
+PMU_FORMAT_ATTR(partid, "config1:0-15");
 
 static struct attribute *tad_pmu_format_attrs[] = {
 	&format_attr_event.attr,
+	&format_attr_partid.attr,
 	NULL
 };
 
@@ -254,7 +281,7 @@ static const struct attribute_group *tad_pmu_attr_groups[] = {
 
 static int tad_pmu_probe(struct platform_device *pdev)
 {
-	struct device_node *node = pdev->dev.of_node;
+	struct device *dev = &pdev->dev;
 	struct tad_region *regions;
 	struct tad_pmu *tad_pmu;
 	struct resource *res;
@@ -276,21 +303,21 @@ static int tad_pmu_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	ret = of_property_read_u32(node, "marvell,tad-page-size",
-				   &tad_page_size);
+	ret = device_property_read_u32(dev, "marvell,tad-page-size",
+				       &tad_page_size);
 	if (ret) {
 		dev_err(&pdev->dev, "Can't find tad-page-size property\n");
 		return ret;
 	}
 
-	ret = of_property_read_u32(node, "marvell,tad-pmu-page-size",
-				   &tad_pmu_page_size);
+	ret = device_property_read_u32(dev, "marvell,tad-pmu-page-size",
+				       &tad_pmu_page_size);
 	if (ret) {
 		dev_err(&pdev->dev, "Can't find tad-pmu-page-size property\n");
 		return ret;
 	}
 
-	ret = of_property_read_u32(node, "marvell,tad-cnt", &tad_cnt);
+	ret = device_property_read_u32(dev, "marvell,tad-cnt", &tad_cnt);
 	if (ret) {
 		dev_err(&pdev->dev, "Can't find tad-cnt property\n");
 		return ret;
@@ -369,10 +396,19 @@ static const struct of_device_id tad_pmu_of_match[] = {
 };
 #endif
 
+#ifdef CONFIG_ACPI
+static const struct acpi_device_id tad_pmu_acpi_match[] = {
+	{"MRVL000B", 0},
+	{},
+};
+MODULE_DEVICE_TABLE(acpi, tad_pmu_acpi_match);
+#endif
+
 static struct platform_driver tad_pmu_driver = {
 	.driver         = {
 		.name   = "cn10k_tad_pmu",
 		.of_match_table = of_match_ptr(tad_pmu_of_match),
+		.acpi_match_table = ACPI_PTR(tad_pmu_acpi_match),
 		.suppress_bind_attrs = true,
 	},
 	.probe          = tad_pmu_probe,

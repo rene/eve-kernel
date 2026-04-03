@@ -140,18 +140,6 @@ static DEFINE_PER_CPU(struct softirq_ctrl, softirq_ctrl) = {
 	.lock	= INIT_LOCAL_LOCK(softirq_ctrl.lock),
 };
 
-#ifdef CONFIG_DEBUG_LOCK_ALLOC
-static struct lock_class_key bh_lock_key;
-struct lockdep_map bh_lock_map = {
-	.name			= "local_bh",
-	.key			= &bh_lock_key,
-	.wait_type_outer	= LD_WAIT_FREE,
-	.wait_type_inner	= LD_WAIT_CONFIG, /* PREEMPT_RT makes BH preemptible. */
-	.lock_type		= LD_LOCK_PERCPU,
-};
-EXPORT_SYMBOL_GPL(bh_lock_map);
-#endif
-
 /**
  * local_bh_blocked() - Check for idle whether BH processing is blocked
  *
@@ -173,8 +161,6 @@ void __local_bh_disable_ip(unsigned long ip, unsigned int cnt)
 	int newcnt;
 
 	WARN_ON_ONCE(in_hardirq());
-
-	lock_map_acquire_read(&bh_lock_map);
 
 	/* First entry of a task into a BH disabled section? */
 	if (!current->softirq_disable_cnt) {
@@ -239,8 +225,6 @@ void __local_bh_enable_ip(unsigned long ip, unsigned int cnt)
 	WARN_ON_ONCE(in_hardirq());
 	lockdep_assert_irqs_enabled();
 
-	lock_map_release(&bh_lock_map);
-
 	local_irq_save(flags);
 	curcnt = __this_cpu_read(softirq_ctrl.cnt);
 
@@ -291,8 +275,6 @@ static inline void ksoftirqd_run_begin(void)
 /* Counterpart to ksoftirqd_run_begin() */
 static inline void ksoftirqd_run_end(void)
 {
-	/* pairs with the lock_map_acquire_read() in ksoftirqd_run_begin() */
-	lock_map_release(&bh_lock_map);
 	__local_bh_enable(SOFTIRQ_OFFSET, true);
 	WARN_ON_ONCE(in_interrupt());
 	local_irq_enable();
@@ -312,24 +294,17 @@ static inline void invoke_softirq(void)
 		wakeup_softirqd();
 }
 
-#define SCHED_SOFTIRQ_MASK	BIT(SCHED_SOFTIRQ)
-
 /*
  * flush_smp_call_function_queue() can raise a soft interrupt in a function
- * call. On RT kernels this is undesired and the only known functionalities
- * are in the block layer which is disabled on RT, and in the scheduler for
- * idle load balancing. If soft interrupts get raised which haven't been
- * raised before the flush, warn if it is not a SCHED_SOFTIRQ so it can be
+ * call. On RT kernels this is undesired and the only known functionality
+ * in the block layer which does this is disabled on RT. If soft interrupts
+ * get raised which haven't been raised before the flush, warn so it can be
  * investigated.
  */
 void do_softirq_post_smp_call_flush(unsigned int was_pending)
 {
-	unsigned int is_pending = local_softirq_pending();
-
-	if (unlikely(was_pending != is_pending)) {
-		WARN_ON_ONCE(was_pending != (is_pending & ~SCHED_SOFTIRQ_MASK));
+	if (WARN_ON_ONCE(was_pending != local_softirq_pending()))
 		invoke_softirq();
-	}
 }
 
 #else /* CONFIG_PREEMPT_RT */
@@ -550,7 +525,7 @@ static inline bool lockdep_softirq_start(void) { return false; }
 static inline void lockdep_softirq_end(bool in_hardirq) { }
 #endif
 
-static void handle_softirqs(bool ksirqd)
+asmlinkage __visible void __softirq_entry __do_softirq(void)
 {
 	unsigned long end = jiffies + MAX_SOFTIRQ_TIME;
 	unsigned long old_flags = current->flags;
@@ -605,7 +580,8 @@ restart:
 		pending >>= softirq_bit;
 	}
 
-	if (!IS_ENABLED(CONFIG_PREEMPT_RT) && ksirqd)
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT) &&
+	    __this_cpu_read(ksoftirqd) == current)
 		rcu_softirq_qs();
 
 	local_irq_disable();
@@ -623,11 +599,6 @@ restart:
 	lockdep_softirq_end(in_hardirq);
 	softirq_handle_end();
 	current_restore_flags(old_flags, PF_MEMALLOC);
-}
-
-asmlinkage __visible void __softirq_entry __do_softirq(void)
-{
-	handle_softirqs(false);
 }
 
 /**
@@ -960,7 +931,7 @@ static void run_ksoftirqd(unsigned int cpu)
 		 * We can safely run softirq on inline stack, as we are not deep
 		 * in the task stack here.
 		 */
-		handle_softirqs(true);
+		__do_softirq();
 		ksoftirqd_run_end();
 		cond_resched();
 		return;

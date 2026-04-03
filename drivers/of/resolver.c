@@ -262,22 +262,25 @@ static int adjust_local_phandle_references(struct device_node *local_fixups,
  */
 int of_resolve_phandles(struct device_node *overlay)
 {
-	struct device_node *child, *refnode;
-	struct device_node *overlay_fixups;
-	struct device_node __free(device_node) *local_fixups = NULL;
+	struct device_node *child, *local_fixups, *refnode;
+	struct device_node *tree_symbols, *overlay_fixups;
 	struct property *prop;
 	const char *refpath;
 	phandle phandle, phandle_delta;
 	int err;
 
+	tree_symbols = NULL;
+
 	if (!overlay) {
 		pr_err("null overlay\n");
-		return -EINVAL;
+		err = -EINVAL;
+		goto out;
 	}
 
 	if (!of_node_check_flag(overlay, OF_DETACHED)) {
 		pr_err("overlay not detached\n");
-		return -EINVAL;
+		err = -EINVAL;
+		goto out;
 	}
 
 	phandle_delta = live_tree_max_phandle() + 1;
@@ -289,7 +292,7 @@ int of_resolve_phandles(struct device_node *overlay)
 
 	err = adjust_local_phandle_references(local_fixups, overlay, phandle_delta);
 	if (err)
-		return err;
+		goto out;
 
 	overlay_fixups = NULL;
 
@@ -298,13 +301,16 @@ int of_resolve_phandles(struct device_node *overlay)
 			overlay_fixups = child;
 	}
 
-	if (!overlay_fixups)
-		return 0;
+	if (!overlay_fixups) {
+		err = 0;
+		goto out;
+	}
 
-	struct device_node __free(device_node) *tree_symbols = of_find_node_by_path("/__symbols__");
+	tree_symbols = of_find_node_by_path("/__symbols__");
 	if (!tree_symbols) {
 		pr_err("no symbols in root of device tree.\n");
-		return -EINVAL;
+		err = -EINVAL;
+		goto out;
 	}
 
 	for_each_property_of_node(overlay_fixups, prop) {
@@ -318,12 +324,14 @@ int of_resolve_phandles(struct device_node *overlay)
 		if (err) {
 			pr_err("node label '%s' not found in live devicetree symbols table\n",
 			       prop->name);
-			return err;
+			goto out;
 		}
 
 		refnode = of_find_node_by_path(refpath);
-		if (!refnode)
-			return -ENOENT;
+		if (!refnode) {
+			err = -ENOENT;
+			goto out;
+		}
 
 		phandle = refnode->phandle;
 		of_node_put(refnode);
@@ -333,8 +341,11 @@ int of_resolve_phandles(struct device_node *overlay)
 			break;
 	}
 
+out:
 	if (err)
 		pr_err("overlay phandle fixup failed: %d\n", err);
+	of_node_put(tree_symbols);
+
 	return err;
 }
 EXPORT_SYMBOL_GPL(of_resolve_phandles);

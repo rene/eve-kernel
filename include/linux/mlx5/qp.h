@@ -269,10 +269,7 @@ struct mlx5_wqe_eth_seg {
 	union {
 		struct {
 			__be16 sz;
-			union {
-				u8     start[2];
-				DECLARE_FLEX_ARRAY(u8, data);
-			};
+			u8     start[2];
 		} inline_hdr;
 		struct {
 			__be16 type;
@@ -566,12 +563,9 @@ static inline const char *mlx5_qp_state_str(int state)
 
 static inline int mlx5_get_qp_default_ts(struct mlx5_core_dev *dev)
 {
-	u8 supported_ts_cap = mlx5_get_roce_state(dev) ?
-			      MLX5_CAP_ROCE(dev, qp_ts_format) :
-			      MLX5_CAP_GEN(dev, sq_ts_format);
-
-	return supported_ts_cap ? MLX5_TIMESTAMP_FORMAT_DEFAULT :
-	       MLX5_TIMESTAMP_FORMAT_FREE_RUNNING;
+	return !MLX5_CAP_ROCE(dev, qp_ts_format) ?
+		       MLX5_TIMESTAMP_FORMAT_FREE_RUNNING :
+		       MLX5_TIMESTAMP_FORMAT_DEFAULT;
 }
 
 #endif /* MLX5_QP_H */

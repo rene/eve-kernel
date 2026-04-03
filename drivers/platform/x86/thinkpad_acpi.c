@@ -211,7 +211,6 @@ enum tpacpi_hkey_event_t {
 	/* Thermal events */
 	TP_HKEY_EV_ALARM_BAT_HOT	= 0x6011, /* battery too hot */
 	TP_HKEY_EV_ALARM_BAT_XHOT	= 0x6012, /* battery critically hot */
-	TP_HKEY_EV_ALARM_BAT_LIM_CHANGE	= 0x6013, /* battery charge limit changed*/
 	TP_HKEY_EV_ALARM_SENSOR_HOT	= 0x6021, /* sensor too hot */
 	TP_HKEY_EV_ALARM_SENSOR_XHOT	= 0x6022, /* sensor critically hot */
 	TP_HKEY_EV_THM_TABLE_CHANGED	= 0x6030, /* windows; thermal table changed */
@@ -544,12 +543,12 @@ static unsigned long __init tpacpi_check_quirks(
 	return 0;
 }
 
-static __always_inline bool __pure __init tpacpi_is_lenovo(void)
+static inline bool __pure __init tpacpi_is_lenovo(void)
 {
 	return thinkpad_id.vendor == PCI_VENDOR_ID_LENOVO;
 }
 
-static __always_inline bool __pure __init tpacpi_is_ibm(void)
+static inline bool __pure __init tpacpi_is_ibm(void)
 {
 	return thinkpad_id.vendor == PCI_VENDOR_ID_IBM;
 }
@@ -3949,10 +3948,6 @@ static bool hotkey_notify_6xxx(const u32 hkey,
 		pr_alert("THERMAL EMERGENCY: battery is extremely hot!\n");
 		/* recommended action: immediate sleep/hibernate */
 		break;
-	case TP_HKEY_EV_ALARM_BAT_LIM_CHANGE:
-		pr_debug("Battery Info: battery charge threshold changed\n");
-		/* User changed charging threshold. No action needed */
-		return true;
 	case TP_HKEY_EV_ALARM_SENSOR_HOT:
 		pr_crit("THERMAL ALARM: a sensor reports something is too hot!\n");
 		/* recommended action: warn user through gui, that */
@@ -8154,19 +8149,7 @@ static struct ibm_struct volume_driver_data = {
  * 	TPACPI_FAN_WR_TPEC is also available and should be used to
  * 	command the fan.  The X31/X40/X41 seems to have 8 fan levels,
  * 	but the ACPI tables just mention level 7.
- *
- * TPACPI_FAN_RD_TPEC_NS:
- *	This mode is used for a few ThinkPads (L13 Yoga Gen2, X13 Yoga Gen2 etc.)
- *	that are using non-standard EC locations for reporting fan speeds.
- *	Currently these platforms only provide fan rpm reporting.
- *
  */
-
-#define FAN_RPM_CAL_CONST 491520	/* FAN RPM calculation offset for some non-standard ECFW */
-
-#define FAN_NS_CTRL_STATUS	BIT(2)		/* Bit which determines control is enabled or not */
-#define FAN_NS_CTRL		BIT(4)		/* Bit which determines control is by host or EC */
-#define FAN_CLOCK_TPM		(22500*60)	/* Ticks per minute for a 22.5 kHz clock */
 
 enum {					/* Fan control constants */
 	fan_status_offset = 0x2f,	/* EC register 0x2f */
@@ -8174,11 +8157,6 @@ enum {					/* Fan control constants */
 					 * 0x84 must be read before 0x85 */
 	fan_select_offset = 0x31,	/* EC register 0x31 (Firmware 7M)
 					   bit 0 selects which fan is active */
-
-	fan_status_offset_ns = 0x93,	/* Special status/control offset for non-standard EC Fan1 */
-	fan2_status_offset_ns = 0x96,	/* Special status/control offset for non-standard EC Fan2 */
-	fan_rpm_status_ns = 0x95,	/* Special offset for Fan1 RPM status for non-standard EC */
-	fan2_rpm_status_ns = 0x98,	/* Special offset for Fan2 RPM status for non-standard EC */
 
 	TP_EC_FAN_FULLSPEED = 0x40,	/* EC fan mode: full speed */
 	TP_EC_FAN_AUTO	    = 0x80,	/* EC fan mode: auto fan control */
@@ -8190,7 +8168,6 @@ enum fan_status_access_mode {
 	TPACPI_FAN_NONE = 0,		/* No fan status or control */
 	TPACPI_FAN_RD_ACPI_GFAN,	/* Use ACPI GFAN */
 	TPACPI_FAN_RD_TPEC,		/* Use ACPI EC regs 0x2f, 0x84-0x85 */
-	TPACPI_FAN_RD_TPEC_NS,		/* Use non-standard ACPI EC regs (eg: L13 Yoga gen2 etc.) */
 };
 
 enum fan_control_access_mode {
@@ -8217,10 +8194,6 @@ static u8 fan_control_initial_status;
 static u8 fan_control_desired_level;
 static u8 fan_control_resume_level;
 static int fan_watchdog_maxinterval;
-
-static bool fan_with_ns_addr;
-static bool ecfw_with_fan_dec_rpm;
-static bool fan_speed_in_tpr;
 
 static struct mutex fan_mutex;
 
@@ -8352,15 +8325,6 @@ static int fan_get_status(u8 *status)
 		}
 
 		break;
-	case TPACPI_FAN_RD_TPEC_NS:
-		/* Default mode is AUTO which means controlled by EC */
-		if (!acpi_ec_read(fan_status_offset_ns, &s))
-			return -EIO;
-
-		if (status)
-			*status = s;
-
-		break;
 
 	default:
 		return -ENXIO;
@@ -8377,8 +8341,7 @@ static int fan_get_status_safe(u8 *status)
 	if (mutex_lock_killable(&fan_mutex))
 		return -ERESTARTSYS;
 	rc = fan_get_status(&s);
-	/* NS EC doesn't have register with level settings */
-	if (!rc && !fan_with_ns_addr)
+	if (!rc)
 		fan_update_desired_level(s);
 	mutex_unlock(&fan_mutex);
 
@@ -8403,18 +8366,9 @@ static int fan_get_speed(unsigned int *speed)
 			     !acpi_ec_read(fan_rpm_offset + 1, &hi)))
 			return -EIO;
 
-		if (likely(speed)) {
+		if (likely(speed))
 			*speed = (hi << 8) | lo;
-			if (fan_speed_in_tpr && *speed != 0)
-				*speed = FAN_CLOCK_TPM / *speed;
-		}
-		break;
-	case TPACPI_FAN_RD_TPEC_NS:
-		if (!acpi_ec_read(fan_rpm_status_ns, &lo))
-			return -EIO;
 
-		if (speed)
-			*speed = lo ? FAN_RPM_CAL_CONST / lo : 0;
 		break;
 
 	default:
@@ -8426,7 +8380,7 @@ static int fan_get_speed(unsigned int *speed)
 
 static int fan2_get_speed(unsigned int *speed)
 {
-	u8 hi, lo, status;
+	u8 hi, lo;
 	bool rc;
 
 	switch (fan_status_access_mode) {
@@ -8440,26 +8394,9 @@ static int fan2_get_speed(unsigned int *speed)
 		if (rc)
 			return -EIO;
 
-		if (likely(speed)) {
+		if (likely(speed))
 			*speed = (hi << 8) | lo;
-			if (fan_speed_in_tpr && *speed != 0)
-				*speed = FAN_CLOCK_TPM / *speed;
-		}
-		break;
 
-	case TPACPI_FAN_RD_TPEC_NS:
-		rc = !acpi_ec_read(fan2_status_offset_ns, &status);
-		if (rc)
-			return -EIO;
-		if (!(status & FAN_NS_CTRL_STATUS)) {
-			pr_info("secondary fan control not supported\n");
-			return -EIO;
-		}
-		rc = !acpi_ec_read(fan2_rpm_status_ns, &lo);
-		if (rc)
-			return -EIO;
-		if (speed)
-			*speed = lo ? FAN_RPM_CAL_CONST / lo : 0;
 		break;
 
 	default:
@@ -8870,11 +8807,7 @@ static ssize_t fan_fan1_input_show(struct device *dev,
 	if (res < 0)
 		return res;
 
-	/* Check for fan speeds displayed in hexadecimal */
-	if (!ecfw_with_fan_dec_rpm)
-		return sysfs_emit(buf, "%u\n", speed);
-	else
-		return sysfs_emit(buf, "%x\n", speed);
+	return sysfs_emit(buf, "%u\n", speed);
 }
 
 static DEVICE_ATTR(fan1_input, S_IRUGO, fan_fan1_input_show, NULL);
@@ -8891,11 +8824,7 @@ static ssize_t fan_fan2_input_show(struct device *dev,
 	if (res < 0)
 		return res;
 
-	/* Check for fan speeds displayed in hexadecimal */
-	if (!ecfw_with_fan_dec_rpm)
-		return sysfs_emit(buf, "%u\n", speed);
-	else
-		return sysfs_emit(buf, "%x\n", speed);
+	return sysfs_emit(buf, "%u\n", speed);
 }
 
 static DEVICE_ATTR(fan2_input, S_IRUGO, fan_fan2_input_show, NULL);
@@ -8970,9 +8899,6 @@ static const struct attribute_group fan_driver_attr_group = {
 #define TPACPI_FAN_2FAN		0x0002		/* EC 0x31 bit 0 selects fan2 */
 #define TPACPI_FAN_2CTL		0x0004		/* selects fan2 control */
 #define TPACPI_FAN_NOFAN	0x0008		/* no fan available */
-#define TPACPI_FAN_NS		0x0010		/* For EC with non-Standard register addresses */
-#define TPACPI_FAN_DECRPM	0x0020		/* For ECFW's with RPM in register as decimal */
-#define TPACPI_FAN_TPR		0x0040		/* Fan speed is in Ticks Per Revolution */
 
 static const struct tpacpi_quirk fan_quirk_table[] __initconst = {
 	TPACPI_QEC_IBM('1', 'Y', TPACPI_FAN_Q1),
@@ -8991,11 +8917,7 @@ static const struct tpacpi_quirk fan_quirk_table[] __initconst = {
 	TPACPI_Q_LNV3('N', '2', 'O', TPACPI_FAN_2CTL),	/* P1 / X1 Extreme (2nd gen) */
 	TPACPI_Q_LNV3('N', '3', '0', TPACPI_FAN_2CTL),	/* P15 (1st gen) / P15v (1st gen) */
 	TPACPI_Q_LNV3('N', '3', '7', TPACPI_FAN_2CTL),  /* T15g (2nd gen) */
-	TPACPI_Q_LNV3('R', '1', 'F', TPACPI_FAN_NS),	/* L13 Yoga Gen 2 */
-	TPACPI_Q_LNV3('N', '2', 'U', TPACPI_FAN_NS),	/* X13 Yoga Gen 2*/
 	TPACPI_Q_LNV3('N', '1', 'O', TPACPI_FAN_NOFAN),	/* X1 Tablet (2nd gen) */
-	TPACPI_Q_LNV3('R', '0', 'Q', TPACPI_FAN_DECRPM),/* L480 */
-	TPACPI_Q_LNV('8', 'F', TPACPI_FAN_TPR),		/* ThinkPad x120e */
 };
 
 static int __init fan_init(struct ibm_init_struct *iibm)
@@ -9029,46 +8951,27 @@ static int __init fan_init(struct ibm_init_struct *iibm)
 		return -ENODEV;
 	}
 
-	if (quirks & TPACPI_FAN_NS) {
-		pr_info("ECFW with non-standard fan reg control found\n");
-		fan_with_ns_addr = 1;
-		/* Fan ctrl support from host is undefined for now */
-		tp_features.fan_ctrl_status_undef = 1;
-	}
-
-	/* Check for the EC/BIOS with RPM reported in decimal*/
-	if (quirks & TPACPI_FAN_DECRPM) {
-		pr_info("ECFW with fan RPM as decimal in EC register\n");
-		ecfw_with_fan_dec_rpm = 1;
-		tp_features.fan_ctrl_status_undef = 1;
-	}
-
 	if (gfan_handle) {
 		/* 570, 600e/x, 770e, 770x */
 		fan_status_access_mode = TPACPI_FAN_RD_ACPI_GFAN;
 	} else {
 		/* all other ThinkPads: note that even old-style
 		 * ThinkPad ECs supports the fan control register */
-		if (fan_with_ns_addr ||
-		    likely(acpi_ec_read(fan_status_offset, &fan_control_initial_status))) {
+		if (likely(acpi_ec_read(fan_status_offset,
+					&fan_control_initial_status))) {
 			int res;
 			unsigned int speed;
 
-			fan_status_access_mode = fan_with_ns_addr ?
-				TPACPI_FAN_RD_TPEC_NS : TPACPI_FAN_RD_TPEC;
-
+			fan_status_access_mode = TPACPI_FAN_RD_TPEC;
 			if (quirks & TPACPI_FAN_Q1)
 				fan_quirk1_setup();
-			if (quirks & TPACPI_FAN_TPR)
-				fan_speed_in_tpr = true;
 			/* Try and probe the 2nd fan */
 			tp_features.second_fan = 1; /* needed for get_speed to work */
 			res = fan2_get_speed(&speed);
 			if (res >= 0 && speed != FAN_NOT_PRESENT) {
 				/* It responded - so let's assume it's there */
 				tp_features.second_fan = 1;
-				/* fan control not currently available for ns ECFW */
-				tp_features.second_fan_ctl = !fan_with_ns_addr;
+				tp_features.second_fan_ctl = 1;
 				pr_info("secondary fan control detected & enabled\n");
 			} else {
 				/* Fan not auto-detected */
@@ -9243,7 +9146,6 @@ static int fan_read(struct seq_file *m)
 			       str_enabled_disabled(status), status);
 		break;
 
-	case TPACPI_FAN_RD_TPEC_NS:
 	case TPACPI_FAN_RD_TPEC:
 		/* all except 570, 600e/x, 770e, 770x */
 		rc = fan_get_status_safe(&status);
@@ -9256,28 +9158,15 @@ static int fan_read(struct seq_file *m)
 		if (rc < 0)
 			return rc;
 
-		/* Check for fan speeds displayed in hexadecimal */
-		if (!ecfw_with_fan_dec_rpm)
-			seq_printf(m, "speed:\t\t%d\n", speed);
-		else
-			seq_printf(m, "speed:\t\t%x\n", speed);
+		seq_printf(m, "speed:\t\t%d\n", speed);
 
-		if (fan_status_access_mode == TPACPI_FAN_RD_TPEC_NS) {
-			/*
-			 * No full speed bit in NS EC
-			 * EC Auto mode is set by default.
-			 * No other levels settings available
-			 */
-			seq_printf(m, "level:\t\t%s\n", status & FAN_NS_CTRL ? "unknown" : "auto");
-		} else {
-			if (status & TP_EC_FAN_FULLSPEED)
-				/* Disengaged mode takes precedence */
-				seq_printf(m, "level:\t\tdisengaged\n");
-			else if (status & TP_EC_FAN_AUTO)
-				seq_printf(m, "level:\t\tauto\n");
-			else
-				seq_printf(m, "level:\t\t%d\n", status);
-		}
+		if (status & TP_EC_FAN_FULLSPEED)
+			/* Disengaged mode takes precedence */
+			seq_printf(m, "level:\t\tdisengaged\n");
+		else if (status & TP_EC_FAN_AUTO)
+			seq_printf(m, "level:\t\tauto\n");
+		else
+			seq_printf(m, "level:\t\t%d\n", status);
 		break;
 
 	case TPACPI_FAN_NONE:
@@ -10130,7 +10019,6 @@ static const struct tpacpi_quirk battery_quirk_table[] __initconst = {
 	 * Individual addressing is broken on models that expose the
 	 * primary battery as BAT1.
 	 */
-	TPACPI_Q_LNV('G', '8', true),       /* ThinkPad X131e */
 	TPACPI_Q_LNV('8', 'F', true),       /* Thinkpad X120e */
 	TPACPI_Q_LNV('J', '7', true),       /* B5400 */
 	TPACPI_Q_LNV('J', 'I', true),       /* Thinkpad 11e */
@@ -10490,10 +10378,6 @@ static struct ibm_struct proxsensor_driver_data = {
 #define DYTC_MODE_PSC_BALANCE  5  /* Default mode aka balanced */
 #define DYTC_MODE_PSC_PERFORM  7  /* High power mode aka performance */
 
-#define DYTC_MODE_PSCV9_LOWPOWER 1  /* Low power mode */
-#define DYTC_MODE_PSCV9_BALANCE  3  /* Default mode aka balanced */
-#define DYTC_MODE_PSCV9_PERFORM  4  /* High power mode aka performance */
-
 #define DYTC_ERR_MASK       0xF  /* Bits 0-3 in cmd result are the error result */
 #define DYTC_ERR_SUCCESS      1  /* CMD completed successful */
 
@@ -10513,10 +10397,6 @@ static DEFINE_MUTEX(dytc_mutex);
 static int dytc_capabilities;
 static bool dytc_mmc_get_available;
 static int profile_force;
-
-static int platform_psc_profile_lowpower = DYTC_MODE_PSC_LOWPOWER;
-static int platform_psc_profile_balanced = DYTC_MODE_PSC_BALANCE;
-static int platform_psc_profile_performance = DYTC_MODE_PSC_PERFORM;
 
 static int convert_dytc_to_profile(int funcmode, int dytcmode,
 		enum platform_profile_option *profile)
@@ -10539,15 +10419,19 @@ static int convert_dytc_to_profile(int funcmode, int dytcmode,
 		}
 		return 0;
 	case DYTC_FUNCTION_PSC:
-		if (dytcmode == platform_psc_profile_lowpower)
+		switch (dytcmode) {
+		case DYTC_MODE_PSC_LOWPOWER:
 			*profile = PLATFORM_PROFILE_LOW_POWER;
-		else if (dytcmode == platform_psc_profile_balanced)
+			break;
+		case DYTC_MODE_PSC_BALANCE:
 			*profile =  PLATFORM_PROFILE_BALANCED;
-		else if (dytcmode == platform_psc_profile_performance)
+			break;
+		case DYTC_MODE_PSC_PERFORM:
 			*profile =  PLATFORM_PROFILE_PERFORMANCE;
-		else
+			break;
+		default: /* Unknown mode */
 			return -EINVAL;
-
+		}
 		return 0;
 	case DYTC_FUNCTION_AMT:
 		/* For now return balanced. It's the closest we have to 'auto' */
@@ -10555,7 +10439,6 @@ static int convert_dytc_to_profile(int funcmode, int dytcmode,
 		return 0;
 	default:
 		/* Unknown function */
-		pr_debug("unknown function 0x%x\n", funcmode);
 		return -EOPNOTSUPP;
 	}
 	return 0;
@@ -10568,19 +10451,19 @@ static int convert_profile_to_dytc(enum platform_profile_option profile, int *pe
 		if (dytc_capabilities & BIT(DYTC_FC_MMC))
 			*perfmode = DYTC_MODE_MMC_LOWPOWER;
 		else if (dytc_capabilities & BIT(DYTC_FC_PSC))
-			*perfmode = platform_psc_profile_lowpower;
+			*perfmode = DYTC_MODE_PSC_LOWPOWER;
 		break;
 	case PLATFORM_PROFILE_BALANCED:
 		if (dytc_capabilities & BIT(DYTC_FC_MMC))
 			*perfmode = DYTC_MODE_MMC_BALANCE;
 		else if (dytc_capabilities & BIT(DYTC_FC_PSC))
-			*perfmode = platform_psc_profile_balanced;
+			*perfmode = DYTC_MODE_PSC_BALANCE;
 		break;
 	case PLATFORM_PROFILE_PERFORMANCE:
 		if (dytc_capabilities & BIT(DYTC_FC_MMC))
 			*perfmode = DYTC_MODE_MMC_PERFORM;
 		else if (dytc_capabilities & BIT(DYTC_FC_PSC))
-			*perfmode = platform_psc_profile_performance;
+			*perfmode = DYTC_MODE_PSC_PERFORM;
 		break;
 	default: /* Unknown profile */
 		return -EOPNOTSUPP;
@@ -10741,8 +10624,8 @@ static void dytc_profile_refresh(void)
 		return;
 
 	perfmode = (output >> DYTC_GET_MODE_BIT) & 0xF;
-	err = convert_dytc_to_profile(funcmode, perfmode, &profile);
-	if (!err && profile != dytc_current_profile) {
+	convert_dytc_to_profile(funcmode, perfmode, &profile);
+	if (profile != dytc_current_profile) {
 		dytc_current_profile = profile;
 		platform_profile_notify();
 	}
@@ -10769,7 +10652,6 @@ static int tpacpi_dytc_profile_init(struct ibm_init_struct *iibm)
 	if (output & BIT(DYTC_QUERY_ENABLE_BIT))
 		dytc_version = (output >> DYTC_QUERY_REV_BIT) & 0xF;
 
-	dbg_printk(TPACPI_DBG_INIT, "DYTC version %d\n", dytc_version);
 	/* Check DYTC is enabled and supports mode setting */
 	if (dytc_version < 5)
 		return -ENODEV;
@@ -10808,11 +10690,6 @@ static int tpacpi_dytc_profile_init(struct ibm_init_struct *iibm)
 		}
 	} else if (dytc_capabilities & BIT(DYTC_FC_PSC)) { /* PSC MODE */
 		pr_debug("PSC is supported\n");
-		if (dytc_version >= 9) { /* update profiles for DYTC 9 and up */
-			platform_psc_profile_lowpower = DYTC_MODE_PSCV9_LOWPOWER;
-			platform_psc_profile_balanced = DYTC_MODE_PSCV9_BALANCE;
-			platform_psc_profile_performance = DYTC_MODE_PSCV9_PERFORM;
-		}
 	} else {
 		dbg_printk(TPACPI_DBG_INIT, "No DYTC support available\n");
 		return -ENODEV;
@@ -11521,8 +11398,6 @@ static int __must_check __init get_thinkpad_model_data(
 	if (dmi_name_in_vendors("IBM"))
 		tp->vendor = PCI_VENDOR_ID_IBM;
 	else if (dmi_name_in_vendors("LENOVO"))
-		tp->vendor = PCI_VENDOR_ID_LENOVO;
-	else if (dmi_name_in_vendors("NEC"))
 		tp->vendor = PCI_VENDOR_ID_LENOVO;
 	else
 		return 0;

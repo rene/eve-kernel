@@ -361,8 +361,9 @@ struct ovl_fh *ovl_encode_real_fh(struct ovl_fs *ofs, struct dentry *real,
 	buflen = (dwords << 2);
 
 	err = -EIO;
-	if (fh_type < 0 || fh_type == FILEID_INVALID ||
-	    WARN_ON(buflen > MAX_HANDLE_SZ))
+	if (WARN_ON(fh_type < 0) ||
+	    WARN_ON(buflen > MAX_HANDLE_SZ) ||
+	    WARN_ON(fh_type == FILEID_INVALID))
 		goto out_err;
 
 	fh->fb.version = OVL_FH_VERSION;
@@ -531,6 +532,7 @@ static int ovl_link_up(struct ovl_copy_up_ctx *c)
 	err = PTR_ERR(upper);
 	if (!IS_ERR(upper)) {
 		err = ovl_do_link(ofs, ovl_dentry_upper(c->dentry), udir, upper);
+		dput(upper);
 
 		if (!err) {
 			/* Restore timestamps on parent (best effort) */
@@ -538,7 +540,6 @@ static int ovl_link_up(struct ovl_copy_up_ctx *c)
 			ovl_dentry_set_upper_alias(c->dentry);
 			ovl_dentry_update_reval(c->dentry, upper);
 		}
-		dput(upper);
 	}
 	inode_unlock(udir);
 	if (err)

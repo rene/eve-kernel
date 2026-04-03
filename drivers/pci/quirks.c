@@ -194,105 +194,6 @@ static int __init pci_apply_final_quirks(void)
 }
 fs_initcall_sync(pci_apply_final_quirks);
 
-static bool acs_on_downstream;
-static bool acs_on_multifunction;
-
-#define NUM_ACS_IDS 16
-struct acs_on_id {
-	unsigned short vendor;
-	unsigned short device;
-};
-static struct acs_on_id acs_on_ids[NUM_ACS_IDS];
-static u8 max_acs_id;
-
-static __init int pcie_acs_override_setup(char *p)
-{
-	if (!p)
-		return -EINVAL;
-
-	while (*p) {
-		if (!strncmp(p, "downstream", 10))
-			acs_on_downstream = true;
-		if (!strncmp(p, "multifunction", 13))
-			acs_on_multifunction = true;
-		if (!strncmp(p, "id:", 3)) {
-			char opt[5];
-			int ret;
-			long val;
-
-			if (max_acs_id >= NUM_ACS_IDS - 1) {
-				pr_warn("Out of PCIe ACS override slots (%d)\n",
-						NUM_ACS_IDS);
-				goto next;
-			}
-
-			p += 3;
-			snprintf(opt, 5, "%s", p);
-			ret = kstrtol(opt, 16, &val);
-			if (ret) {
-				pr_warn("PCIe ACS ID parse error %d\n", ret);
-				goto next;
-			}
-			acs_on_ids[max_acs_id].vendor = val;
-		p += strcspn(p, ":");
-		if (*p != ':') {
-			pr_warn("PCIe ACS invalid ID\n");
-			goto next;
-			}
-
-			p++;
-			snprintf(opt, 5, "%s", p);
-			ret = kstrtol(opt, 16, &val);
-			if (ret) {
-				pr_warn("PCIe ACS ID parse error %d\n", ret);
-				goto next;
-			}
-			acs_on_ids[max_acs_id].device = val;
-			max_acs_id++;
-		}
-next:
-		p += strcspn(p, ",");
-		if (*p == ',')
-			p++;
-	}
-
-	if (acs_on_downstream || acs_on_multifunction || max_acs_id)
-		pr_warn("Warning: PCIe ACS overrides enabled; This may allow non-IOMMU protected peer-to-peer DMA\n");
-
-	return 0;
-}
-early_param("pcie_acs_override", pcie_acs_override_setup);
-
-static int pcie_acs_overrides(struct pci_dev *dev, u16 acs_flags)
-{
-	int i;
-
-	/* Never override ACS for legacy devices */
-	if (!pci_is_pcie(dev))
-			return -ENOTTY;
-
-	for (i = 0; i < max_acs_id; i++)
-		if (acs_on_ids[i].vendor == dev->vendor &&
-			acs_on_ids[i].device == dev->device)
-				return 1;
-
-	switch (pci_pcie_type(dev)) {
-		case PCI_EXP_TYPE_DOWNSTREAM:
-		case PCI_EXP_TYPE_ROOT_PORT:
-			if (acs_on_downstream)
-				return 1;
-			break;
-		case PCI_EXP_TYPE_ENDPOINT:
-		case PCI_EXP_TYPE_UPSTREAM:
-		case PCI_EXP_TYPE_LEG_END:
-		case PCI_EXP_TYPE_RC_END:
-			if (acs_on_multifunction && dev->multifunction)
-				return 1;
-	}
-
-	return -ENOTTY;
-}
-
 /*
  * Decoding should be disabled for a PCI device during BAR sizing to avoid
  * conflict. But doing so may cause problems on host bridge and perhaps other
@@ -706,13 +607,10 @@ static void quirk_amd_dwc_class(struct pci_dev *pdev)
 {
 	u32 class = pdev->class;
 
-	if (class != PCI_CLASS_SERIAL_USB_DEVICE) {
-		/* Use "USB Device (not host controller)" class */
-		pdev->class = PCI_CLASS_SERIAL_USB_DEVICE;
-		pci_info(pdev,
-			"PCI class overridden (%#08x -> %#08x) so dwc3 driver can claim this instead of xhci\n",
-			class, pdev->class);
-	}
+	/* Use "USB Device (not host controller)" class */
+	pdev->class = PCI_CLASS_SERIAL_USB_DEVICE;
+	pci_info(pdev, "PCI class overridden (%#08x -> %#08x) so dwc3 driver can claim this instead of xhci\n",
+		 class, pdev->class);
 }
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_NL_USB,
 		quirk_amd_dwc_class);
@@ -1144,6 +1042,88 @@ static void quirk_cavium_sriov_rnm_link(struct pci_dev *dev)
 		dev->sriov->link = dev->devfn;
 }
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_CAVIUM, 0xa018, quirk_cavium_sriov_rnm_link);
+#endif
+
+#ifdef CONFIG_PCI_IOV
+/*
+ * Cavium OcteonTx needs Multibyte atomic I/O (LDST) for some devices.
+ * LDST needs LMTLINE and LMTCANCEL to be mapped along with devices,
+ * to be usable by software.
+ * Unfortunately devices like PKO and SSO don't adevertize it in their BAR's
+ * This quirks adds LMT region in to PKO and SSOW at VBAR 2.
+ */
+#define LMTLINE_SIZE	0x10000
+static void quirk_octeontx_lmtline(struct pci_dev *dev)
+{
+	struct resource *res = dev->resource + PCI_IOV_RESOURCES + 2;
+	struct pci_bus_region bus_region;
+	u16 devid;
+
+	pci_read_config_word(dev, PCI_DEVICE_ID, &devid);
+	res->name = pci_name(dev);
+	res->flags = IORESOURCE_MEM | IORESOURCE_PCI_FIXED |
+		IORESOURCE_PCI_EA_BEI;
+
+	/*
+	 * Because 83XX doesn't have a Multi node config not
+	 * included node into address.
+	 * If this changes add NODE id of the device into address.
+	 */
+	if (devid == 0xA048)
+		bus_region.start = 0x87F191000000;
+	else
+		bus_region.start = 0x87F101000000;
+
+	bus_region.end = bus_region.start + LMTLINE_SIZE - 1;
+	pcibios_bus_to_resource(dev->bus, res, &bus_region);
+
+	dev_info(&dev->dev, "quirk(LMTLINE): added at VBAR 2\n");
+}
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CAVIUM, 0XA048, quirk_octeontx_lmtline);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CAVIUM, 0XA04C, quirk_octeontx_lmtline);
+
+/*
+ * OcteonTx 83XX has SRIOV for PKO, SSO, FPA etc etc
+ * most of them dont have a Mailbox to communicate.
+ * The proposed Resource manager desgin depends on SSO mailbox
+ * for this.
+ *
+ * Problem with these devices is PF is fully loaded,
+ * VF needs to do lot of communication with PF for things like
+ * setup, getting stats, getting link state etc.
+ * The mailbox provided by SSO is 64 bits in each direction, which  is not
+ * sufficient for this. the latencies to do a trivial task is very high.
+ * Solution is to hava a RAM based mailbox, this quirk adds a VF BAR
+ * to SSOW with 64K RAM so that VF and PF can use this to send messages.
+ * the desgin still uses SSO Mailbox for identity and sending
+ * interrupts/notifications when message is pending.
+ *
+ * Ideally the BAR should go to SSO Vf,
+ * because its already full creaing a BAR in SSOW.
+ *
+ * This patch Assumes the Firmware did appropriate changes to
+ * create a hole in RAM at address 0x1400000 with sufficient space.
+ */
+#define SSO_MBOX_BASE	0x1400000
+#define SSO_MBOX_SIZE	0x10000
+static void quirk_octeontx_ssombox(struct pci_dev *dev)
+{
+	struct resource *res = dev->resource + PCI_IOV_RESOURCES + 4;
+	struct pci_bus_region bus_region;
+	u16 devid;
+
+	pci_read_config_word(dev, PCI_DEVICE_ID, &devid);
+	res->name = pci_name(dev);
+	res->flags = IORESOURCE_MEM | IORESOURCE_PCI_FIXED |
+		IORESOURCE_PCI_EA_BEI;
+
+	bus_region.start = SSO_MBOX_BASE;
+	bus_region.end = bus_region.start + SSO_MBOX_SIZE - 1;
+	pcibios_bus_to_resource(dev->bus, res, &bus_region);
+
+	dev_info(&dev->dev, "quirk(SSO MBOX): added at BAR 4\n");
+}
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CAVIUM, 0XA04C, quirk_octeontx_ssombox);
 #endif
 
 /*
@@ -2524,9 +2504,9 @@ static void quirk_enable_clear_retrain_link(struct pci_dev *dev)
 	dev->clear_retrain_link = 1;
 	pci_info(dev, "Enable PCIe Retrain Link quirk\n");
 }
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_PERICOM, 0xe110, quirk_enable_clear_retrain_link);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_PERICOM, 0xe111, quirk_enable_clear_retrain_link);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_PERICOM, 0xe130, quirk_enable_clear_retrain_link);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_PERICOM, 0xe110, quirk_enable_clear_retrain_link);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_PERICOM, 0xe111, quirk_enable_clear_retrain_link);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_PERICOM, 0xe130, quirk_enable_clear_retrain_link);
 
 static void fixup_rev1_53c810(struct pci_dev *dev)
 {
@@ -3605,8 +3585,6 @@ DECLARE_PCI_FIXUP_FINAL(0x1814, 0x0601, /* Ralink RT2800 802.11n PCI */
 			quirk_broken_intx_masking);
 DECLARE_PCI_FIXUP_FINAL(0x1b7c, 0x0004, /* Ceton InfiniTV4 */
 			quirk_broken_intx_masking);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_CREATIVE, PCI_DEVICE_ID_CREATIVE_20K2,
-			quirk_broken_intx_masking);
 
 /*
  * Realtek RTL8169 PCI Gigabit Ethernet Controller (rev 10)
@@ -3763,6 +3741,20 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATHEROS, 0x003e, quirk_no_bus_reset);
  * accesses to the child may fail.
  */
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CAVIUM, 0xa100, quirk_no_bus_reset);
+/*octeontx-83xx has no FLR support.
+ * and Reset of blocks are highly dependent of each other.
+ * so lets disable bus reset and do device reset though octeontx
+ */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CAVIUM, 0xa047, quirk_no_bus_reset);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CAVIUM, 0xa0dd, quirk_no_bus_reset);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CAVIUM, 0xa048, quirk_no_bus_reset);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CAVIUM, 0xa049, quirk_no_bus_reset);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CAVIUM, 0xa04a, quirk_no_bus_reset);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CAVIUM, 0xa04b, quirk_no_bus_reset);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CAVIUM, 0xa04c, quirk_no_bus_reset);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CAVIUM, 0xa04d, quirk_no_bus_reset);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CAVIUM, 0xa052, quirk_no_bus_reset);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CAVIUM, 0xa053, quirk_no_bus_reset);
 
 /*
  * Some TI KeyStone C667X devices do not support bus/hot reset.  The PCIESS
@@ -3794,19 +3786,6 @@ static void quirk_no_pm_reset(struct pci_dev *dev)
  */
 DECLARE_PCI_FIXUP_CLASS_HEADER(PCI_VENDOR_ID_ATI, PCI_ANY_ID,
 			       PCI_CLASS_DISPLAY_VGA, 8, quirk_no_pm_reset);
-
-/*
- * Spectrum-{1,2,3,4} devices report that a D3hot->D0 transition causes a reset
- * (i.e., they advertise NoSoftRst-). However, this transition does not have
- * any effect on the device: It continues to be operational and network ports
- * remain up. Advertising this support makes it seem as if a PM reset is viable
- * for these devices. Mark it as unavailable to skip it when testing reset
- * methods.
- */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MELLANOX, 0xcb84, quirk_no_pm_reset);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MELLANOX, 0xcf6c, quirk_no_pm_reset);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MELLANOX, 0xcf70, quirk_no_pm_reset);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MELLANOX, 0xcf80, quirk_no_pm_reset);
 
 /*
  * Thunderbolt controllers with broken MSI hotplug signaling:
@@ -4030,6 +4009,102 @@ static int reset_chelsio_generic_dev(struct pci_dev *dev, bool probe)
 #define PCI_DEVICE_ID_INTEL_IVB_M_VGA      0x0156
 #define PCI_DEVICE_ID_INTEL_IVB_M2_VGA     0x0166
 
+#define PCI_DEVICE_ID_OCTEONTX_SSO_VF	0xA04B
+#define PCI_DEVICE_ID_OCTEONTX_SSOW_VF	0xA04D
+#define PCI_DEVICE_ID_OCTEONTX_FPA_VF	0xA053
+#define PCI_DEVICE_ID_OCTEONTX_PKI_VF	0xA0DD
+#define PCI_DEVICE_ID_OCTEONTX_PKO_VF	0xA049
+#define PCI_DEVICE_ID_OCTEONTX_TIM_VF	0xA051
+#define PCI_DEVICE_ID_OCTEONTX_CPT_VF	0xA041
+#define PCI_DEVICE_ID_OCTEONTX_DPI_VF	0xA058
+#define PCI_DEVICE_ID_OCTEONTX_ZIP_VF	0xA037
+#define SSO_VF_VHGRPX_PF_MBOXX(x, y)	(0x200ULL | ((x) << 20) | ((y) << 3))
+#define MBOX_TRIGGER_OOB_RESET	0x01 /* OOB reset request */
+#define MBOX_TRIGGER_OOB_RES	0x80 /* OOB response mask */
+#define MBOX_OPERATION_TIMEOUT	1000 /* set timeout 1 second */
+
+enum octtx_coprocessor {
+	OCTTX_SSO,
+	OCTTX_SSOW,
+	OCTTX_FPA,
+	OCTTX_PKI,
+	OCTTX_PKO,
+	OCTTX_TIM,
+	OCTTX_CPT,
+	OCTTX_DPI,
+	OCTTX_ZIP,
+	OCTTX_COPROCESSOR_CNT
+};
+
+atomic64_t octtx_vf_reset[OCTTX_COPROCESSOR_CNT] = ATOMIC64_INIT(0);
+EXPORT_SYMBOL(octtx_vf_reset);
+
+/*
+ * Device-specific reset method for Cavium OcteonTx VF devices.
+ * It will trigger a reset of the OcteonTX domain.
+ */
+static int reset_cavium_octeon_vf(struct pci_dev *pdev, bool probe)
+{
+	u64 val;
+	int vf_id;
+	int count = 2000;
+	enum octtx_coprocessor cop;
+
+	switch (pdev->device) {
+	case PCI_DEVICE_ID_OCTEONTX_SSO_VF:
+		cop = OCTTX_SSO;
+		break;
+	case PCI_DEVICE_ID_OCTEONTX_SSOW_VF:
+		cop = OCTTX_SSOW;
+		break;
+	case PCI_DEVICE_ID_OCTEONTX_FPA_VF:
+		cop = OCTTX_FPA;
+		break;
+	case PCI_DEVICE_ID_OCTEONTX_PKI_VF:
+		cop = OCTTX_PKI;
+		break;
+	case PCI_DEVICE_ID_OCTEONTX_PKO_VF:
+		cop = OCTTX_PKO;
+		break;
+	case PCI_DEVICE_ID_OCTEONTX_TIM_VF:
+		cop = OCTTX_TIM;
+		break;
+	case PCI_DEVICE_ID_OCTEONTX_CPT_VF:
+		cop = OCTTX_CPT;
+		break;
+	case PCI_DEVICE_ID_OCTEONTX_DPI_VF:
+		cop = OCTTX_DPI;
+		break;
+	case PCI_DEVICE_ID_OCTEONTX_ZIP_VF:
+		cop = OCTTX_ZIP;
+		break;
+	default:
+		return -ENOTTY;
+	}
+
+	if (probe)
+		return 0;
+
+	vf_id = pdev->devfn - 1;
+	pci_dbg(pdev, "setting 0x%p bit %d\n",
+		&octtx_vf_reset[cop], vf_id);
+	atomic64_fetch_or(1ULL << vf_id, &octtx_vf_reset[cop]);
+	/* make sure other party reads it*/
+	mb();
+
+	while (count) {
+		usleep_range(1000, 2000);
+		val = atomic64_read(&octtx_vf_reset[cop]);
+		if ((val & (1ULL << vf_id)) == 0)
+			goto exit;
+		count--;
+	}
+	pci_err(pdev, " %s() reset timeout, vf_id %d, cop %u\n", __func__,
+		vf_id, cop);
+exit:
+	return 0;
+}
+
 /*
  * The Samsung SM961/PM961 controller can sometimes enter a fatal state after
  * FLR where config space reads from the device return -1.  We seem to be
@@ -4112,11 +4187,10 @@ static int nvme_disable_and_flr(struct pci_dev *dev, bool probe)
 }
 
 /*
- * Some NVMe controllers such as Intel DC P3700 and Solidigm P44 Pro will
- * timeout waiting for ready status to change after NVMe enable if the driver
- * starts interacting with the device too soon after FLR.  A 250ms delay after
- * FLR has heuristically proven to produce reliably working results for device
- * assignment cases.
+ * Intel DC P3700 NVMe controller will timeout waiting for ready status
+ * to change after NVMe enable if the driver starts interacting with the
+ * device too soon after FLR.  A 250ms delay after FLR has heuristically
+ * proven to produce reliably working results for device assignment cases.
  */
 static int delay_250ms_after_flr(struct pci_dev *dev, bool probe)
 {
@@ -4203,11 +4277,28 @@ static const struct pci_dev_reset_methods pci_dev_reset_methods[] = {
 	{ PCI_VENDOR_ID_SAMSUNG, 0xa804, nvme_disable_and_flr },
 	{ PCI_VENDOR_ID_INTEL, 0x0953, delay_250ms_after_flr },
 	{ PCI_VENDOR_ID_INTEL, 0x0a54, delay_250ms_after_flr },
-	{ PCI_VENDOR_ID_SOLIDIGM, 0xf1ac, delay_250ms_after_flr },
 	{ PCI_VENDOR_ID_CHELSIO, PCI_ANY_ID,
 		reset_chelsio_generic_dev },
 	{ PCI_VENDOR_ID_HUAWEI, PCI_DEVICE_ID_HINIC_VF,
 		reset_hinic_vf_dev },
+	{ PCI_VENDOR_ID_CAVIUM,	PCI_DEVICE_ID_OCTEONTX_SSO_VF,
+		reset_cavium_octeon_vf },
+	{ PCI_VENDOR_ID_CAVIUM,	PCI_DEVICE_ID_OCTEONTX_SSOW_VF,
+		reset_cavium_octeon_vf },
+	{ PCI_VENDOR_ID_CAVIUM,	PCI_DEVICE_ID_OCTEONTX_FPA_VF,
+		reset_cavium_octeon_vf },
+	{ PCI_VENDOR_ID_CAVIUM,	PCI_DEVICE_ID_OCTEONTX_PKI_VF,
+		reset_cavium_octeon_vf },
+	{ PCI_VENDOR_ID_CAVIUM,	PCI_DEVICE_ID_OCTEONTX_PKO_VF,
+		reset_cavium_octeon_vf },
+	{ PCI_VENDOR_ID_CAVIUM,	PCI_DEVICE_ID_OCTEONTX_TIM_VF,
+		reset_cavium_octeon_vf },
+	{ PCI_VENDOR_ID_CAVIUM,	PCI_DEVICE_ID_OCTEONTX_CPT_VF,
+		reset_cavium_octeon_vf },
+	{ PCI_VENDOR_ID_CAVIUM,	PCI_DEVICE_ID_OCTEONTX_DPI_VF,
+		reset_cavium_octeon_vf },
+	{ PCI_VENDOR_ID_CAVIUM,	PCI_DEVICE_ID_OCTEONTX_ZIP_VF,
+		reset_cavium_octeon_vf },
 	{ 0 }
 };
 
@@ -4244,10 +4335,6 @@ static void quirk_dma_func0_alias(struct pci_dev *dev)
  */
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_RICOH, 0xe832, quirk_dma_func0_alias);
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_RICOH, 0xe476, quirk_dma_func0_alias);
-
-/* Some Glenfly chips use function 0 as the PCIe Requester ID for DMA */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_GLENFLY, 0x3d40, quirk_dma_func0_alias);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_GLENFLY, 0x3d41, quirk_dma_func0_alias);
 
 static void quirk_dma_func1_alias(struct pci_dev *dev)
 {
@@ -4581,9 +4668,9 @@ static void quirk_disable_root_port_attributes(struct pci_dev *pdev)
 
 	pci_info(root_port, "Disabling No Snoop/Relaxed Ordering Attributes to avoid PCIe Completion erratum in %s\n",
 		 dev_name(&pdev->dev));
-	pcie_capability_clear_word(root_port, PCI_EXP_DEVCTL,
-				   PCI_EXP_DEVCTL_RELAX_EN |
-				   PCI_EXP_DEVCTL_NOSNOOP_EN);
+	pcie_capability_clear_and_set_word(root_port, PCI_EXP_DEVCTL,
+					   PCI_EXP_DEVCTL_RELAX_EN |
+					   PCI_EXP_DEVCTL_NOSNOOP_EN, 0);
 }
 
 /*
@@ -4725,21 +4812,17 @@ static int pci_quirk_xgene_acs(struct pci_dev *dev, u16 acs_flags)
  * But the implementation could block peer-to-peer transactions between them
  * and provide ACS-like functionality.
  */
-static int pci_quirk_zhaoxin_pcie_ports_acs(struct pci_dev *dev, u16 acs_flags)
+static int  pci_quirk_zhaoxin_pcie_ports_acs(struct pci_dev *dev, u16 acs_flags)
 {
 	if (!pci_is_pcie(dev) ||
 	    ((pci_pcie_type(dev) != PCI_EXP_TYPE_ROOT_PORT) &&
 	     (pci_pcie_type(dev) != PCI_EXP_TYPE_DOWNSTREAM)))
 		return -ENOTTY;
 
-	/*
-	 * Future Zhaoxin Root Ports and Switch Downstream Ports will
-	 * implement ACS capability in accordance with the PCIe Spec.
-	 */
 	switch (dev->device) {
 	case 0x0710 ... 0x071e:
 	case 0x0721:
-	case 0x0723 ... 0x0752:
+	case 0x0723 ... 0x0732:
 		return pci_acs_ctrl_enabled(acs_flags,
 			PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF);
 	}
@@ -4979,34 +5062,19 @@ static int pci_quirk_brcm_acs(struct pci_dev *dev, u16 acs_flags)
 		PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF);
 }
 
-static int pci_quirk_loongson_acs(struct pci_dev *dev, u16 acs_flags)
-{
-	/*
-	 * Loongson PCIe Root Ports don't advertise an ACS capability, but
-	 * they do not allow peer-to-peer transactions between Root Ports.
-	 * Allow each Root Port to be in a separate IOMMU group by masking
-	 * SV/RR/CR/UF bits.
-	 */
-	return pci_acs_ctrl_enabled(acs_flags,
-		PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF);
-}
-
 /*
- * Wangxun 40G/25G/10G/1G NICs have no ACS capability, but on
- * multi-function devices, the hardware isolates the functions by
- * directing all peer-to-peer traffic upstream as though PCI_ACS_RR and
- * PCI_ACS_CR were set.
+ * Wangxun 10G/1G NICs have no ACS capability, and on multi-function
+ * devices, peer-to-peer transactions are not be used between the functions.
+ * So add an ACS quirk for below devices to isolate functions.
  * SFxxx 1G NICs(em).
  * RP1000/RP2000 10G NICs(sp).
- * FF5xxx 40G/25G/10G NICs(aml).
  */
 static int  pci_quirk_wangxun_nic_acs(struct pci_dev *dev, u16 acs_flags)
 {
 	switch (dev->device) {
-	case 0x0100 ... 0x010F: /* EM */
-	case 0x1001: case 0x2001: /* SP */
-	case 0x5010: case 0x5025: case 0x5040: /* AML */
-	case 0x5110: case 0x5125: case 0x5140: /* AML */
+	case 0x0100 ... 0x010F:
+	case 0x1001:
+	case 0x2001:
 		return pci_acs_ctrl_enabled(acs_flags,
 			PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF);
 	}
@@ -5088,8 +5156,6 @@ static const struct pci_dev_acs_enabled {
 	/* QCOM QDF2xxx root ports */
 	{ PCI_VENDOR_ID_QCOM, 0x0400, pci_quirk_qcom_rp_acs },
 	{ PCI_VENDOR_ID_QCOM, 0x0401, pci_quirk_qcom_rp_acs },
-	/* QCOM SA8775P root port */
-	{ PCI_VENDOR_ID_QCOM, 0x0115, pci_quirk_qcom_rp_acs },
 	/* HXT SD4800 root ports. The ACS design is same as QCOM QDF2xxx */
 	{ PCI_VENDOR_ID_HXT, 0x0401, pci_quirk_qcom_rp_acs },
 	/* Intel PCH root ports */
@@ -5119,22 +5185,7 @@ static const struct pci_dev_acs_enabled {
 	{ PCI_VENDOR_ID_BROADCOM, 0x1750, pci_quirk_mf_endpoint_acs },
 	{ PCI_VENDOR_ID_BROADCOM, 0x1751, pci_quirk_mf_endpoint_acs },
 	{ PCI_VENDOR_ID_BROADCOM, 0x1752, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_BROADCOM, 0x1760, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_BROADCOM, 0x1761, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_BROADCOM, 0x1762, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_BROADCOM, 0x1763, pci_quirk_mf_endpoint_acs },
 	{ PCI_VENDOR_ID_BROADCOM, 0xD714, pci_quirk_brcm_acs },
-	/* Loongson PCIe Root Ports */
-	{ PCI_VENDOR_ID_LOONGSON, 0x3C09, pci_quirk_loongson_acs },
-	{ PCI_VENDOR_ID_LOONGSON, 0x3C19, pci_quirk_loongson_acs },
-	{ PCI_VENDOR_ID_LOONGSON, 0x3C29, pci_quirk_loongson_acs },
-	{ PCI_VENDOR_ID_LOONGSON, 0x7A09, pci_quirk_loongson_acs },
-	{ PCI_VENDOR_ID_LOONGSON, 0x7A19, pci_quirk_loongson_acs },
-	{ PCI_VENDOR_ID_LOONGSON, 0x7A29, pci_quirk_loongson_acs },
-	{ PCI_VENDOR_ID_LOONGSON, 0x7A39, pci_quirk_loongson_acs },
-	{ PCI_VENDOR_ID_LOONGSON, 0x7A49, pci_quirk_loongson_acs },
-	{ PCI_VENDOR_ID_LOONGSON, 0x7A59, pci_quirk_loongson_acs },
-	{ PCI_VENDOR_ID_LOONGSON, 0x7A69, pci_quirk_loongson_acs },
 	/* Amazon Annapurna Labs */
 	{ PCI_VENDOR_ID_AMAZON_ANNAPURNA_LABS, 0x0031, pci_quirk_al_acs },
 	/* Zhaoxin multi-function devices */
@@ -5178,8 +5229,6 @@ static const struct pci_dev_acs_enabled {
 	{ PCI_VENDOR_ID_ZHAOXIN, PCI_ANY_ID, pci_quirk_zhaoxin_pcie_ports_acs },
 	/* Wangxun nics */
 	{ PCI_VENDOR_ID_WANGXUN, PCI_ANY_ID, pci_quirk_wangxun_nic_acs },
-	/* allow acs for any */
-	{ PCI_ANY_ID, PCI_ANY_ID, pcie_acs_overrides },
 	{ 0 }
 };
 
@@ -5544,14 +5593,6 @@ DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_AMD, 0x7901, quirk_no_flr);
 DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x1502, quirk_no_flr);
 DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x1503, quirk_no_flr);
 
-/* FLR may cause the SolidRun SNET DPU (rev 0x1) to hang */
-static void quirk_no_flr_snet(struct pci_dev *dev)
-{
-	if (dev->revision == 0x1)
-		quirk_no_flr(dev);
-}
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SOLIDRUN, 0x1000, quirk_no_flr_snet);
-
 static void quirk_no_ext_tags(struct pci_dev *pdev)
 {
 	struct pci_host_bridge *bridge = pci_find_host_bridge(pdev->bus);
@@ -5564,7 +5605,6 @@ static void quirk_no_ext_tags(struct pci_dev *pdev)
 
 	pci_walk_bus(bridge->bus, pci_configure_extended_tags, NULL);
 }
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_3WARE, 0x1004, quirk_no_ext_tags);
 DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SERVERWORKS, 0x0132, quirk_no_ext_tags);
 DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SERVERWORKS, 0x0140, quirk_no_ext_tags);
 DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SERVERWORKS, 0x0141, quirk_no_ext_tags);
@@ -5957,53 +5997,6 @@ SWITCHTEC_QUIRK(0x4428);  /* PSXA 28XG4 */
 SWITCHTEC_QUIRK(0x4552);  /* PAXA 52XG4 */
 SWITCHTEC_QUIRK(0x4536);  /* PAXA 36XG4 */
 SWITCHTEC_QUIRK(0x4528);  /* PAXA 28XG4 */
-SWITCHTEC_QUIRK(0x5000);  /* PFX 100XG5 */
-SWITCHTEC_QUIRK(0x5084);  /* PFX 84XG5 */
-SWITCHTEC_QUIRK(0x5068);  /* PFX 68XG5 */
-SWITCHTEC_QUIRK(0x5052);  /* PFX 52XG5 */
-SWITCHTEC_QUIRK(0x5036);  /* PFX 36XG5 */
-SWITCHTEC_QUIRK(0x5028);  /* PFX 28XG5 */
-SWITCHTEC_QUIRK(0x5100);  /* PSX 100XG5 */
-SWITCHTEC_QUIRK(0x5184);  /* PSX 84XG5 */
-SWITCHTEC_QUIRK(0x5168);  /* PSX 68XG5 */
-SWITCHTEC_QUIRK(0x5152);  /* PSX 52XG5 */
-SWITCHTEC_QUIRK(0x5136);  /* PSX 36XG5 */
-SWITCHTEC_QUIRK(0x5128);  /* PSX 28XG5 */
-SWITCHTEC_QUIRK(0x5200);  /* PAX 100XG5 */
-SWITCHTEC_QUIRK(0x5284);  /* PAX 84XG5 */
-SWITCHTEC_QUIRK(0x5268);  /* PAX 68XG5 */
-SWITCHTEC_QUIRK(0x5252);  /* PAX 52XG5 */
-SWITCHTEC_QUIRK(0x5236);  /* PAX 36XG5 */
-SWITCHTEC_QUIRK(0x5228);  /* PAX 28XG5 */
-SWITCHTEC_QUIRK(0x5300);  /* PFXA 100XG5 */
-SWITCHTEC_QUIRK(0x5384);  /* PFXA 84XG5 */
-SWITCHTEC_QUIRK(0x5368);  /* PFXA 68XG5 */
-SWITCHTEC_QUIRK(0x5352);  /* PFXA 52XG5 */
-SWITCHTEC_QUIRK(0x5336);  /* PFXA 36XG5 */
-SWITCHTEC_QUIRK(0x5328);  /* PFXA 28XG5 */
-SWITCHTEC_QUIRK(0x5400);  /* PSXA 100XG5 */
-SWITCHTEC_QUIRK(0x5484);  /* PSXA 84XG5 */
-SWITCHTEC_QUIRK(0x5468);  /* PSXA 68XG5 */
-SWITCHTEC_QUIRK(0x5452);  /* PSXA 52XG5 */
-SWITCHTEC_QUIRK(0x5436);  /* PSXA 36XG5 */
-SWITCHTEC_QUIRK(0x5428);  /* PSXA 28XG5 */
-SWITCHTEC_QUIRK(0x5500);  /* PAXA 100XG5 */
-SWITCHTEC_QUIRK(0x5584);  /* PAXA 84XG5 */
-SWITCHTEC_QUIRK(0x5568);  /* PAXA 68XG5 */
-SWITCHTEC_QUIRK(0x5552);  /* PAXA 52XG5 */
-SWITCHTEC_QUIRK(0x5536);  /* PAXA 36XG5 */
-SWITCHTEC_QUIRK(0x5528);  /* PAXA 28XG5 */
-
-#define SWITCHTEC_PCI100X_QUIRK(vid) \
-	DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_EFAR, vid, \
-		PCI_CLASS_BRIDGE_OTHER, 8, quirk_switchtec_ntb_dma_alias)
-SWITCHTEC_PCI100X_QUIRK(0x1001);  /* PCI1001XG4 */
-SWITCHTEC_PCI100X_QUIRK(0x1002);  /* PCI1002XG4 */
-SWITCHTEC_PCI100X_QUIRK(0x1003);  /* PCI1003XG4 */
-SWITCHTEC_PCI100X_QUIRK(0x1004);  /* PCI1004XG4 */
-SWITCHTEC_PCI100X_QUIRK(0x1005);  /* PCI1005XG4 */
-SWITCHTEC_PCI100X_QUIRK(0x1006);  /* PCI1006XG4 */
-
 
 /*
  * The PLX NTB uses devfn proxy IDs to move TLPs between NT endpoints.
@@ -6253,7 +6246,7 @@ static void dpc_log_size(struct pci_dev *dev)
 	if (!(val & PCI_EXP_DPC_CAP_RP_EXT))
 		return;
 
-	if (FIELD_GET(PCI_EXP_DPC_RP_PIO_LOG_SIZE, val) == 0) {
+	if (!((val & PCI_EXP_DPC_RP_PIO_LOG_SIZE) >> 8)) {
 		pci_info(dev, "Overriding RP PIO Log Size to 4\n");
 		dev->dpc_rp_log_size = 4;
 	}
@@ -6274,9 +6267,6 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x9a2b, dpc_log_size);
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x9a2d, dpc_log_size);
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x9a2f, dpc_log_size);
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x9a31, dpc_log_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0xa72f, dpc_log_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0xa73f, dpc_log_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0xa76e, dpc_log_size);
 #endif
 
 /*
@@ -6290,3 +6280,44 @@ static void pci_fixup_d3cold_delay_1sec(struct pci_dev *pdev)
 	pdev->d3cold_delay = 1000;
 }
 DECLARE_PCI_FIXUP_FINAL(0x5555, 0x0004, pci_fixup_d3cold_delay_1sec);
+
+/* Marvell cnf10ka (0xba00) requires fix for device at slot (0xe), func. 0x0
+ * Wrong values for BAR0 and BAR4 are fetched from config space.
+ * There are some devices that doesn't require fixing, so the fix is not always
+ * applied. Deciding factor is curent value of BAR0/BAR4.
+ * Config. space for cnf10ka is read-only, Changing the registers isn't possible
+ */
+#define CAVIUM_XCP0_ADDR_OK	0x000082c000000000ULL /* Correct PCI BAR base */
+#define CAVIUM_XCP0_FIX_MASK	0xffffffff00000000ULL
+#define CAVIUM_XCP0_SHOULD_FIX(addr) \
+	(((addr) & CAVIUM_XCP0_FIX_MASK) != CAVIUM_XCP0_ADDR_OK)
+#define CAVIUM_XCP0_FIX_ADDR(addr) \
+	(((addr) & (~CAVIUM_XCP0_FIX_MASK)) | CAVIUM_XCP0_ADDR_OK)
+#define CAVIUM_XCP0_FIX_SOC(subsys) \
+	(((subsys) == 0xba00) || ((subsys) == 0xbc00))
+
+static void quirk_cavium_xcp0_bar_fixup(struct pci_dev *dev)
+{
+	int i;
+
+	if (CAVIUM_XCP0_FIX_SOC(dev->subsystem_device) && dev->devfn == 0xe0) {
+		for (i = 0; i < PCI_STD_RESOURCE_END; i++) {
+
+			struct resource *r = &dev->resource[i];
+			int ret;
+
+			if (!(r->flags & IORESOURCE_MEM))
+				continue;
+
+			/* There are revision of HW that not need fixup */
+			if (CAVIUM_XCP0_SHOULD_FIX(r->start)) {
+				r->start = CAVIUM_XCP0_FIX_ADDR(r->start);
+				r->end = CAVIUM_XCP0_FIX_ADDR(r->end);
+				ret = pci_claim_resource(dev, i);
+				pci_info(dev, "Fixup (%d) %llx - %llx/%lx. (%d)\n",
+					 i, r->start, r->end, r->flags, ret);
+			}
+		}
+	}
+}
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_CAVIUM, 0xa067, quirk_cavium_xcp0_bar_fixup);

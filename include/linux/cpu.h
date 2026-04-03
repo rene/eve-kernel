@@ -74,12 +74,6 @@ extern ssize_t cpu_show_spec_rstack_overflow(struct device *dev,
 					     struct device_attribute *attr, char *buf);
 extern ssize_t cpu_show_gds(struct device *dev,
 			    struct device_attribute *attr, char *buf);
-extern ssize_t cpu_show_reg_file_data_sampling(struct device *dev,
-					       struct device_attribute *attr, char *buf);
-extern ssize_t cpu_show_indirect_target_selection(struct device *dev,
-						  struct device_attribute *attr, char *buf);
-extern ssize_t cpu_show_tsa(struct device *dev, struct device_attribute *attr, char *buf);
-extern ssize_t cpu_show_vmscape(struct device *dev, struct device_attribute *attr, char *buf);
 
 extern __printf(4, 5)
 struct device *cpu_device_create(struct device *parent, void *drvdata,
@@ -247,5 +241,7 @@ static inline int cpuhp_smt_disable(enum cpuhp_smt_control ctrlval) { return 0; 
 
 extern bool cpu_mitigations_off(void);
 extern bool cpu_mitigations_auto_nosmt(void);
+
+extern void print_arch_cpu_state(int cpu);
 
 #endif /* _LINUX_CPU_H_ */

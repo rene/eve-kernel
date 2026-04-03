@@ -208,11 +208,6 @@ static int set_queue_properties_from_user(struct queue_properties *q_properties,
 		return -EINVAL;
 	}
 
-	if (args->ring_size < KFD_MIN_QUEUE_RING_SIZE) {
-		args->ring_size = KFD_MIN_QUEUE_RING_SIZE;
-		pr_debug("Size lower. clamped to KFD_MIN_QUEUE_RING_SIZE");
-	}
-
 	if (!access_ok((const void __user *) args->read_pointer_address,
 			sizeof(uint32_t))) {
 		pr_err("Can't access read pointer\n");
@@ -413,7 +408,7 @@ static int kfd_ioctl_create_queue(struct file *filep, struct kfd_process *p,
 
 err_create_queue:
 	if (wptr_bo)
-		amdgpu_amdkfd_free_gtt_mem(dev->adev, (void **)&wptr_bo);
+		amdgpu_amdkfd_free_gtt_mem(dev->adev, wptr_bo);
 err_wptr_map_gart:
 err_alloc_doorbells:
 err_bind_process:
@@ -467,11 +462,6 @@ static int kfd_ioctl_update_queue(struct file *filp, struct kfd_process *p,
 	if (!is_power_of_2(args->ring_size) && (args->ring_size != 0)) {
 		pr_err("Ring size must be a power of 2 or 0\n");
 		return -EINVAL;
-	}
-
-	if (args->ring_size < KFD_MIN_QUEUE_RING_SIZE) {
-		args->ring_size = KFD_MIN_QUEUE_RING_SIZE;
-		pr_debug("Size lower. clamped to KFD_MIN_QUEUE_RING_SIZE");
 	}
 
 	properties.queue_address = args->ring_base_address;
@@ -775,8 +765,8 @@ static int kfd_ioctl_get_process_apertures_new(struct file *filp,
 	 * nodes, but not more than args->num_of_nodes as that is
 	 * the amount of memory allocated by user
 	 */
-	pa = kcalloc(args->num_of_nodes, sizeof(struct kfd_process_device_apertures),
-		     GFP_KERNEL);
+	pa = kzalloc((sizeof(struct kfd_process_device_apertures) *
+				args->num_of_nodes), GFP_KERNEL);
 	if (!pa)
 		return -ENOMEM;
 
@@ -1116,7 +1106,7 @@ static int kfd_ioctl_alloc_memory_of_gpu(struct file *filep,
 			goto err_unlock;
 		}
 		offset = dev->adev->rmmio_remap.bus_addr;
-		if (!offset || (PAGE_SIZE > 4096)) {
+		if (!offset) {
 			err = -ENOMEM;
 			goto err_unlock;
 		}
@@ -1410,23 +1400,17 @@ static int kfd_ioctl_unmap_memory_from_gpu(struct file *filep,
 			goto sync_memory_failed;
 		}
 	}
-
-	/* Flush TLBs after waiting for the page table updates to complete */
-	for (i = 0; i < args->n_devices; i++) {
-		peer_pdd = kfd_process_device_data_by_id(p, devices_arr[i]);
-		if (WARN_ON_ONCE(!peer_pdd))
-			continue;
-		if (flush_tlb)
-			kfd_flush_tlb(peer_pdd, TLB_FLUSH_HEAVYWEIGHT);
-
-		/* Remove dma mapping after tlb flush to avoid IO_PAGE_FAULT */
-		err = amdgpu_amdkfd_gpuvm_dmaunmap_mem(mem, peer_pdd->drm_priv);
-		if (err)
-			goto sync_memory_failed;
-	}
-
 	mutex_unlock(&p->mutex);
 
+	if (flush_tlb) {
+		/* Flush TLBs after waiting for the page table updates to complete */
+		for (i = 0; i < args->n_devices; i++) {
+			peer_pdd = kfd_process_device_data_by_id(p, devices_arr[i]);
+			if (WARN_ON_ONCE(!peer_pdd))
+				continue;
+			kfd_flush_tlb(peer_pdd, TLB_FLUSH_HEAVYWEIGHT);
+		}
+	}
 	kfree(devices_arr);
 
 	return 0;
@@ -2231,7 +2215,7 @@ static int criu_restore_memory_of_gpu(struct kfd_process_device *pdd,
 			return -EINVAL;
 		}
 		offset = pdd->dev->adev->rmmio_remap.bus_addr;
-		if (!offset || (PAGE_SIZE > 4096)) {
+		if (!offset) {
 			pr_err("amdgpu_amdkfd_get_mmio_remap_phys_addr failed\n");
 			return -ENOMEM;
 		}
@@ -2900,9 +2884,6 @@ static int kfd_mmio_mmap(struct kfd_dev *dev, struct kfd_process *process,
 	phys_addr_t address;
 
 	if (vma->vm_end - vma->vm_start != PAGE_SIZE)
-		return -EINVAL;
-
-	if (PAGE_SIZE > 4096)
 		return -EINVAL;
 
 	address = dev->adev->rmmio_remap.bus_addr;

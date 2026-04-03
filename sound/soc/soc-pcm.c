@@ -906,13 +906,7 @@ static int __soc_pcm_prepare(struct snd_soc_pcm_runtime *rtd,
 		snd_soc_dai_digital_mute(dai, 0, substream->stream);
 
 out:
-	/*
-	 * Don't use soc_pcm_ret() on .prepare callback to lower error log severity
-	 *
-	 * We don't want to log an error since we do not want to give userspace a way to do a
-	 * denial-of-service attack on the syslog / diskspace.
-	 */
-	return ret;
+	return soc_pcm_ret(rtd, ret);
 }
 
 /* PCM prepare ops for non-DPCM streams */
@@ -924,13 +918,6 @@ static int soc_pcm_prepare(struct snd_pcm_substream *substream)
 	snd_soc_dpcm_mutex_lock(rtd);
 	ret = __soc_pcm_prepare(rtd, substream);
 	snd_soc_dpcm_mutex_unlock(rtd);
-
-	/*
-	 * Don't use soc_pcm_ret() on .prepare callback to lower error log severity
-	 *
-	 * We don't want to log an error since we do not want to give userspace a way to do a
-	 * denial-of-service attack on the syslog / diskspace.
-	 */
 	return ret;
 }
 
@@ -1499,13 +1486,10 @@ static int dpcm_add_paths(struct snd_soc_pcm_runtime *fe, int stream,
 		/*
 		 * Filter for systems with 'component_chaining' enabled.
 		 * This helps to avoid unnecessary re-configuration of an
-		 * already active BE on such systems and ensures the BE DAI
-		 * widget is powered ON after hw_params() BE DAI callback.
+		 * already active BE on such systems.
 		 */
 		if (fe->card->component_chaining &&
 		    (be->dpcm[stream].state != SND_SOC_DPCM_STATE_NEW) &&
-		    (be->dpcm[stream].state != SND_SOC_DPCM_STATE_OPEN) &&
-		    (be->dpcm[stream].state != SND_SOC_DPCM_STATE_HW_PARAMS) &&
 		    (be->dpcm[stream].state != SND_SOC_DPCM_STATE_CLOSE))
 			continue;
 
@@ -2438,13 +2422,7 @@ int dpcm_be_dai_prepare(struct snd_soc_pcm_runtime *fe, int stream)
 		be->dpcm[stream].state = SND_SOC_DPCM_STATE_PREPARE;
 	}
 
-	/*
-	 * Don't use soc_pcm_ret() on .prepare callback to lower error log severity
-	 *
-	 * We don't want to log an error since we do not want to give userspace a way to do a
-	 * denial-of-service attack on the syslog / diskspace.
-	 */
-	return ret;
+	return soc_pcm_ret(fe, ret);
 }
 
 static int dpcm_fe_dai_prepare(struct snd_pcm_substream *substream)
@@ -2481,13 +2459,7 @@ out:
 	dpcm_set_fe_update_state(fe, stream, SND_SOC_DPCM_UPDATE_NO);
 	snd_soc_dpcm_mutex_unlock(fe);
 
-	/*
-	 * Don't use soc_pcm_ret() on .prepare callback to lower error log severity
-	 *
-	 * We don't want to log an error since we do not want to give userspace a way to do a
-	 * denial-of-service attack on the syslog / diskspace.
-	 */
-	return ret;
+	return soc_pcm_ret(fe, ret);
 }
 
 static int dpcm_run_update_shutdown(struct snd_soc_pcm_runtime *fe, int stream)

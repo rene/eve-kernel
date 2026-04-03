@@ -241,7 +241,8 @@ static int io_poll_check_events(struct io_kiocb *req, bool *locked)
 	struct io_ring_ctx *ctx = req->ctx;
 	int v;
 
-	if (unlikely(io_should_terminate_tw(ctx)))
+	/* req->task == current here, checking PF_EXITING is safe */
+	if (unlikely(req->task->flags & PF_EXITING))
 		return -ECANCELED;
 
 	do {
@@ -304,8 +305,6 @@ static int io_poll_check_events(struct io_kiocb *req, bool *locked)
 			}
 		} else {
 			int ret = io_poll_issue(req, locked);
-			io_kbuf_recycle(req, 0);
-
 			if (ret == IOU_STOP_MULTISHOT)
 				return IOU_POLL_REMOVE_POLL_USE_RES;
 			if (ret < 0)

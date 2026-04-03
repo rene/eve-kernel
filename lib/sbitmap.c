@@ -60,30 +60,12 @@ static inline void update_alloc_hint_after_get(struct sbitmap *sb,
 /*
  * See if we have deferred clears that we can batch move
  */
-static inline bool sbitmap_deferred_clear(struct sbitmap_word *map,
-		unsigned int depth, unsigned int alloc_hint, bool wrap)
+static inline bool sbitmap_deferred_clear(struct sbitmap_word *map)
 {
-	unsigned long mask, word_mask;
+	unsigned long mask;
 
-	guard(raw_spinlock_irqsave)(&map->swap_lock);
-
-	if (!map->cleared) {
-		if (depth == 0)
-			return false;
-
-		word_mask = (~0UL) >> (BITS_PER_LONG - depth);
-		/*
-		 * The current behavior is to always retry after moving
-		 * ->cleared to word, and we change it to retry in case
-		 * of any free bits. To avoid an infinite loop, we need
-		 * to take wrap & alloc_hint into account, otherwise a
-		 * soft lockup may occur.
-		 */
-		if (!wrap && alloc_hint)
-			word_mask &= ~((1UL << alloc_hint) - 1);
-
-		return (READ_ONCE(map->word) & word_mask) != word_mask;
-	}
+	if (!READ_ONCE(map->cleared))
+		return false;
 
 	/*
 	 * First get a stable cleared mask, setting the old mask to 0.
@@ -103,7 +85,6 @@ int sbitmap_init_node(struct sbitmap *sb, unsigned int depth, int shift,
 		      bool alloc_hint)
 {
 	unsigned int bits_per_word;
-	int i;
 
 	if (shift < 0)
 		shift = sbitmap_calculate_shift(depth);
@@ -135,9 +116,6 @@ int sbitmap_init_node(struct sbitmap *sb, unsigned int depth, int shift,
 		return -ENOMEM;
 	}
 
-	for (i = 0; i < sb->map_nr; i++)
-		raw_spin_lock_init(&sb->map[i].swap_lock);
-
 	return 0;
 }
 EXPORT_SYMBOL_GPL(sbitmap_init_node);
@@ -148,7 +126,7 @@ void sbitmap_resize(struct sbitmap *sb, unsigned int depth)
 	unsigned int i;
 
 	for (i = 0; i < sb->map_nr; i++)
-		sbitmap_deferred_clear(&sb->map[i], 0, 0, 0);
+		sbitmap_deferred_clear(&sb->map[i]);
 
 	sb->depth = depth;
 	sb->map_nr = DIV_ROUND_UP(sb->depth, bits_per_word);
@@ -189,19 +167,18 @@ static int __sbitmap_get_word(unsigned long *word, unsigned long depth,
 	return nr;
 }
 
-static int sbitmap_find_bit_in_word(struct sbitmap_word *map,
-				    unsigned int depth,
-				    unsigned int alloc_hint,
-				    bool wrap)
+static int sbitmap_find_bit_in_index(struct sbitmap *sb, int index,
+				     unsigned int alloc_hint)
 {
+	struct sbitmap_word *map = &sb->map[index];
 	int nr;
 
 	do {
-		nr = __sbitmap_get_word(&map->word, depth,
-					alloc_hint, wrap);
+		nr = __sbitmap_get_word(&map->word, __map_depth(sb, index),
+					alloc_hint, !sb->round_robin);
 		if (nr != -1)
 			break;
-		if (!sbitmap_deferred_clear(map, depth, alloc_hint, wrap))
+		if (!sbitmap_deferred_clear(map))
 			break;
 	} while (1);
 
@@ -226,9 +203,7 @@ static int __sbitmap_get(struct sbitmap *sb, unsigned int alloc_hint)
 		alloc_hint = 0;
 
 	for (i = 0; i < sb->map_nr; i++) {
-		nr = sbitmap_find_bit_in_word(&sb->map[index],
-					      __map_depth(sb, index),
-					      alloc_hint, !sb->round_robin);
+		nr = sbitmap_find_bit_in_index(sb, index, alloc_hint);
 		if (nr != -1) {
 			nr += index << sb->shift;
 			break;
@@ -268,24 +243,30 @@ static int __sbitmap_get_shallow(struct sbitmap *sb,
 	int nr = -1;
 
 	index = SB_NR_TO_INDEX(sb, alloc_hint);
-	alloc_hint = SB_NR_TO_BIT(sb, alloc_hint);
 
 	for (i = 0; i < sb->map_nr; i++) {
-		nr = sbitmap_find_bit_in_word(&sb->map[index],
-					      min_t(unsigned int,
-						    __map_depth(sb, index),
-						    shallow_depth),
-					      alloc_hint, true);
-
+again:
+		nr = __sbitmap_get_word(&sb->map[index].word,
+					min_t(unsigned int,
+					      __map_depth(sb, index),
+					      shallow_depth),
+					SB_NR_TO_BIT(sb, alloc_hint), true);
 		if (nr != -1) {
 			nr += index << sb->shift;
 			break;
 		}
 
+		if (sbitmap_deferred_clear(&sb->map[index]))
+			goto again;
+
 		/* Jump to next index. */
-		alloc_hint = 0;
-		if (++index >= sb->map_nr)
+		index++;
+		alloc_hint = index << sb->shift;
+
+		if (index >= sb->map_nr) {
 			index = 0;
+			alloc_hint = 0;
+		}
 	}
 
 	return nr;
@@ -525,18 +506,18 @@ unsigned long __sbitmap_queue_get_batch(struct sbitmap_queue *sbq, int nr_tags,
 		struct sbitmap_word *map = &sb->map[index];
 		unsigned long get_mask;
 		unsigned int map_depth = __map_depth(sb, index);
-		unsigned long val;
 
-		sbitmap_deferred_clear(map, 0, 0, 0);
-		val = READ_ONCE(map->word);
-		if (val == (1UL << (map_depth - 1)) - 1)
+		sbitmap_deferred_clear(map);
+		if (map->word == (1UL << (map_depth - 1)) - 1)
 			goto next;
 
-		nr = find_first_zero_bit(&val, map_depth);
+		nr = find_first_zero_bit(&map->word, map_depth);
 		if (nr + nr_tags <= map_depth) {
 			atomic_long_t *ptr = (atomic_long_t *) &map->word;
+			unsigned long val;
 
 			get_mask = ((1UL << nr_tags) - 1) << nr;
+			val = READ_ONCE(map->word);
 			while (!atomic_long_try_cmpxchg(ptr, &val,
 							  get_mask | val))
 				;

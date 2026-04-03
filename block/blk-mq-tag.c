@@ -40,7 +40,6 @@ static void blk_mq_update_wake_batch(struct blk_mq_tags *tags,
 void __blk_mq_tag_busy(struct blk_mq_hw_ctx *hctx)
 {
 	unsigned int users;
-	unsigned long flags;
 	struct blk_mq_tags *tags = hctx->tags;
 
 	/*
@@ -59,11 +58,11 @@ void __blk_mq_tag_busy(struct blk_mq_hw_ctx *hctx)
 			return;
 	}
 
-	spin_lock_irqsave(&tags->lock, flags);
+	spin_lock_irq(&tags->lock);
 	users = tags->active_queues + 1;
 	WRITE_ONCE(tags->active_queues, users);
 	blk_mq_update_wake_batch(tags, users);
-	spin_unlock_irqrestore(&tags->lock, flags);
+	spin_unlock_irq(&tags->lock);
 }
 
 /*

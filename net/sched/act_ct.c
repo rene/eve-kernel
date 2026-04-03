@@ -39,28 +39,21 @@ static struct workqueue_struct *act_ct_wq;
 static struct rhashtable zones_ht;
 static DEFINE_MUTEX(zones_mutex);
 
-struct zones_ht_key {
-	struct net *net;
-	u16 zone;
-	/* Note : pad[] must be the last field. */
-	u8  pad[];
-};
-
 struct tcf_ct_flow_table {
 	struct rhash_head node; /* In zones tables */
 
 	struct rcu_work rwork;
 	struct nf_flowtable nf_ft;
 	refcount_t ref;
-	struct zones_ht_key key;
+	u16 zone;
 
 	bool dying;
 };
 
 static const struct rhashtable_params zones_params = {
 	.head_offset = offsetof(struct tcf_ct_flow_table, node),
-	.key_offset = offsetof(struct tcf_ct_flow_table, key),
-	.key_len = offsetof(struct zones_ht_key, pad),
+	.key_offset = offsetof(struct tcf_ct_flow_table, zone),
+	.key_len = sizeof_field(struct tcf_ct_flow_table, zone),
 	.automatic_shrinking = true,
 };
 
@@ -175,11 +168,11 @@ tcf_ct_flow_table_add_action_nat_udp(const struct nf_conntrack_tuple *tuple,
 
 static void tcf_ct_flow_table_add_action_meta(struct nf_conn *ct,
 					      enum ip_conntrack_dir dir,
-					      enum ip_conntrack_info ctinfo,
 					      struct flow_action *action)
 {
 	struct nf_conn_labels *ct_labels;
 	struct flow_action_entry *entry;
+	enum ip_conntrack_info ctinfo;
 	u32 *act_ct_labels;
 
 	entry = tcf_ct_flow_table_flow_action_get_next(action);
@@ -187,6 +180,8 @@ static void tcf_ct_flow_table_add_action_meta(struct nf_conn *ct,
 #if IS_ENABLED(CONFIG_NF_CONNTRACK_MARK)
 	entry->ct_metadata.mark = READ_ONCE(ct->mark);
 #endif
+	ctinfo = dir == IP_CT_DIR_ORIGINAL ? IP_CT_ESTABLISHED :
+					     IP_CT_ESTABLISHED_REPLY;
 	/* aligns with the CT reference on the SKB nf_ct_set */
 	entry->ct_metadata.cookie = (unsigned long)ct | ctinfo;
 	entry->ct_metadata.orig_dir = dir == IP_CT_DIR_ORIGINAL;
@@ -240,26 +235,22 @@ static int tcf_ct_flow_table_add_action_nat(struct net *net,
 }
 
 static int tcf_ct_flow_table_fill_actions(struct net *net,
-					  struct flow_offload *flow,
+					  const struct flow_offload *flow,
 					  enum flow_offload_tuple_dir tdir,
 					  struct nf_flow_rule *flow_rule)
 {
 	struct flow_action *action = &flow_rule->rule->action;
 	int num_entries = action->num_entries;
 	struct nf_conn *ct = flow->ct;
-	enum ip_conntrack_info ctinfo;
 	enum ip_conntrack_dir dir;
 	int i, err;
 
 	switch (tdir) {
 	case FLOW_OFFLOAD_DIR_ORIGINAL:
 		dir = IP_CT_DIR_ORIGINAL;
-		ctinfo = IP_CT_ESTABLISHED;
-		set_bit(NF_FLOW_HW_ESTABLISHED, &flow->flags);
 		break;
 	case FLOW_OFFLOAD_DIR_REPLY:
 		dir = IP_CT_DIR_REPLY;
-		ctinfo = IP_CT_ESTABLISHED_REPLY;
 		break;
 	default:
 		return -EOPNOTSUPP;
@@ -269,7 +260,7 @@ static int tcf_ct_flow_table_fill_actions(struct net *net,
 	if (err)
 		goto err_nat;
 
-	tcf_ct_flow_table_add_action_meta(ct, dir, ctinfo, action);
+	tcf_ct_flow_table_add_action_meta(ct, dir, action);
 	return 0;
 
 err_nat:
@@ -281,50 +272,18 @@ err_nat:
 	return err;
 }
 
-static bool tcf_ct_flow_is_outdated(const struct flow_offload *flow)
-{
-	return test_bit(IPS_SEEN_REPLY_BIT, &flow->ct->status) &&
-	       test_bit(IPS_HW_OFFLOAD_BIT, &flow->ct->status) &&
-	       !test_bit(NF_FLOW_HW_PENDING, &flow->flags) &&
-	       !test_bit(NF_FLOW_HW_ESTABLISHED, &flow->flags);
-}
-
-static void tcf_ct_flow_table_get_ref(struct tcf_ct_flow_table *ct_ft);
-
-static void tcf_ct_nf_get(struct nf_flowtable *ft)
-{
-	struct tcf_ct_flow_table *ct_ft =
-		container_of(ft, struct tcf_ct_flow_table, nf_ft);
-
-	tcf_ct_flow_table_get_ref(ct_ft);
-}
-
-static void tcf_ct_flow_table_put(struct tcf_ct_flow_table *ct_ft);
-
-static void tcf_ct_nf_put(struct nf_flowtable *ft)
-{
-	struct tcf_ct_flow_table *ct_ft =
-		container_of(ft, struct tcf_ct_flow_table, nf_ft);
-
-	tcf_ct_flow_table_put(ct_ft);
-}
-
 static struct nf_flowtable_type flowtable_ct = {
-	.gc		= tcf_ct_flow_is_outdated,
 	.action		= tcf_ct_flow_table_fill_actions,
-	.get		= tcf_ct_nf_get,
-	.put		= tcf_ct_nf_put,
 	.owner		= THIS_MODULE,
 };
 
 static int tcf_ct_flow_table_get(struct net *net, struct tcf_ct_params *params)
 {
-	struct zones_ht_key key = { .net = net, .zone = params->zone };
 	struct tcf_ct_flow_table *ct_ft;
 	int err = -ENOMEM;
 
 	mutex_lock(&zones_mutex);
-	ct_ft = rhashtable_lookup_fast(&zones_ht, &key, zones_params);
+	ct_ft = rhashtable_lookup_fast(&zones_ht, &params->zone, zones_params);
 	if (ct_ft && refcount_inc_not_zero(&ct_ft->ref))
 		goto out_unlock;
 
@@ -333,7 +292,7 @@ static int tcf_ct_flow_table_get(struct net *net, struct tcf_ct_params *params)
 		goto err_alloc;
 	refcount_set(&ct_ft->ref, 1);
 
-	ct_ft->key = key;
+	ct_ft->zone = params->zone;
 	err = rhashtable_insert_fast(&zones_ht, &ct_ft->node, zones_params);
 	if (err)
 		goto err_insert;
@@ -363,13 +322,9 @@ err_alloc:
 	return err;
 }
 
-static void tcf_ct_flow_table_get_ref(struct tcf_ct_flow_table *ct_ft)
-{
-	refcount_inc(&ct_ft->ref);
-}
-
 static void tcf_ct_flow_table_cleanup_work(struct work_struct *work)
 {
+	struct flow_block_cb *block_cb, *tmp_cb;
 	struct tcf_ct_flow_table *ct_ft;
 	struct flow_block *block;
 
@@ -377,18 +332,24 @@ static void tcf_ct_flow_table_cleanup_work(struct work_struct *work)
 			     rwork);
 	nf_flow_table_free(&ct_ft->nf_ft);
 
+	/* Remove any remaining callbacks before cleanup */
 	block = &ct_ft->nf_ft.flow_block;
 	down_write(&ct_ft->nf_ft.flow_block_lock);
-	WARN_ON(!list_empty(&block->cb_list));
+	list_for_each_entry_safe(block_cb, tmp_cb, &block->cb_list, list) {
+		list_del(&block_cb->list);
+		flow_block_cb_free(block_cb);
+	}
 	up_write(&ct_ft->nf_ft.flow_block_lock);
 	kfree(ct_ft);
 
 	module_put(THIS_MODULE);
 }
 
-static void tcf_ct_flow_table_put(struct tcf_ct_flow_table *ct_ft)
+static void tcf_ct_flow_table_put(struct tcf_ct_params *params)
 {
-	if (refcount_dec_and_test(&ct_ft->ref)) {
+	struct tcf_ct_flow_table *ct_ft = params->ct_ft;
+
+	if (refcount_dec_and_test(&params->ct_ft->ref)) {
 		rhashtable_remove_fast(&zones_ht, &ct_ft->node, zones_params);
 		INIT_RCU_WORK(&ct_ft->rwork, tcf_ct_flow_table_cleanup_work);
 		queue_rcu_work(act_ct_wq, &ct_ft->rwork);
@@ -402,20 +363,9 @@ static void tcf_ct_flow_tc_ifidx(struct flow_offload *entry,
 	entry->tuplehash[dir].tuple.tc.iifidx = act_ct_ext->ifindex[dir];
 }
 
-static void tcf_ct_flow_ct_ext_ifidx_update(struct flow_offload *entry)
-{
-	struct nf_conn_act_ct_ext *act_ct_ext;
-
-	act_ct_ext = nf_conn_act_ct_ext_find(entry->ct);
-	if (act_ct_ext) {
-		tcf_ct_flow_tc_ifidx(entry, act_ct_ext, FLOW_OFFLOAD_DIR_ORIGINAL);
-		tcf_ct_flow_tc_ifidx(entry, act_ct_ext, FLOW_OFFLOAD_DIR_REPLY);
-	}
-}
-
 static void tcf_ct_flow_table_add(struct tcf_ct_flow_table *ct_ft,
 				  struct nf_conn *ct,
-				  bool tcp, bool bidirectional)
+				  bool tcp)
 {
 	struct nf_conn_act_ct_ext *act_ct_ext;
 	struct flow_offload *entry;
@@ -434,8 +384,6 @@ static void tcf_ct_flow_table_add(struct tcf_ct_flow_table *ct_ft,
 		ct->proto.tcp.seen[0].flags |= IP_CT_TCP_FLAG_BE_LIBERAL;
 		ct->proto.tcp.seen[1].flags |= IP_CT_TCP_FLAG_BE_LIBERAL;
 	}
-	if (bidirectional)
-		__set_bit(NF_FLOW_HW_BIDIRECTIONAL, &entry->flags);
 
 	act_ct_ext = nf_conn_act_ct_ext_find(ct);
 	if (act_ct_ext) {
@@ -459,34 +407,26 @@ static void tcf_ct_flow_table_process_conn(struct tcf_ct_flow_table *ct_ft,
 					   struct nf_conn *ct,
 					   enum ip_conntrack_info ctinfo)
 {
-	bool tcp = false, bidirectional = true;
+	bool tcp = false;
+
+	if ((ctinfo != IP_CT_ESTABLISHED && ctinfo != IP_CT_ESTABLISHED_REPLY) ||
+	    !test_bit(IPS_ASSURED_BIT, &ct->status))
+		return;
 
 	switch (nf_ct_protonum(ct)) {
 	case IPPROTO_TCP:
-		if ((ctinfo != IP_CT_ESTABLISHED &&
-		     ctinfo != IP_CT_ESTABLISHED_REPLY) ||
-		    !test_bit(IPS_ASSURED_BIT, &ct->status) ||
-		    ct->proto.tcp.state != TCP_CONNTRACK_ESTABLISHED)
-			return;
-
 		tcp = true;
+		if (ct->proto.tcp.state != TCP_CONNTRACK_ESTABLISHED)
+			return;
 		break;
 	case IPPROTO_UDP:
-		if (!nf_ct_is_confirmed(ct))
-			return;
-		if (!test_bit(IPS_ASSURED_BIT, &ct->status))
-			bidirectional = false;
 		break;
 #ifdef CONFIG_NF_CT_PROTO_GRE
 	case IPPROTO_GRE: {
 		struct nf_conntrack_tuple *tuple;
 
-		if ((ctinfo != IP_CT_ESTABLISHED &&
-		     ctinfo != IP_CT_ESTABLISHED_REPLY) ||
-		    !test_bit(IPS_ASSURED_BIT, &ct->status) ||
-		    ct->status & IPS_NAT_MASK)
+		if (ct->status & IPS_NAT_MASK)
 			return;
-
 		tuple = &ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple;
 		/* No support for GRE v1 */
 		if (tuple->src.u.gre.key || tuple->dst.u.gre.key)
@@ -502,7 +442,7 @@ static void tcf_ct_flow_table_process_conn(struct tcf_ct_flow_table *ct_ft,
 	    ct->status & IPS_SEQ_ADJUST)
 		return;
 
-	tcf_ct_flow_table_add(ct_ft, ct, tcp, bidirectional);
+	tcf_ct_flow_table_add(ct_ft, ct, tcp);
 }
 
 static bool
@@ -656,7 +596,6 @@ static bool tcf_ct_flow_table_lookup(struct tcf_ct_params *p,
 	struct flow_offload_tuple tuple = {};
 	enum ip_conntrack_info ctinfo;
 	struct tcphdr *tcph = NULL;
-	bool force_refresh = false;
 	struct flow_offload *flow;
 	struct nf_conn *ct;
 	u8 dir;
@@ -682,40 +621,15 @@ static bool tcf_ct_flow_table_lookup(struct tcf_ct_params *p,
 	flow = container_of(tuplehash, struct flow_offload, tuplehash[dir]);
 	ct = flow->ct;
 
-	if (dir == FLOW_OFFLOAD_DIR_REPLY &&
-	    !test_bit(NF_FLOW_HW_BIDIRECTIONAL, &flow->flags)) {
-		/* Only offload reply direction after connection became
-		 * assured.
-		 */
-		if (test_bit(IPS_ASSURED_BIT, &ct->status))
-			set_bit(NF_FLOW_HW_BIDIRECTIONAL, &flow->flags);
-		else if (test_bit(NF_FLOW_HW_ESTABLISHED, &flow->flags))
-			/* If flow_table flow has already been updated to the
-			 * established state, then don't refresh.
-			 */
-			return false;
-		force_refresh = true;
-	}
-
 	if (tcph && (unlikely(tcph->fin || tcph->rst))) {
 		flow_offload_teardown(flow);
 		return false;
 	}
 
-	if (dir == FLOW_OFFLOAD_DIR_ORIGINAL)
-		ctinfo = test_bit(IPS_SEEN_REPLY_BIT, &ct->status) ?
-			IP_CT_ESTABLISHED : IP_CT_NEW;
-	else
-		ctinfo = IP_CT_ESTABLISHED_REPLY;
+	ctinfo = dir == FLOW_OFFLOAD_DIR_ORIGINAL ? IP_CT_ESTABLISHED :
+						    IP_CT_ESTABLISHED_REPLY;
 
-	nf_conn_act_ct_ext_fill(skb, ct, ctinfo);
-	tcf_ct_flow_ct_ext_ifidx_update(flow);
-	flow_offload_refresh(nf_ft, flow, force_refresh);
-	if (!test_bit(IPS_ASSURED_BIT, &ct->status)) {
-		/* Process this flow in SW to allow promoting to ASSURED */
-		return false;
-	}
-
+	flow_offload_refresh(nf_ft, flow);
 	nf_conntrack_get(&ct->ct_general);
 	nf_ct_set(skb, ct, ctinfo);
 	if (nf_ft->flags & NF_FLOWTABLE_COUNTER)
@@ -871,6 +785,7 @@ static int tcf_ct_handle_fragments(struct net *net, struct sk_buff *skb,
 	if (err || !frag)
 		return err;
 
+	skb_get(skb);
 	mru = tc_skb_cb(skb)->mru;
 
 	if (family == NFPROTO_IPV4) {
@@ -917,21 +832,16 @@ out_free:
 	return err;
 }
 
-static void tcf_ct_params_free(struct tcf_ct_params *params)
+static void tcf_ct_params_free(struct rcu_head *head)
 {
-	if (params->ct_ft)
-		tcf_ct_flow_table_put(params->ct_ft);
+	struct tcf_ct_params *params = container_of(head,
+						    struct tcf_ct_params, rcu);
+
+	tcf_ct_flow_table_put(params);
+
 	if (params->tmpl)
 		nf_ct_put(params->tmpl);
 	kfree(params);
-}
-
-static void tcf_ct_params_free_rcu(struct rcu_head *head)
-{
-	struct tcf_ct_params *params;
-
-	params = container_of(head, struct tcf_ct_params, rcu);
-	tcf_ct_params_free(params);
 }
 
 #if IS_ENABLED(CONFIG_NF_NAT)
@@ -1157,8 +1067,12 @@ static int tcf_ct_act(struct sk_buff *skb, const struct tc_action *a,
 	nh_ofs = skb_network_offset(skb);
 	skb_pull_rcsum(skb, nh_ofs);
 	err = tcf_ct_handle_fragments(net, skb, family, p->zone, &defrag);
+	if (err == -EINPROGRESS) {
+		retval = TC_ACT_STOLEN;
+		goto out_clear;
+	}
 	if (err)
-		goto out_frag;
+		goto drop;
 
 	err = tcf_ct_skb_network_trim(skb, family);
 	if (err)
@@ -1207,21 +1121,13 @@ do_nat:
 		tcf_ct_act_set_labels(ct, p->labels, p->labels_mask);
 
 		if (!nf_ct_is_confirmed(ct))
-			nf_conn_act_ct_ext_add(skb, ct, ctinfo);
+			nf_conn_act_ct_ext_add(ct);
 
 		/* This will take care of sending queued events
 		 * even if the connection is already confirmed.
 		 */
 		if (nf_conntrack_confirm(skb) != NF_ACCEPT)
 			goto drop;
-
-		/* The ct may be dropped if a clash has been resolved,
-		 * so it's necessary to retrieve it from skb again to
-		 * prevent UAF.
-		 */
-		ct = nf_ct_get(skb, &ctinfo);
-		if (!ct)
-			skip_add = true;
 	}
 
 	if (!skip_add)
@@ -1236,11 +1142,6 @@ out_clear:
 	if (defrag)
 		qdisc_skb_cb(skb)->pkt_len = skb->len;
 	return retval;
-
-out_frag:
-	if (err != -EINPROGRESS)
-		tcf_action_inc_drop_qstats(&c->common);
-	return TC_ACT_CONSUMED;
 
 drop:
 	tcf_action_inc_drop_qstats(&c->common);
@@ -1489,7 +1390,7 @@ static int tcf_ct_init(struct net *net, struct nlattr *nla,
 
 	err = tcf_ct_flow_table_get(net, params);
 	if (err)
-		goto cleanup;
+		goto cleanup_params;
 
 	spin_lock_bh(&c->tcf_lock);
 	goto_ch = tcf_action_set_ctrlact(*a, parm->action, goto_ch);
@@ -1500,15 +1401,17 @@ static int tcf_ct_init(struct net *net, struct nlattr *nla,
 	if (goto_ch)
 		tcf_chain_put_by_act(goto_ch);
 	if (params)
-		call_rcu(&params->rcu, tcf_ct_params_free_rcu);
+		call_rcu(&params->rcu, tcf_ct_params_free);
 
 	return res;
 
+cleanup_params:
+	if (params->tmpl)
+		nf_ct_put(params->tmpl);
 cleanup:
 	if (goto_ch)
 		tcf_chain_put_by_act(goto_ch);
-	if (params)
-		tcf_ct_params_free(params);
+	kfree(params);
 	tcf_idr_release(*a, bind);
 	return err;
 }
@@ -1520,7 +1423,7 @@ static void tcf_ct_cleanup(struct tc_action *a)
 
 	params = rcu_dereference_protected(c->params, 1);
 	if (params)
-		call_rcu(&params->rcu, tcf_ct_params_free_rcu);
+		call_rcu(&params->rcu, tcf_ct_params_free);
 }
 
 static int tcf_ct_dump_key_val(struct sk_buff *skb,

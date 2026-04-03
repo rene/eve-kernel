@@ -224,24 +224,19 @@ void dwc3_ep0_stall_and_restart(struct dwc3 *dwc)
 
 	/* reinitialize physical ep1 */
 	dep = dwc->eps[1];
-	dep->flags &= DWC3_EP_RESOURCE_ALLOCATED;
-	dep->flags |= DWC3_EP_ENABLED;
+	dep->flags = DWC3_EP_ENABLED;
 
 	/* stall is always issued on EP0 */
 	dep = dwc->eps[0];
 	__dwc3_gadget_ep_set_halt(dep, 1, false);
-	dep->flags &= DWC3_EP_RESOURCE_ALLOCATED | DWC3_EP_TRANSFER_STARTED;
-	dep->flags |= DWC3_EP_ENABLED;
+	dep->flags = DWC3_EP_ENABLED;
 	dwc->delayed_status = false;
 
 	if (!list_empty(&dep->pending_list)) {
 		struct dwc3_request	*req;
 
 		req = next_request(&dep->pending_list);
-		if (!dwc->connected)
-			dwc3_gadget_giveback(dep, req, -ESHUTDOWN);
-		else
-			dwc3_gadget_giveback(dep, req, -ECONNRESET);
+		dwc3_gadget_giveback(dep, req, -ECONNRESET);
 	}
 
 	dwc->eps[0]->trb_enqueue = 0;
@@ -286,9 +281,7 @@ void dwc3_ep0_out_start(struct dwc3 *dwc)
 	dwc3_ep0_prepare_one_trb(dep, dwc->ep0_trb_addr, 8,
 			DWC3_TRBCTL_CONTROL_SETUP, false);
 	ret = dwc3_ep0_start_trans(dep);
-	if (ret < 0)
-		dev_err(dwc->dev, "ep0 out start transfer failed: %d\n", ret);
-
+	WARN_ON(ret < 0);
 	for (i = 2; i < DWC3_ENDPOINTS_NUM; i++) {
 		struct dwc3_ep *dwc3_ep;
 
@@ -647,7 +640,6 @@ static int dwc3_ep0_set_config(struct dwc3 *dwc, struct usb_ctrlrequest *ctrl)
 		return -EINVAL;
 
 	case USB_STATE_ADDRESS:
-		dwc3_gadget_start_config(dwc, 2);
 		dwc3_gadget_clear_tx_fifos(dwc);
 
 		ret = dwc3_ep0_delegate_req(dwc, ctrl);
@@ -1060,9 +1052,7 @@ static void __dwc3_ep0_do_control_data(struct dwc3 *dwc,
 		ret = dwc3_ep0_start_trans(dep);
 	}
 
-	if (ret < 0)
-		dev_err(dwc->dev,
-			"ep0 data phase start transfer failed: %d\n", ret);
+	WARN_ON(ret < 0);
 }
 
 static int dwc3_ep0_start_control_status(struct dwc3_ep *dep)
@@ -1079,12 +1069,7 @@ static int dwc3_ep0_start_control_status(struct dwc3_ep *dep)
 
 static void __dwc3_ep0_do_control_status(struct dwc3 *dwc, struct dwc3_ep *dep)
 {
-	int	ret;
-
-	ret = dwc3_ep0_start_control_status(dep);
-	if (ret)
-		dev_err(dwc->dev,
-			"ep0 status phase start transfer failed: %d\n", ret);
+	WARN_ON(dwc3_ep0_start_control_status(dep));
 }
 
 static void dwc3_ep0_do_control_status(struct dwc3 *dwc,
@@ -1127,10 +1112,7 @@ void dwc3_ep0_end_control_data(struct dwc3 *dwc, struct dwc3_ep *dep)
 	cmd |= DWC3_DEPCMD_PARAM(dep->resource_index);
 	memset(&params, 0, sizeof(params));
 	ret = dwc3_send_gadget_ep_cmd(dep, cmd, &params);
-	if (ret)
-		dev_err_ratelimited(dwc->dev,
-			"ep0 data phase end transfer failed: %d\n", ret);
-
+	WARN_ON_ONCE(ret);
 	dep->resource_index = 0;
 }
 

@@ -531,13 +531,9 @@ static const struct usb_device_id blacklist_table[] = {
 						     BTUSB_WIDEBAND_SPEECH },
 	{ USB_DEVICE(0x13d3, 0x3592), .driver_info = BTUSB_REALTEK |
 						     BTUSB_WIDEBAND_SPEECH },
-	{ USB_DEVICE(0x0489, 0xe122), .driver_info = BTUSB_REALTEK |
-						     BTUSB_WIDEBAND_SPEECH },
 
 	/* Realtek 8852BE Bluetooth devices */
 	{ USB_DEVICE(0x0cb8, 0xc559), .driver_info = BTUSB_REALTEK |
-						     BTUSB_WIDEBAND_SPEECH },
-	{ USB_DEVICE(0x0bda, 0x4853), .driver_info = BTUSB_REALTEK |
 						     BTUSB_WIDEBAND_SPEECH },
 	{ USB_DEVICE(0x0bda, 0x887b), .driver_info = BTUSB_REALTEK |
 						     BTUSB_WIDEBAND_SPEECH },
@@ -546,12 +542,6 @@ static const struct usb_device_id blacklist_table[] = {
 	{ USB_DEVICE(0x13d3, 0x3570), .driver_info = BTUSB_REALTEK |
 						     BTUSB_WIDEBAND_SPEECH },
 	{ USB_DEVICE(0x13d3, 0x3571), .driver_info = BTUSB_REALTEK |
-						     BTUSB_WIDEBAND_SPEECH },
-	{ USB_DEVICE(0x13d3, 0x3591), .driver_info = BTUSB_REALTEK |
-						     BTUSB_WIDEBAND_SPEECH },
-	{ USB_DEVICE(0x0489, 0xe123), .driver_info = BTUSB_REALTEK |
-						     BTUSB_WIDEBAND_SPEECH },
-	{ USB_DEVICE(0x0489, 0xe125), .driver_info = BTUSB_REALTEK |
 						     BTUSB_WIDEBAND_SPEECH },
 
 	/* Realtek Bluetooth devices */
@@ -1193,15 +1183,7 @@ static int btusb_submit_intr_urb(struct hci_dev *hdev, gfp_t mem_flags)
 	if (!urb)
 		return -ENOMEM;
 
-	if (le16_to_cpu(data->udev->descriptor.idVendor)  == 0x0a12 &&
-	    le16_to_cpu(data->udev->descriptor.idProduct) == 0x0001)
-		/* Fake CSR devices don't seem to support sort-transter */
-		size = le16_to_cpu(data->intr_ep->wMaxPacketSize);
-	else
-		/* Use maximum HCI Event size so the USB stack handles
-		 * ZPL/short-transfer automatically.
-		 */
-		size = HCI_MAX_EVENT_SIZE;
+	size = le16_to_cpu(data->intr_ep->wMaxPacketSize);
 
 	buf = kmalloc(size, mem_flags);
 	if (!buf) {
@@ -3251,32 +3233,6 @@ static const struct qca_device_info qca_devices_table[] = {
 	{ 0x00190200, 40, 4, 16 }, /* WCN785x 2.0 */
 };
 
-static u16 qca_extract_board_id(const struct qca_version *ver)
-{
-	u16 flag = le16_to_cpu(ver->flag);
-	u16 board_id = 0;
-
-	if (((flag >> 8) & 0xff) == QCA_FLAG_MULTI_NVM) {
-		/* The board_id should be split into two bytes
-		 * The 1st byte is chip ID, and the 2nd byte is platform ID
-		 * For example, board ID 0x010A, 0x01 is platform ID. 0x0A is chip ID
-		 * we have several platforms, and platform IDs are continuously added
-		 * Platform ID:
-		 * 0x00 is for Mobile
-		 * 0x01 is for X86
-		 * 0x02 is for Automotive
-		 * 0x03 is for Consumer electronic
-		 */
-		board_id = (ver->chip_id << 8) + ver->platform_id;
-	}
-
-	/* Take 0xffff as invalid board ID */
-	if (board_id == 0xffff)
-		board_id = 0;
-
-	return board_id;
-}
-
 static int btusb_qca_send_vendor_req(struct usb_device *udev, u8 request,
 				     void *data, u16 size)
 {
@@ -3433,28 +3389,44 @@ static void btusb_generate_qca_nvm_name(char *fwname, size_t max_size,
 					const struct qca_version *ver)
 {
 	u32 rom_version = le32_to_cpu(ver->rom_version);
-	const char *variant;
-	int len;
-	u16 board_id;
+	u16 flag = le16_to_cpu(ver->flag);
 
-	board_id = qca_extract_board_id(ver);
+	if (((flag >> 8) & 0xff) == QCA_FLAG_MULTI_NVM) {
+		/* The board_id should be split into two bytes
+		 * The 1st byte is chip ID, and the 2nd byte is platform ID
+		 * For example, board ID 0x010A, 0x01 is platform ID. 0x0A is chip ID
+		 * we have several platforms, and platform IDs are continuously added
+		 * Platform ID:
+		 * 0x00 is for Mobile
+		 * 0x01 is for X86
+		 * 0x02 is for Automotive
+		 * 0x03 is for Consumer electronic
+		 */
+		u16 board_id = (ver->chip_id << 8) + ver->platform_id;
+		const char *variant;
 
-	switch (le32_to_cpu(ver->ram_version)) {
-	case WCN6855_2_0_RAM_VERSION_GF:
-	case WCN6855_2_1_RAM_VERSION_GF:
-		variant = "_gf";
-		break;
-	default:
-		variant = NULL;
-		break;
+		switch (le32_to_cpu(ver->ram_version)) {
+		case WCN6855_2_0_RAM_VERSION_GF:
+		case WCN6855_2_1_RAM_VERSION_GF:
+			variant = "_gf";
+			break;
+		default:
+			variant = "";
+			break;
+		}
+
+		if (board_id == 0) {
+			snprintf(fwname, max_size, "qca/nvm_usb_%08x%s.bin",
+				rom_version, variant);
+		} else {
+			snprintf(fwname, max_size, "qca/nvm_usb_%08x%s_%04x.bin",
+				rom_version, variant, board_id);
+		}
+	} else {
+		snprintf(fwname, max_size, "qca/nvm_usb_%08x.bin",
+			rom_version);
 	}
 
-	len = snprintf(fwname, max_size, "qca/nvm_usb_%08x", rom_version);
-	if (variant)
-		len += snprintf(fwname + len, max_size - len, "%s", variant);
-	if (board_id)
-		len += snprintf(fwname + len, max_size - len, "_%04x", board_id);
-	len += snprintf(fwname + len, max_size - len, ".bin");
 }
 
 static int btusb_setup_qca_load_nvm(struct hci_dev *hdev,
@@ -3779,7 +3751,6 @@ static ssize_t force_poll_sync_write(struct file *file,
 }
 
 static const struct file_operations force_poll_sync_fops = {
-	.owner		= THIS_MODULE,
 	.open		= simple_open,
 	.read		= force_poll_sync_read,
 	.write		= force_poll_sync_write,

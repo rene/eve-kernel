@@ -1873,8 +1873,9 @@ err_out:
 	return err;
 }
 
-static bool mlx5_flow_has_geneve_opt(struct mlx5_flow_spec *spec)
+static bool mlx5_flow_has_geneve_opt(struct mlx5e_tc_flow *flow)
 {
+	struct mlx5_flow_spec *spec = &flow->attr->parse_attr->spec;
 	void *headers_v = MLX5_ADDR_OF(fte_match_param,
 				       spec->match_value,
 				       misc_parameters_3);
@@ -1906,7 +1907,7 @@ static void mlx5e_tc_del_fdb_flow(struct mlx5e_priv *priv,
 	}
 	complete_all(&flow->del_hw_done);
 
-	if (mlx5_flow_has_geneve_opt(&attr->parse_attr->spec))
+	if (mlx5_flow_has_geneve_opt(flow))
 		mlx5_geneve_tlv_option_del(priv->mdev->geneve);
 
 	mlx5_eswitch_del_vlan_action(esw, attr);
@@ -2414,13 +2415,12 @@ static int parse_tunnel_attr(struct mlx5e_priv *priv,
 
 		err = mlx5e_tc_tun_parse(filter_dev, priv, tmp_spec, f, match_level);
 		if (err) {
+			kvfree(tmp_spec);
 			NL_SET_ERR_MSG_MOD(extack, "Failed to parse tunnel attributes");
 			netdev_warn(priv->netdev, "Failed to parse tunnel attributes");
-		} else {
-			err = mlx5e_tc_set_attr_rx_tun(flow, tmp_spec);
+			return err;
 		}
-		if (mlx5_flow_has_geneve_opt(tmp_spec))
-			mlx5_geneve_tlv_option_del(priv->mdev->geneve);
+		err = mlx5e_tc_set_attr_rx_tun(flow, tmp_spec);
 		kvfree(tmp_spec);
 		if (err)
 			return err;
@@ -2554,29 +2554,29 @@ static int __parse_cls_flower(struct mlx5e_priv *priv,
 	match_level = outer_match_level;
 
 	if (dissector->used_keys &
-	    ~(BIT(FLOW_DISSECTOR_KEY_META) |
-	      BIT(FLOW_DISSECTOR_KEY_CONTROL) |
-	      BIT(FLOW_DISSECTOR_KEY_BASIC) |
-	      BIT(FLOW_DISSECTOR_KEY_ETH_ADDRS) |
-	      BIT(FLOW_DISSECTOR_KEY_VLAN) |
-	      BIT(FLOW_DISSECTOR_KEY_CVLAN) |
-	      BIT(FLOW_DISSECTOR_KEY_IPV4_ADDRS) |
-	      BIT(FLOW_DISSECTOR_KEY_IPV6_ADDRS) |
-	      BIT(FLOW_DISSECTOR_KEY_PORTS) |
-	      BIT(FLOW_DISSECTOR_KEY_ENC_KEYID) |
-	      BIT(FLOW_DISSECTOR_KEY_ENC_IPV4_ADDRS) |
-	      BIT(FLOW_DISSECTOR_KEY_ENC_IPV6_ADDRS) |
-	      BIT(FLOW_DISSECTOR_KEY_ENC_PORTS)	|
-	      BIT(FLOW_DISSECTOR_KEY_ENC_CONTROL) |
-	      BIT(FLOW_DISSECTOR_KEY_TCP) |
-	      BIT(FLOW_DISSECTOR_KEY_IP)  |
-	      BIT(FLOW_DISSECTOR_KEY_CT) |
-	      BIT(FLOW_DISSECTOR_KEY_ENC_IP) |
-	      BIT(FLOW_DISSECTOR_KEY_ENC_OPTS) |
-	      BIT(FLOW_DISSECTOR_KEY_ICMP) |
-	      BIT(FLOW_DISSECTOR_KEY_MPLS))) {
+	    ~(BIT_ULL(FLOW_DISSECTOR_KEY_META) |
+	      BIT_ULL(FLOW_DISSECTOR_KEY_CONTROL) |
+	      BIT_ULL(FLOW_DISSECTOR_KEY_BASIC) |
+	      BIT_ULL(FLOW_DISSECTOR_KEY_ETH_ADDRS) |
+	      BIT_ULL(FLOW_DISSECTOR_KEY_VLAN) |
+	      BIT_ULL(FLOW_DISSECTOR_KEY_CVLAN) |
+	      BIT_ULL(FLOW_DISSECTOR_KEY_IPV4_ADDRS) |
+	      BIT_ULL(FLOW_DISSECTOR_KEY_IPV6_ADDRS) |
+	      BIT_ULL(FLOW_DISSECTOR_KEY_PORTS) |
+	      BIT_ULL(FLOW_DISSECTOR_KEY_ENC_KEYID) |
+	      BIT_ULL(FLOW_DISSECTOR_KEY_ENC_IPV4_ADDRS) |
+	      BIT_ULL(FLOW_DISSECTOR_KEY_ENC_IPV6_ADDRS) |
+	      BIT_ULL(FLOW_DISSECTOR_KEY_ENC_PORTS)	|
+	      BIT_ULL(FLOW_DISSECTOR_KEY_ENC_CONTROL) |
+	      BIT_ULL(FLOW_DISSECTOR_KEY_TCP) |
+	      BIT_ULL(FLOW_DISSECTOR_KEY_IP)  |
+	      BIT_ULL(FLOW_DISSECTOR_KEY_CT) |
+	      BIT_ULL(FLOW_DISSECTOR_KEY_ENC_IP) |
+	      BIT_ULL(FLOW_DISSECTOR_KEY_ENC_OPTS) |
+	      BIT_ULL(FLOW_DISSECTOR_KEY_ICMP) |
+	      BIT_ULL(FLOW_DISSECTOR_KEY_MPLS))) {
 		NL_SET_ERR_MSG_MOD(extack, "Unsupported key");
-		netdev_dbg(priv->netdev, "Unsupported key used: 0x%x\n",
+		netdev_dbg(priv->netdev, "Unsupported key used: 0x%llx\n",
 			   dissector->used_keys);
 		return -EOPNOTSUPP;
 	}

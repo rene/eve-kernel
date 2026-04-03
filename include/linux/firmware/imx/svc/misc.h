@@ -50,9 +50,6 @@ enum imx_misc_func {
 int imx_sc_misc_set_control(struct imx_sc_ipc *ipc, u32 resource,
 			    u8 ctrl, u32 val);
 
-int imx_sc_misc_set_dma_group(struct imx_sc_ipc *ipc, u32 resource,
-			    u32 val);
-
 int imx_sc_misc_get_control(struct imx_sc_ipc *ipc, u32 resource,
 			    u8 ctrl, u32 *val);
 
@@ -69,12 +66,6 @@ static inline int imx_sc_misc_get_control(struct imx_sc_ipc *ipc,
 					  u32 resource, u8 ctrl, u32 *val)
 {
 	return -ENOTSUPP;
-}
-static inline int
-imx_sc_misc_set_dma_group(struct imx_sc_ipc *ipc, u32 resource,
-			    u32 val)
-{
-	return -EIO;
 }
 
 static inline int imx_sc_pm_cpu_start(struct imx_sc_ipc *ipc, u32 resource,

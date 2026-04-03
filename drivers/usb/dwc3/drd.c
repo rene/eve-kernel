@@ -173,7 +173,7 @@ void dwc3_otg_init(struct dwc3 *dwc)
 	 * block "Initialize GCTL for OTG operation".
 	 */
 	/* GCTL.PrtCapDir=2'b11 */
-	dwc3_set_prtcap(dwc, DWC3_GCTL_PRTCAP_OTG, true);
+	dwc3_set_prtcap(dwc, DWC3_GCTL_PRTCAP_OTG);
 	/* GUSB2PHYCFG0.SusPHY=0 */
 	reg = dwc3_readl(dwc->regs, DWC3_GUSB2PHYCFG(0));
 	reg &= ~DWC3_GUSB2PHYCFG_SUSPHY;
@@ -456,8 +456,6 @@ static int dwc3_usb_role_switch_set(struct usb_role_switch *sw,
 	default:
 		if (dwc->role_switch_default_mode == USB_DR_MODE_HOST)
 			mode = DWC3_GCTL_PRTCAP_HOST;
-		else if (dwc->role_switch_default_mode == USB_DR_MODE_UNKNOWN)
-			mode = DWC3_GCTL_PRTCAP_NONE;
 		else
 			mode = DWC3_GCTL_PRTCAP_DEVICE;
 		break;
@@ -487,8 +485,6 @@ static enum usb_role dwc3_usb_role_switch_get(struct usb_role_switch *sw)
 	default:
 		if (dwc->role_switch_default_mode == USB_DR_MODE_HOST)
 			role = USB_ROLE_HOST;
-		else if (dwc->role_switch_default_mode == USB_DR_MODE_UNKNOWN)
-			role = USB_ROLE_NONE;
 		else
 			role = USB_ROLE_DEVICE;
 		break;
@@ -503,16 +499,11 @@ static int dwc3_setup_role_switch(struct dwc3 *dwc)
 	u32 mode;
 
 	dwc->role_switch_default_mode = usb_get_role_switch_default_mode(dwc->dev);
-	switch (dwc->role_switch_default_mode) {
-	case USB_DR_MODE_HOST:
+	if (dwc->role_switch_default_mode == USB_DR_MODE_HOST) {
 		mode = DWC3_GCTL_PRTCAP_HOST;
-		break;
-	case USB_DR_MODE_UNKNOWN:
-		mode = DWC3_GCTL_PRTCAP_NONE;
-		break;
-	default:
+	} else {
+		dwc->role_switch_default_mode = USB_DR_MODE_PERIPHERAL;
 		mode = DWC3_GCTL_PRTCAP_DEVICE;
-		break;
 	}
 	dwc3_set_mode(dwc, mode);
 
@@ -562,7 +553,7 @@ int dwc3_drd_init(struct dwc3 *dwc)
 
 		dwc3_drd_update(dwc);
 	} else {
-		dwc3_set_prtcap(dwc, DWC3_GCTL_PRTCAP_OTG, true);
+		dwc3_set_prtcap(dwc, DWC3_GCTL_PRTCAP_OTG);
 
 		/* use OTG block to get ID event */
 		irq = dwc3_otg_get_irq(dwc);

@@ -114,7 +114,6 @@
 struct rkisp1_isr_data {
 	const char *name;
 	irqreturn_t (*isr)(int irq, void *ctx);
-	u32 line_mask;
 };
 
 /* ----------------------------------------------------------------------------
@@ -305,24 +304,6 @@ static int __maybe_unused rkisp1_runtime_suspend(struct device *dev)
 {
 	struct rkisp1_device *rkisp1 = dev_get_drvdata(dev);
 
-	rkisp1->irqs_enabled = false;
-	/* Make sure the IRQ handler will see the above */
-	mb();
-
-	/*
-	 * Wait until any running IRQ handler has returned. The IRQ handler
-	 * may get called even after this (as it's a shared interrupt line)
-	 * but the 'irqs_enabled' flag will make the handler return immediately.
-	 */
-	for (unsigned int il = 0; il < ARRAY_SIZE(rkisp1->irqs); ++il) {
-		if (rkisp1->irqs[il] == -1)
-			continue;
-
-		/* Skip if the irq line is the same as previous */
-		if (il == 0 || rkisp1->irqs[il - 1] != rkisp1->irqs[il])
-			synchronize_irq(rkisp1->irqs[il]);
-	}
-
 	clk_bulk_disable_unprepare(rkisp1->clk_size, rkisp1->clks);
 	return pinctrl_pm_select_sleep_state(dev);
 }
@@ -338,10 +319,6 @@ static int __maybe_unused rkisp1_runtime_resume(struct device *dev)
 	ret = clk_bulk_prepare_enable(rkisp1->clk_size, rkisp1->clks);
 	if (ret)
 		return ret;
-
-	rkisp1->irqs_enabled = true;
-	/* Make sure the IRQ handler will see the above */
-	mb();
 
 	return 0;
 }
@@ -465,25 +442,17 @@ error:
 
 static irqreturn_t rkisp1_isr(int irq, void *ctx)
 {
-	irqreturn_t ret = IRQ_NONE;
-
 	/*
 	 * Call rkisp1_capture_isr() first to handle the frame that
 	 * potentially completed using the current frame_sequence number before
 	 * it is potentially incremented by rkisp1_isp_isr() in the vertical
 	 * sync.
 	 */
+	rkisp1_capture_isr(irq, ctx);
+	rkisp1_isp_isr(irq, ctx);
+	rkisp1_csi_isr(irq, ctx);
 
-	if (rkisp1_capture_isr(irq, ctx) == IRQ_HANDLED)
-		ret = IRQ_HANDLED;
-
-	if (rkisp1_isp_isr(irq, ctx) == IRQ_HANDLED)
-		ret = IRQ_HANDLED;
-
-	if (rkisp1_csi_isr(irq, ctx) == IRQ_HANDLED)
-		ret = IRQ_HANDLED;
-
-	return ret;
+	return IRQ_HANDLED;
 }
 
 static const char * const px30_isp_clks[] = {
@@ -494,9 +463,9 @@ static const char * const px30_isp_clks[] = {
 };
 
 static const struct rkisp1_isr_data px30_isp_isrs[] = {
-	{ "isp", rkisp1_isp_isr, BIT(RKISP1_IRQ_ISP) },
-	{ "mi", rkisp1_capture_isr, BIT(RKISP1_IRQ_MI) },
-	{ "mipi", rkisp1_csi_isr, BIT(RKISP1_IRQ_MIPI) },
+	{ "isp", rkisp1_isp_isr },
+	{ "mi", rkisp1_capture_isr },
+	{ "mipi", rkisp1_csi_isr },
 };
 
 static const struct rkisp1_info px30_isp_info = {
@@ -515,7 +484,7 @@ static const char * const rk3399_isp_clks[] = {
 };
 
 static const struct rkisp1_isr_data rk3399_isp_isrs[] = {
-	{ NULL, rkisp1_isr, BIT(RKISP1_IRQ_ISP) | BIT(RKISP1_IRQ_MI) | BIT(RKISP1_IRQ_MIPI) },
+	{ NULL, rkisp1_isr },
 };
 
 static const struct rkisp1_info rk3399_isp_info = {
@@ -566,20 +535,12 @@ static int rkisp1_probe(struct platform_device *pdev)
 	if (IS_ERR(rkisp1->base_addr))
 		return PTR_ERR(rkisp1->base_addr);
 
-	for (unsigned int il = 0; il < ARRAY_SIZE(rkisp1->irqs); ++il)
-		rkisp1->irqs[il] = -1;
-
 	for (i = 0; i < info->isr_size; i++) {
 		irq = info->isrs[i].name
 		    ? platform_get_irq_byname(pdev, info->isrs[i].name)
 		    : platform_get_irq(pdev, i);
 		if (irq < 0)
 			return irq;
-
-		for (unsigned int il = 0; il < ARRAY_SIZE(rkisp1->irqs); ++il) {
-			if (info->isrs[i].line_mask & BIT(il))
-				rkisp1->irqs[il] = irq;
-		}
 
 		ret = devm_request_irq(dev, irq, info->isrs[i].isr, IRQF_SHARED,
 				       dev_driver_string(dev), dev);
@@ -621,7 +582,7 @@ static int rkisp1_probe(struct platform_device *pdev)
 
 	ret = v4l2_device_register(rkisp1->dev, &rkisp1->v4l2_dev);
 	if (ret)
-		goto err_media_dev_cleanup;
+		goto err_pm_runtime_disable;
 
 	ret = media_device_register(&rkisp1->media_dev);
 	if (ret) {
@@ -656,8 +617,6 @@ err_unreg_media_dev:
 	media_device_unregister(&rkisp1->media_dev);
 err_unreg_v4l2_dev:
 	v4l2_device_unregister(&rkisp1->v4l2_dev);
-err_media_dev_cleanup:
-	media_device_cleanup(&rkisp1->media_dev);
 err_pm_runtime_disable:
 	pm_runtime_disable(&pdev->dev);
 	return ret;
@@ -677,8 +636,6 @@ static int rkisp1_remove(struct platform_device *pdev)
 
 	media_device_unregister(&rkisp1->media_dev);
 	v4l2_device_unregister(&rkisp1->v4l2_dev);
-
-	media_device_cleanup(&rkisp1->media_dev);
 
 	pm_runtime_disable(&pdev->dev);
 

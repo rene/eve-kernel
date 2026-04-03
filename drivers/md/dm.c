@@ -1523,18 +1523,14 @@ static void __send_empty_flush(struct clone_info *ci)
 {
 	struct dm_table *t = ci->map;
 	struct bio flush_bio;
-	blk_opf_t opf = REQ_OP_WRITE | REQ_PREFLUSH | REQ_SYNC;
-
-	if ((ci->io->orig_bio->bi_opf & (REQ_IDLE | REQ_SYNC)) ==
-	    (REQ_IDLE | REQ_SYNC))
-		opf |= REQ_IDLE;
 
 	/*
 	 * Use an on-stack bio for this, it's safe since we don't
 	 * need to reference it after submit. It's just used as
 	 * the basis for the clone(s).
 	 */
-	bio_init(&flush_bio, ci->io->md->disk->part0, NULL, 0, opf);
+	bio_init(&flush_bio, ci->io->md->disk->part0, NULL, 0,
+		 REQ_OP_WRITE | REQ_PREFLUSH | REQ_SYNC);
 
 	ci->bio = &flush_bio;
 	ci->sector_count = 0;
@@ -1793,15 +1789,10 @@ static void dm_submit_bio(struct bio *bio)
 	struct dm_table *map;
 
 	map = dm_get_live_table(md, &srcu_idx);
-	if (unlikely(!map)) {
-		DMERR_LIMIT("%s: mapping table unavailable, erroring io",
-			    dm_device_name(md));
-		bio_io_error(bio);
-		goto out;
-	}
 
-	/* If suspended, queue this IO for later */
-	if (unlikely(test_bit(DMF_BLOCK_IO_FOR_SUSPEND, &md->flags))) {
+	/* If suspended, or map not yet available, queue this IO for later */
+	if (unlikely(test_bit(DMF_BLOCK_IO_FOR_SUSPEND, &md->flags)) ||
+	    unlikely(!map)) {
 		if (bio->bi_opf & REQ_NOWAIT)
 			bio_wouldblock_error(bio);
 		else if (bio->bi_opf & REQ_RAHEAD)
@@ -2165,28 +2156,20 @@ static struct dm_table *__bind(struct mapped_device *md, struct dm_table *t,
 			       struct queue_limits *limits)
 {
 	struct dm_table *old_map;
-	sector_t size, old_size;
+	sector_t size;
 	int ret;
 
 	lockdep_assert_held(&md->suspend_lock);
 
 	size = dm_table_get_size(t);
 
-	old_size = dm_get_size(md);
-	set_capacity(md->disk, size);
-
-	ret = dm_table_set_restrictions(t, md->queue, limits);
-	if (ret) {
-		set_capacity(md->disk, old_size);
-		old_map = ERR_PTR(ret);
-		goto out;
-	}
-
 	/*
 	 * Wipe any geometry if the size of the table changed.
 	 */
-	if (size != old_size)
+	if (size != dm_get_size(md))
 		memset(&md->geometry, 0, sizeof(md->geometry));
+
+	set_capacity(md->disk, size);
 
 	dm_table_event_callback(t, event_callback, md);
 
@@ -2205,10 +2188,10 @@ static struct dm_table *__bind(struct mapped_device *md, struct dm_table *t,
 		 * requests in the queue may refer to bio from the old bioset,
 		 * so you must walk through the queue to unprep.
 		 */
-		if (!md->mempools)
+		if (!md->mempools) {
 			md->mempools = t->mempools;
-		else
-			dm_free_md_mempools(t->mempools);
+			t->mempools = NULL;
+		}
 	} else {
 		/*
 		 * The md may already have mempools that need changing.
@@ -2217,8 +2200,14 @@ static struct dm_table *__bind(struct mapped_device *md, struct dm_table *t,
 		 */
 		dm_free_md_mempools(md->mempools);
 		md->mempools = t->mempools;
+		t->mempools = NULL;
 	}
-	t->mempools = NULL;
+
+	ret = dm_table_set_restrictions(t, md->queue, limits);
+	if (ret) {
+		old_map = ERR_PTR(ret);
+		goto out;
+	}
 
 	old_map = rcu_dereference_protected(md->map, lockdep_is_held(&md->suspend_lock));
 	rcu_assign_pointer(md->map, (void *)t);
@@ -2522,7 +2511,7 @@ static int dm_wait_for_bios_completion(struct mapped_device *md, unsigned int ta
 			break;
 
 		if (signal_pending_state(task_state, current)) {
-			r = -ERESTARTSYS;
+			r = -EINTR;
 			break;
 		}
 
@@ -2547,7 +2536,7 @@ static int dm_wait_for_completion(struct mapped_device *md, unsigned int task_st
 			break;
 
 		if (signal_pending_state(task_state, current)) {
-			r = -ERESTARTSYS;
+			r = -EINTR;
 			break;
 		}
 
@@ -2908,9 +2897,6 @@ static void __dm_internal_suspend(struct mapped_device *md, unsigned int suspend
 
 static void __dm_internal_resume(struct mapped_device *md)
 {
-	int r;
-	struct dm_table *map;
-
 	BUG_ON(!md->internal_suspend_count);
 
 	if (--md->internal_suspend_count)
@@ -2919,23 +2905,12 @@ static void __dm_internal_resume(struct mapped_device *md)
 	if (dm_suspended_md(md))
 		goto done; /* resume from nested suspend */
 
-	map = rcu_dereference_protected(md->map, lockdep_is_held(&md->suspend_lock));
-	r = __dm_resume(md, map);
-	if (r) {
-		/*
-		 * If a preresume method of some target failed, we are in a
-		 * tricky situation. We can't return an error to the caller. We
-		 * can't fake success because then the "resume" and
-		 * "postsuspend" methods would not be paired correctly, and it
-		 * would break various targets, for example it would cause list
-		 * corruption in the "origin" target.
-		 *
-		 * So, we fake normal suspend here, to make sure that the
-		 * "resume" and "postsuspend" methods will be paired correctly.
-		 */
-		DMERR("Preresume method failed: %d", r);
-		set_bit(DMF_SUSPENDED, &md->flags);
-	}
+	/*
+	 * NOTE: existing callers don't need to call dm_table_resume_targets
+	 * (which may fail -- so best to avoid it for now by passing NULL map)
+	 */
+	(void) __dm_resume(md, NULL);
+
 done:
 	clear_bit(DMF_SUSPENDED_INTERNALLY, &md->flags);
 	smp_mb__after_atomic();

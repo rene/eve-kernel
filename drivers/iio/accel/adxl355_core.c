@@ -175,7 +175,7 @@ struct adxl355_data {
 		u8 transf_buf[3];
 		struct {
 			u8 buf[14];
-			aligned_s64 ts;
+			s64 ts;
 		} buffer;
 	} __aligned(IIO_DMA_MINALIGN);
 };

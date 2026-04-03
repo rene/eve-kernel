@@ -33,7 +33,7 @@ struct kernfs_open_node {
  * pending queue is implemented as a singly linked list of kernfs_nodes.
  * The list is terminated with the self pointer so that whether a
  * kernfs_node is on the list or not can be determined by testing the next
- * pointer for %NULL.
+ * pointer for NULL.
  */
 #define KERNFS_NOTIFY_EOL			((void *)&kernfs_notify_list)
 
@@ -59,33 +59,13 @@ static inline struct mutex *kernfs_open_file_mutex_lock(struct kernfs_node *kn)
 }
 
 /**
- * of_on - Get the kernfs_open_node of the specified kernfs_open_file
- * @of: target kernfs_open_file
- *
- * Return: the kernfs_open_node of the kernfs_open_file
+ * of_on - Return the kernfs_open_node of the specified kernfs_open_file
+ * @of: taret kernfs_open_file
  */
 static struct kernfs_open_node *of_on(struct kernfs_open_file *of)
 {
 	return rcu_dereference_protected(of->kn->attr.open,
 					 !list_empty(&of->list));
-}
-
-/* Get active reference to kernfs node for an open file */
-static struct kernfs_open_file *kernfs_get_active_of(struct kernfs_open_file *of)
-{
-	/* Skip if file was already released */
-	if (unlikely(of->released))
-		return NULL;
-
-	if (!kernfs_get_active(of->kn))
-		return NULL;
-
-	return of;
-}
-
-static void kernfs_put_active_of(struct kernfs_open_file *of)
-{
-	return kernfs_put_active(of->kn);
 }
 
 /**
@@ -102,8 +82,6 @@ static void kernfs_put_active_of(struct kernfs_open_file *of)
  * outside RCU read-side critical section.
  *
  * The caller needs to make sure that kernfs_open_file_mutex is held.
- *
- * Return: @kn->attr.open when kernfs_open_file_mutex is held.
  */
 static struct kernfs_open_node *
 kernfs_deref_open_node_locked(struct kernfs_node *kn)
@@ -157,7 +135,7 @@ static void kernfs_seq_stop_active(struct seq_file *sf, void *v)
 
 	if (ops->seq_stop)
 		ops->seq_stop(sf, v);
-	kernfs_put_active_of(of);
+	kernfs_put_active(of->kn);
 }
 
 static void *kernfs_seq_start(struct seq_file *sf, loff_t *ppos)
@@ -170,7 +148,7 @@ static void *kernfs_seq_start(struct seq_file *sf, loff_t *ppos)
 	 * the ops aren't called concurrently for the same open file.
 	 */
 	mutex_lock(&of->mutex);
-	if (!kernfs_get_active_of(of))
+	if (!kernfs_get_active(of->kn))
 		return ERR_PTR(-ENODEV);
 
 	ops = kernfs_ops(of->kn);
@@ -256,7 +234,7 @@ static ssize_t kernfs_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 	 * the ops aren't called concurrently for the same open file.
 	 */
 	mutex_lock(&of->mutex);
-	if (!kernfs_get_active_of(of)) {
+	if (!kernfs_get_active(of->kn)) {
 		len = -ENODEV;
 		mutex_unlock(&of->mutex);
 		goto out_free;
@@ -270,7 +248,7 @@ static ssize_t kernfs_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 	else
 		len = -EINVAL;
 
-	kernfs_put_active_of(of);
+	kernfs_put_active(of->kn);
 	mutex_unlock(&of->mutex);
 
 	if (len < 0)
@@ -341,7 +319,7 @@ static ssize_t kernfs_fop_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 	 * the ops aren't called concurrently for the same open file.
 	 */
 	mutex_lock(&of->mutex);
-	if (!kernfs_get_active_of(of)) {
+	if (!kernfs_get_active(of->kn)) {
 		mutex_unlock(&of->mutex);
 		len = -ENODEV;
 		goto out_free;
@@ -353,7 +331,7 @@ static ssize_t kernfs_fop_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 	else
 		len = -EINVAL;
 
-	kernfs_put_active_of(of);
+	kernfs_put_active(of->kn);
 	mutex_unlock(&of->mutex);
 
 	if (len > 0)
@@ -375,13 +353,13 @@ static void kernfs_vma_open(struct vm_area_struct *vma)
 	if (!of->vm_ops)
 		return;
 
-	if (!kernfs_get_active_of(of))
+	if (!kernfs_get_active(of->kn))
 		return;
 
 	if (of->vm_ops->open)
 		of->vm_ops->open(vma);
 
-	kernfs_put_active_of(of);
+	kernfs_put_active(of->kn);
 }
 
 static vm_fault_t kernfs_vma_fault(struct vm_fault *vmf)
@@ -393,14 +371,14 @@ static vm_fault_t kernfs_vma_fault(struct vm_fault *vmf)
 	if (!of->vm_ops)
 		return VM_FAULT_SIGBUS;
 
-	if (!kernfs_get_active_of(of))
+	if (!kernfs_get_active(of->kn))
 		return VM_FAULT_SIGBUS;
 
 	ret = VM_FAULT_SIGBUS;
 	if (of->vm_ops->fault)
 		ret = of->vm_ops->fault(vmf);
 
-	kernfs_put_active_of(of);
+	kernfs_put_active(of->kn);
 	return ret;
 }
 
@@ -413,7 +391,7 @@ static vm_fault_t kernfs_vma_page_mkwrite(struct vm_fault *vmf)
 	if (!of->vm_ops)
 		return VM_FAULT_SIGBUS;
 
-	if (!kernfs_get_active_of(of))
+	if (!kernfs_get_active(of->kn))
 		return VM_FAULT_SIGBUS;
 
 	ret = 0;
@@ -422,7 +400,7 @@ static vm_fault_t kernfs_vma_page_mkwrite(struct vm_fault *vmf)
 	else
 		file_update_time(file);
 
-	kernfs_put_active_of(of);
+	kernfs_put_active(of->kn);
 	return ret;
 }
 
@@ -436,14 +414,14 @@ static int kernfs_vma_access(struct vm_area_struct *vma, unsigned long addr,
 	if (!of->vm_ops)
 		return -EINVAL;
 
-	if (!kernfs_get_active_of(of))
+	if (!kernfs_get_active(of->kn))
 		return -EINVAL;
 
 	ret = -EINVAL;
 	if (of->vm_ops->access)
 		ret = of->vm_ops->access(vma, addr, buf, len, write);
 
-	kernfs_put_active_of(of);
+	kernfs_put_active(of->kn);
 	return ret;
 }
 
@@ -522,7 +500,7 @@ static int kernfs_fop_mmap(struct file *file, struct vm_area_struct *vma)
 	mutex_lock(&of->mutex);
 
 	rc = -ENODEV;
-	if (!kernfs_get_active_of(of))
+	if (!kernfs_get_active(of->kn))
 		goto out_unlock;
 
 	ops = kernfs_ops(of->kn);
@@ -550,14 +528,12 @@ static int kernfs_fop_mmap(struct file *file, struct vm_area_struct *vma)
 		goto out_put;
 
 	rc = 0;
-	if (!of->mmapped) {
-		of->mmapped = true;
-		of_on(of)->nr_mmapped++;
-		of->vm_ops = vma->vm_ops;
-	}
+	of->mmapped = true;
+	of_on(of)->nr_mmapped++;
+	of->vm_ops = vma->vm_ops;
 	vma->vm_ops = &kernfs_vm_ops;
 out_put:
-	kernfs_put_active_of(of);
+	kernfs_put_active(of->kn);
 out_unlock:
 	mutex_unlock(&of->mutex);
 
@@ -572,11 +548,11 @@ out_unlock:
  *	If @kn->attr.open exists, increment its reference count; otherwise,
  *	create one.  @of is chained to the files list.
  *
- *	Locking:
+ *	LOCKING:
  *	Kernel thread context (may sleep).
  *
- *	Return:
- *	%0 on success, -errno on failure.
+ *	RETURNS:
+ *	0 on success, -errno on failure.
  */
 static int kernfs_get_open_node(struct kernfs_node *kn,
 				struct kernfs_open_file *of)
@@ -838,9 +814,8 @@ bool kernfs_should_drain_open_files(struct kernfs_node *kn)
 	/*
 	 * @kn being deactivated guarantees that @kn->attr.open can't change
 	 * beneath us making the lockless test below safe.
-	 * Callers post kernfs_unbreak_active_protection may be counted in
-	 * kn->active by now, do not WARN_ON because of them.
 	 */
+	WARN_ON_ONCE(atomic_read(&kn->active) != KN_DEACTIVATED_BIAS);
 
 	rcu_read_lock();
 	on = rcu_dereference(kn->attr.open);
@@ -912,7 +887,7 @@ static __poll_t kernfs_fop_poll(struct file *filp, poll_table *wait)
 	struct kernfs_node *kn = kernfs_dentry_node(filp->f_path.dentry);
 	__poll_t ret;
 
-	if (!kernfs_get_active_of(of))
+	if (!kernfs_get_active(kn))
 		return DEFAULT_POLLMASK|EPOLLERR|EPOLLPRI;
 
 	if (kn->attr.ops->poll)
@@ -920,7 +895,7 @@ static __poll_t kernfs_fop_poll(struct file *filp, poll_table *wait)
 	else
 		ret = kernfs_generic_poll(of, wait);
 
-	kernfs_put_active_of(of);
+	kernfs_put_active(kn);
 	return ret;
 }
 
@@ -1049,7 +1024,7 @@ const struct file_operations kernfs_file_fops = {
  * @ns: optional namespace tag of the file
  * @key: lockdep key for the file's active_ref, %NULL to disable lockdep
  *
- * Return: the created node on success, ERR_PTR() value on error.
+ * Returns the created node on success, ERR_PTR() value on error.
  */
 struct kernfs_node *__kernfs_create_file(struct kernfs_node *parent,
 					 const char *name,

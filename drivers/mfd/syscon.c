@@ -8,14 +8,12 @@
  * Author: Dong Aisheng <dong.aisheng@linaro.org>
  */
 
-#include <linux/cleanup.h>
 #include <linux/clk.h>
 #include <linux/err.h>
 #include <linux/hwspinlock.h>
 #include <linux/io.h>
 #include <linux/init.h>
 #include <linux/list.h>
-#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
@@ -27,7 +25,7 @@
 
 static struct platform_driver syscon_driver;
 
-static DEFINE_MUTEX(syscon_list_lock);
+static DEFINE_SPINLOCK(syscon_list_slock);
 static LIST_HEAD(syscon_list);
 
 struct syscon {
@@ -45,6 +43,7 @@ static const struct regmap_config syscon_regmap_config = {
 static struct syscon *of_syscon_register(struct device_node *np, bool check_clk)
 {
 	struct clk *clk;
+	struct syscon *syscon;
 	struct regmap *regmap;
 	void __iomem *base;
 	u32 reg_io_width;
@@ -52,18 +51,20 @@ static struct syscon *of_syscon_register(struct device_node *np, bool check_clk)
 	struct regmap_config syscon_config = syscon_regmap_config;
 	struct resource res;
 
-	WARN_ON(!mutex_is_locked(&syscon_list_lock));
-
-	struct syscon *syscon __free(kfree) = kzalloc(sizeof(*syscon), GFP_KERNEL);
+	syscon = kzalloc(sizeof(*syscon), GFP_KERNEL);
 	if (!syscon)
 		return ERR_PTR(-ENOMEM);
 
-	if (of_address_to_resource(np, 0, &res))
-		return ERR_PTR(-ENOMEM);
+	if (of_address_to_resource(np, 0, &res)) {
+		ret = -ENOMEM;
+		goto err_map;
+	}
 
 	base = of_iomap(np, 0);
-	if (!base)
-		return ERR_PTR(-ENOMEM);
+	if (!base) {
+		ret = -ENOMEM;
+		goto err_map;
+	}
 
 	/* Parse the device's DT node for an endianness specification */
 	if (of_property_read_bool(np, "big-endian"))
@@ -101,10 +102,6 @@ static struct syscon *of_syscon_register(struct device_node *np, bool check_clk)
 	}
 
 	syscon_config.name = kasprintf(GFP_KERNEL, "%pOFn@%pa", np, &res.start);
-	if (!syscon_config.name) {
-		ret = -ENOMEM;
-		goto err_regmap;
-	}
 	syscon_config.reg_stride = reg_io_width;
 	syscon_config.val_bits = reg_io_width * 8;
 	syscon_config.max_register = resource_size(&res) - reg_io_width;
@@ -134,9 +131,11 @@ static struct syscon *of_syscon_register(struct device_node *np, bool check_clk)
 	syscon->regmap = regmap;
 	syscon->np = np;
 
+	spin_lock(&syscon_list_slock);
 	list_add_tail(&syscon->list, &syscon_list);
+	spin_unlock(&syscon_list_slock);
 
-	return_ptr(syscon);
+	return syscon;
 
 err_attach:
 	if (!IS_ERR(clk))
@@ -145,6 +144,8 @@ err_clk:
 	regmap_exit(regmap);
 err_regmap:
 	iounmap(base);
+err_map:
+	kfree(syscon);
 	return ERR_PTR(ret);
 }
 
@@ -153,7 +154,7 @@ static struct regmap *device_node_get_regmap(struct device_node *np,
 {
 	struct syscon *entry, *syscon = NULL;
 
-	mutex_lock(&syscon_list_lock);
+	spin_lock(&syscon_list_slock);
 
 	list_for_each_entry(entry, &syscon_list, list)
 		if (entry->np == np) {
@@ -161,64 +162,16 @@ static struct regmap *device_node_get_regmap(struct device_node *np,
 			break;
 		}
 
+	spin_unlock(&syscon_list_slock);
+
 	if (!syscon)
 		syscon = of_syscon_register(np, check_clk);
-
-	mutex_unlock(&syscon_list_lock);
 
 	if (IS_ERR(syscon))
 		return ERR_CAST(syscon);
 
 	return syscon->regmap;
 }
-
-/**
- * of_syscon_register_regmap() - Register regmap for specified device node
- * @np: Device tree node
- * @regmap: Pointer to regmap object
- *
- * Register an externally created regmap object with syscon for the specified
- * device tree node. This regmap will then be returned to client drivers using
- * the syscon_regmap_lookup_by_phandle() API.
- *
- * Return: 0 on success, negative error code on failure.
- */
-int of_syscon_register_regmap(struct device_node *np, struct regmap *regmap)
-{
-	struct syscon *entry, *syscon = NULL;
-	int ret;
-
-	if (!np || !regmap)
-		return -EINVAL;
-
-	syscon = kzalloc(sizeof(*syscon), GFP_KERNEL);
-	if (!syscon)
-		return -ENOMEM;
-
-	/* check if syscon entry already exists */
-	mutex_lock(&syscon_list_lock);
-
-	list_for_each_entry(entry, &syscon_list, list)
-		if (entry->np == np) {
-			ret = -EEXIST;
-			goto err_unlock;
-		}
-
-	syscon->regmap = regmap;
-	syscon->np = np;
-
-	/* register the regmap in syscon list */
-	list_add_tail(&syscon->list, &syscon_list);
-	mutex_unlock(&syscon_list_lock);
-
-	return 0;
-
-err_unlock:
-	mutex_unlock(&syscon_list_lock);
-	kfree(syscon);
-	return ret;
-}
-EXPORT_SYMBOL_GPL(of_syscon_register_regmap);
 
 struct regmap *device_node_to_regmap(struct device_node *np)
 {
@@ -266,9 +219,7 @@ struct regmap *syscon_regmap_lookup_by_phandle(struct device_node *np,
 		return ERR_PTR(-ENODEV);
 
 	regmap = syscon_node_to_regmap(syscon_np);
-
-	if (property)
-		of_node_put(syscon_np);
+	of_node_put(syscon_np);
 
 	return regmap;
 }

@@ -438,7 +438,6 @@ config PINCTRL_STMFX
 	tristate "STMicroelectronics STMFX GPIO expander pinctrl driver"
 	depends on I2C
 	depends on OF_GPIO
-	depends on HAS_IOMEM
 	select GENERIC_PINCONF
 	select GPIOLIB_IRQCHIP
 	select MFD_STMFX
@@ -512,13 +511,6 @@ config PINCTRL_ZYNQMP
 	  such as pull-up, slew rate, etc.
 	  This driver can also be built as a module. If so, the module
 	  will be called pinctrl-zynqmp.
-
-config PINCTRL_RP1
-	bool "Pinctrl driver for RP1"
-	select PINMUX
-	select PINCONF
-	select GENERIC_PINCONF
-	select GPIOLIB_IRQCHIP
 
 source "drivers/pinctrl/actions/Kconfig"
 source "drivers/pinctrl/aspeed/Kconfig"

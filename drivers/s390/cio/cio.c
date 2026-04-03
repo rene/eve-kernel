@@ -20,6 +20,7 @@
 #include <linux/kernel_stat.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
+#include <linux/isolation.h>
 #include <asm/cio.h>
 #include <asm/delay.h>
 #include <asm/irq.h>
@@ -459,14 +460,10 @@ int cio_update_schib(struct subchannel *sch)
 {
 	struct schib schib;
 
-	if (stsch(sch->schid, &schib))
+	if (stsch(sch->schid, &schib) || !css_sch_is_valid(&schib))
 		return -ENODEV;
 
 	memcpy(&sch->schib, &schib, sizeof(schib));
-
-	if (!css_sch_is_valid(&schib))
-		return -EACCES;
-
 	return 0;
 }
 EXPORT_SYMBOL_GPL(cio_update_schib);
@@ -587,6 +584,8 @@ void cio_tsch(struct subchannel *sch)
 {
 	struct irb *irb;
 	int irq_context;
+
+	task_isolation_kernel_enter();
 
 	irb = this_cpu_ptr(&cio_irb);
 	/* Store interrupt response block to lowcore. */

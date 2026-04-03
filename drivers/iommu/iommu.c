@@ -278,13 +278,12 @@ static void dev_iommu_free(struct device *dev)
 	kfree(param);
 }
 
-DEFINE_MUTEX(iommu_probe_device_lock);
-
 static int __iommu_probe_device(struct device *dev, struct list_head *group_list)
 {
 	const struct iommu_ops *ops = dev->bus->iommu_ops;
 	struct iommu_device *iommu_dev;
 	struct iommu_group *group;
+	static DEFINE_MUTEX(iommu_probe_device_lock);
 	int ret;
 
 	if (!ops)
@@ -296,9 +295,11 @@ static int __iommu_probe_device(struct device *dev, struct list_head *group_list
 	 * probably be able to use device_lock() here to minimise the scope,
 	 * but for now enforcing a simple global ordering is fine.
 	 */
-	lockdep_assert_held(&iommu_probe_device_lock);
-	if (!dev_iommu_get(dev))
-		return -ENOMEM;
+	mutex_lock(&iommu_probe_device_lock);
+	if (!dev_iommu_get(dev)) {
+		ret = -ENOMEM;
+		goto err_unlock;
+	}
 
 	if (!try_module_get(ops->owner)) {
 		ret = -EINVAL;
@@ -325,6 +326,7 @@ static int __iommu_probe_device(struct device *dev, struct list_head *group_list
 	mutex_unlock(&group->mutex);
 	iommu_group_put(group);
 
+	mutex_unlock(&iommu_probe_device_lock);
 	iommu_device_link(iommu_dev, dev);
 
 	return 0;
@@ -339,6 +341,9 @@ out_module_put:
 err_free:
 	dev_iommu_free(dev);
 
+err_unlock:
+	mutex_unlock(&iommu_probe_device_lock);
+
 	return ret;
 }
 
@@ -348,9 +353,7 @@ int iommu_probe_device(struct device *dev)
 	struct iommu_group *group;
 	int ret;
 
-	mutex_lock(&iommu_probe_device_lock);
 	ret = __iommu_probe_device(dev, NULL);
-	mutex_unlock(&iommu_probe_device_lock);
 	if (ret)
 		goto err_out;
 
@@ -763,10 +766,24 @@ struct iommu_group *iommu_group_alloc(void)
 }
 EXPORT_SYMBOL_GPL(iommu_group_alloc);
 
+struct iommu_group *iommu_group_get_from_kobj(struct kobject *group_kobj)
+{
+	struct iommu_group *group;
+
+	if (!iommu_group_kset || !group_kobj)
+		return NULL;
+
+	group = container_of(group_kobj, struct iommu_group, kobj);
+
+	kobject_get(group->devices_kobj);
+	kobject_put(&group->kobj);
+
+	return group;
+}
+
 struct iommu_group *iommu_group_get_by_id(int id)
 {
 	struct kobject *group_kobj;
-	struct iommu_group *group;
 	const char *name;
 
 	if (!iommu_group_kset)
@@ -779,18 +796,31 @@ struct iommu_group *iommu_group_get_by_id(int id)
 	group_kobj = kset_find_obj(iommu_group_kset, name);
 	kfree(name);
 
-	if (!group_kobj)
-		return NULL;
-
-	group = container_of(group_kobj, struct iommu_group, kobj);
-	BUG_ON(group->id != id);
-
-	kobject_get(group->devices_kobj);
-	kobject_put(&group->kobj);
-
-	return group;
+	return iommu_group_get_from_kobj(group_kobj);
 }
 EXPORT_SYMBOL_GPL(iommu_group_get_by_id);
+
+struct kset *iommu_get_group_kset(void)
+{
+	return kset_get(iommu_group_kset);
+}
+
+const struct iommu_ops *iommu_group_get_ops(struct iommu_group *group)
+{
+	struct group_device *device;
+	const struct iommu_ops *ops = NULL;
+
+	mutex_lock(&group->mutex);
+	device = list_first_entry_or_null(&group->devices, typeof(*device),
+					  list);
+	if (device) {
+		ops = device->dev->bus->iommu_ops;
+	}
+
+	mutex_unlock(&group->mutex);
+
+	return ops;
+}
 
 /**
  * iommu_group_get_iommudata - retrieve iommu_data registered for a group
@@ -1681,9 +1711,7 @@ static int probe_iommu_group(struct device *dev, void *data)
 		return 0;
 	}
 
-	mutex_lock(&iommu_probe_device_lock);
 	ret = __iommu_probe_device(dev, group_list);
-	mutex_unlock(&iommu_probe_device_lock);
 	if (ret == -ENODEV)
 		ret = 0;
 
@@ -1701,6 +1729,11 @@ static int iommu_bus_notifier(struct notifier_block *nb,
 		ret = iommu_probe_device(dev);
 		return (ret) ? NOTIFY_DONE : NOTIFY_OK;
 	} else if (action == BUS_NOTIFY_REMOVED_DEVICE) {
+		const struct iommu_ops *ops = dev->bus->iommu_ops;
+
+		if (!ops)
+			return NOTIFY_DONE;
+
 		iommu_release_device(dev);
 		return NOTIFY_OK;
 	}
@@ -1740,9 +1773,6 @@ static void probe_alloc_default_domain(struct bus_type *bus,
 				       struct iommu_group *group)
 {
 	struct __group_domain_type gtype;
-
-	if (group->default_domain)
-		return;
 
 	memset(&gtype, 0, sizeof(gtype));
 
@@ -2059,6 +2089,12 @@ struct iommu_domain *iommu_get_domain_for_dev(struct device *dev)
 }
 EXPORT_SYMBOL_GPL(iommu_get_domain_for_dev);
 
+struct iommu_domain *iommu_get_domain_for_group(struct iommu_group *group)
+{
+	return group->domain;
+}
+EXPORT_SYMBOL_GPL(iommu_get_domain_for_group);
+
 /*
  * For IOMMU_DOMAIN_DMA implementations which already provide their own
  * guarantees that the group and its default domain are valid and correct.
@@ -2202,7 +2238,6 @@ static size_t iommu_pgsize(struct iommu_domain *domain, unsigned long iova,
 	unsigned int pgsize_idx, pgsize_idx_next;
 	unsigned long pgsizes;
 	size_t offset, pgsize, pgsize_next;
-	size_t offset_end;
 	unsigned long addr_merge = paddr | iova;
 
 	/* Page sizes supported by the hardware and small enough for @size */
@@ -2243,8 +2278,7 @@ static size_t iommu_pgsize(struct iommu_domain *domain, unsigned long iova,
 	 * If size is big enough to accommodate the larger page, reduce
 	 * the number of smaller pages.
 	 */
-	if (!check_add_overflow(offset, pgsize_next, &offset_end) &&
-	    offset_end <= size)
+	if (offset + pgsize_next <= size)
 		size = offset;
 
 out_set_count:

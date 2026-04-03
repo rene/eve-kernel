@@ -37,6 +37,7 @@
 #include <linux/kcsan.h>
 #include <linux/rv.h>
 #include <asm/kmap_size.h>
+#include <linux/isolation.h>
 
 /* task_struct member predeclarations (sorted alphabetically): */
 struct audit_context;
@@ -888,7 +889,9 @@ struct task_struct {
 	unsigned			sched_reset_on_fork:1;
 	unsigned			sched_contributes_to_load:1;
 	unsigned			sched_migrated:1;
-	unsigned			sched_task_hot:1;
+#ifdef CONFIG_PSI
+	unsigned			sched_psi_wake_requeue:1;
+#endif
 
 	/* Force alignment to the next boundary: */
 	unsigned			:0;
@@ -1487,6 +1490,10 @@ struct task_struct {
 	unsigned long			lowest_stack;
 	unsigned long			prev_lowest_stack;
 #endif
+#ifdef CONFIG_TASK_ISOLATION
+	unsigned short			task_isolation_flags; /* prctl */
+	unsigned short			task_isolation_state;
+#endif
 
 #ifdef CONFIG_X86_MCE
 	void __user			*mce_vaddr;
@@ -1661,16 +1668,15 @@ static inline unsigned int __task_state_index(unsigned int tsk_state,
 
 	BUILD_BUG_ON_NOT_POWER_OF_2(TASK_REPORT_MAX);
 
-	if ((tsk_state & TASK_IDLE) == TASK_IDLE)
+	if (tsk_state == TASK_IDLE)
 		state = TASK_REPORT_IDLE;
 
 	/*
 	 * We're lying here, but rather than expose a completely new task state
 	 * to userspace, we can make this appear as if the task has gone through
 	 * a regular rt_mutex_lock() call.
-	 * Report frozen tasks as uninterruptible.
 	 */
-	if ((tsk_state & TASK_RTLOCK_WAIT) || (tsk_state & TASK_FROZEN))
+	if (tsk_state == TASK_RTLOCK_WAIT)
 		state = TASK_UNINTERRUPTIBLE;
 
 	return fls(state);
@@ -1994,6 +2000,7 @@ extern char *__get_task_comm(char *to, size_t len, struct task_struct *tsk);
 #ifdef CONFIG_SMP
 static __always_inline void scheduler_ipi(void)
 {
+	task_isolation_kernel_enter();
 	/*
 	 * Fold TIF_NEED_RESCHED into the preempt_count; anybody setting
 	 * TIF_NEED_RESCHED remotely (for the first time) will also send

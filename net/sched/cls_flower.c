@@ -70,6 +70,7 @@ struct fl_flow_key {
 	struct flow_dissector_key_num_of_vlans num_of_vlans;
 	struct flow_dissector_key_pppoe pppoe;
 	struct flow_dissector_key_l2tpv3 l2tpv3;
+	struct flow_dissector_key_ipsec ipsec;
 } __aligned(BITS_PER_LONG / 8); /* Ensure that we can do comparisons as longs. */
 
 struct fl_flow_mask_range {
@@ -714,7 +715,8 @@ static const struct nla_policy fl_policy[TCA_FLOWER_MAX + 1] = {
 	[TCA_FLOWER_KEY_PPPOE_SID]	= { .type = NLA_U16 },
 	[TCA_FLOWER_KEY_PPP_PROTO]	= { .type = NLA_U16 },
 	[TCA_FLOWER_KEY_L2TPV3_SID]	= { .type = NLA_U32 },
-
+	[TCA_FLOWER_KEY_SPI]		= { .type = NLA_U32 },
+	[TCA_FLOWER_KEY_SPI_MASK]	= { .type = NLA_U32 },
 };
 
 static const struct nla_policy
@@ -732,7 +734,7 @@ geneve_opt_policy[TCA_FLOWER_KEY_ENC_OPT_GENEVE_MAX + 1] = {
 	[TCA_FLOWER_KEY_ENC_OPT_GENEVE_CLASS]      = { .type = NLA_U16 },
 	[TCA_FLOWER_KEY_ENC_OPT_GENEVE_TYPE]       = { .type = NLA_U8 },
 	[TCA_FLOWER_KEY_ENC_OPT_GENEVE_DATA]       = { .type = NLA_BINARY,
-						       .len = 127 },
+						       .len = 128 },
 };
 
 static const struct nla_policy
@@ -774,6 +776,24 @@ static void fl_set_key_val(struct nlattr **tb,
 		memset(mask, 0xff, len);
 	else
 		nla_memcpy(mask, tb[mask_type], len);
+}
+
+static int fl_set_key_spi(struct nlattr **tb, struct fl_flow_key *key,
+			  struct fl_flow_key *mask,
+			  struct netlink_ext_ack *extack)
+{
+	if (key->basic.ip_proto != IPPROTO_ESP &&
+	    key->basic.ip_proto != IPPROTO_AH) {
+		NL_SET_ERR_MSG(extack,
+			       "Protocol must be either ESP or AH");
+		return -EINVAL;
+	}
+
+	fl_set_key_val(tb, &key->ipsec.spi,
+		       TCA_FLOWER_KEY_SPI,
+		       &mask->ipsec.spi, TCA_FLOWER_KEY_SPI_MASK,
+		       sizeof(key->ipsec.spi));
+	return 0;
 }
 
 static int fl_set_key_port_range(struct nlattr **tb, struct fl_flow_key *key,
@@ -1279,6 +1299,7 @@ static int fl_set_erspan_opt(const struct nlattr *nla, struct fl_flow_key *key,
 	int err;
 
 	md = (struct erspan_metadata *)&key->enc_opts.data[key->enc_opts.len];
+	memset(md, 0xff, sizeof(*md));
 	md->version = 1;
 
 	if (!depth)
@@ -1307,9 +1328,9 @@ static int fl_set_erspan_opt(const struct nlattr *nla, struct fl_flow_key *key,
 			NL_SET_ERR_MSG(extack, "Missing tunnel key erspan option index");
 			return -EINVAL;
 		}
-		memset(&md->u.index, 0xff, sizeof(md->u.index));
 		if (tb[TCA_FLOWER_KEY_ENC_OPT_ERSPAN_INDEX]) {
 			nla = tb[TCA_FLOWER_KEY_ENC_OPT_ERSPAN_INDEX];
+			memset(&md->u, 0x00, sizeof(md->u));
 			md->u.index = nla_get_be32(nla);
 		}
 	} else if (md->version == 2) {
@@ -1318,12 +1339,10 @@ static int fl_set_erspan_opt(const struct nlattr *nla, struct fl_flow_key *key,
 			NL_SET_ERR_MSG(extack, "Missing tunnel key erspan option dir or hwid");
 			return -EINVAL;
 		}
-		md->u.md2.dir = 1;
 		if (tb[TCA_FLOWER_KEY_ENC_OPT_ERSPAN_DIR]) {
 			nla = tb[TCA_FLOWER_KEY_ENC_OPT_ERSPAN_DIR];
 			md->u.md2.dir = nla_get_u8(nla);
 		}
-		set_hwid(&md->u.md2, 0xff);
 		if (tb[TCA_FLOWER_KEY_ENC_OPT_ERSPAN_HWID]) {
 			nla = tb[TCA_FLOWER_KEY_ENC_OPT_ERSPAN_HWID];
 			set_hwid(&md->u.md2, nla_get_u8(nla));
@@ -1821,6 +1840,12 @@ static int fl_set_key(struct net *net, struct nlattr **tb,
 			return ret;
 	}
 
+	if (tb[TCA_FLOWER_KEY_SPI]) {
+		ret = fl_set_key_spi(tb, key, mask, extack);
+		if (ret)
+			return ret;
+	}
+
 	if (tb[TCA_FLOWER_KEY_ENC_IPV4_SRC] ||
 	    tb[TCA_FLOWER_KEY_ENC_IPV4_DST]) {
 		key->enc_control.addr_type = FLOW_DISSECTOR_KEY_IPV4_ADDRS;
@@ -1993,6 +2018,8 @@ static void fl_init_dissector(struct flow_dissector *dissector,
 			     FLOW_DISSECTOR_KEY_PPPOE, pppoe);
 	FL_KEY_SET_IF_MASKED(mask, keys, cnt,
 			     FLOW_DISSECTOR_KEY_L2TPV3, l2tpv3);
+	FL_KEY_SET_IF_MASKED(mask, keys, cnt,
+			     FLOW_DISSECTOR_KEY_IPSEC, ipsec);
 
 	skb_flow_dissector_init(dissector, keys, cnt);
 }
@@ -3225,6 +3252,12 @@ static int fl_dump_key(struct sk_buff *skb, struct net *net,
 				 &mask->l2tpv3.session_id,
 				 TCA_FLOWER_UNSPEC,
 				 sizeof(key->l2tpv3.session_id)))
+		goto nla_put_failure;
+
+	if (key->ipsec.spi &&
+	    fl_dump_key_val(skb, &key->ipsec.spi, TCA_FLOWER_KEY_SPI,
+			    &mask->ipsec.spi, TCA_FLOWER_KEY_SPI_MASK,
+			    sizeof(key->ipsec.spi)))
 		goto nla_put_failure;
 
 	if ((key->basic.ip_proto == IPPROTO_TCP ||

@@ -2447,11 +2447,12 @@ retry:
 
 	if (pos < 0) {
 		/*
-		 * The path is longer than PATH_MAX and this function
-		 * cannot ever succeed.  Creating paths that long is
-		 * possible with Ceph, but Linux cannot use them.
+		 * A rename didn't occur, but somehow we didn't end up where
+		 * we thought we would. Throw a warning and try again.
 		 */
-		return ERR_PTR(-ENAMETOOLONG);
+		pr_warn("build_path did not end path lookup where "
+			"expected, pos is %d\n", pos);
+		goto retry;
 	}
 
 	*pbase = base;
@@ -3649,11 +3650,11 @@ static void handle_session(struct ceph_mds_session *session,
 		if (session->s_state == CEPH_MDS_SESSION_RECONNECTING)
 			pr_info("mds%d reconnect success\n", session->s_mds);
 
-		session->s_features = features;
 		if (session->s_state == CEPH_MDS_SESSION_OPEN) {
 			pr_notice("mds%d is already opened\n", session->s_mds);
 		} else {
 			session->s_state = CEPH_MDS_SESSION_OPEN;
+			session->s_features = features;
 			renewed_caps(mdsc, session, 0);
 			if (test_bit(CEPHFS_FEATURE_METRIC_COLLECT,
 				     &session->s_features))

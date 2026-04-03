@@ -750,6 +750,43 @@ static void skb_clone_fraglist(struct sk_buff *skb)
 		skb_get(list);
 }
 
+#if IS_ENABLED(CONFIG_PAGE_POOL)
+
+static bool is_pp_page(struct page *page)
+{
+	return (page->pp_magic & ~0x3UL) == PP_SIGNATURE;
+}
+
+bool napi_pp_put_page(struct page *page, bool napi_safe)
+{
+	struct page_pool *pp;
+
+	page = compound_head(page);
+
+	/* page->pp_magic is OR'ed with PP_SIGNATURE after the allocation
+	 * in order to preserve any existing bits, such as bit 0 for the
+	 * head page of compound page and bit 1 for pfmemalloc page, so
+	 * mask those bits for freeing side when doing below checking,
+	 * and page_is_pfmemalloc() is checked in __page_pool_put_page()
+	 * to avoid recycling the pfmemalloc page.
+	 */
+	if (unlikely(!is_pp_page(page)))
+		return false;
+
+	pp = page->pp;
+
+	/* Driver set this to memory recycling info. Reset it on recycle.
+	 * This will *not* work for NIC using a split-page memory model.
+	 * The page will be returned to the pool here regardless of the
+	 * 'flipped' fragment being in use or not.
+	 */
+	page_pool_put_full_page(pp, page, false);
+
+	return true;
+}
+EXPORT_SYMBOL(napi_pp_put_page);
+#endif
+
 static void skb_free_head(struct sk_buff *skb)
 {
 	unsigned char *head = skb->head;
@@ -1720,17 +1757,11 @@ static inline int skb_alloc_rx_flag(const struct sk_buff *skb)
 
 struct sk_buff *skb_copy(const struct sk_buff *skb, gfp_t gfp_mask)
 {
-	struct sk_buff *n;
-	unsigned int size;
-	int headerlen;
+	int headerlen = skb_headroom(skb);
+	unsigned int size = skb_end_offset(skb) + skb->data_len;
+	struct sk_buff *n = __alloc_skb(size, gfp_mask,
+					skb_alloc_rx_flag(skb), NUMA_NO_NODE);
 
-	if (WARN_ON_ONCE(skb_shinfo(skb)->gso_type & SKB_GSO_FRAGLIST))
-		return NULL;
-
-	headerlen = skb_headroom(skb);
-	size = skb_end_offset(skb) + skb->data_len;
-	n = __alloc_skb(size, gfp_mask,
-			skb_alloc_rx_flag(skb), NUMA_NO_NODE);
 	if (!n)
 		return NULL;
 
@@ -2043,17 +2074,12 @@ struct sk_buff *skb_copy_expand(const struct sk_buff *skb,
 	/*
 	 *	Allocate the copy buffer
 	 */
+	struct sk_buff *n = __alloc_skb(newheadroom + skb->len + newtailroom,
+					gfp_mask, skb_alloc_rx_flag(skb),
+					NUMA_NO_NODE);
+	int oldheadroom = skb_headroom(skb);
 	int head_copy_len, head_copy_off;
-	struct sk_buff *n;
-	int oldheadroom;
 
-	if (WARN_ON_ONCE(skb_shinfo(skb)->gso_type & SKB_GSO_FRAGLIST))
-		return NULL;
-
-	oldheadroom = skb_headroom(skb);
-	n = __alloc_skb(newheadroom + skb->len + newtailroom,
-			gfp_mask, skb_alloc_rx_flag(skb),
-			NUMA_NO_NODE);
 	if (!n)
 		return NULL;
 
@@ -4224,9 +4250,8 @@ struct sk_buff *skb_segment(struct sk_buff *head_skb,
 		/* GSO partial only requires that we trim off any excess that
 		 * doesn't fit into an MSS sized block, so take care of that
 		 * now.
-		 * Cap len to not accidentally hit GSO_BY_FRAGS.
 		 */
-		partial_segs = min(len, GSO_BY_FRAGS - 1U) / mss;
+		partial_segs = len / mss;
 		if (partial_segs > 1)
 			mss *= partial_segs;
 		else
@@ -4689,8 +4714,6 @@ int skb_to_sgvec_nomark(struct sk_buff *skb, struct scatterlist *sg,
 }
 EXPORT_SYMBOL_GPL(skb_to_sgvec_nomark);
 
-
-
 /**
  *	skb_cow_data - Check that a socket buffer's data buffers are writable
  *	@skb: The socket buffer to check.
@@ -4925,7 +4948,7 @@ static void __skb_complete_tx_timestamp(struct sk_buff *skb,
 	serr->ee.ee_info = tstype;
 	serr->opt_stats = opt_stats;
 	serr->header.h4.iif = skb->dev ? skb->dev->ifindex : 0;
-	if (READ_ONCE(sk->sk_tsflags) & SOF_TIMESTAMPING_OPT_ID) {
+	if (sk->sk_tsflags & SOF_TIMESTAMPING_OPT_ID) {
 		serr->ee.ee_data = skb_shinfo(skb)->tskey;
 		if (sk_is_tcp(sk))
 			serr->ee.ee_data -= atomic_read(&sk->sk_tskey);
@@ -4981,23 +5004,21 @@ void __skb_tstamp_tx(struct sk_buff *orig_skb,
 {
 	struct sk_buff *skb;
 	bool tsonly, opt_stats = false;
-	u32 tsflags;
 
 	if (!sk)
 		return;
 
-	tsflags = READ_ONCE(sk->sk_tsflags);
-	if (!hwtstamps && !(tsflags & SOF_TIMESTAMPING_OPT_TX_SWHW) &&
+	if (!hwtstamps && !(sk->sk_tsflags & SOF_TIMESTAMPING_OPT_TX_SWHW) &&
 	    skb_shinfo(orig_skb)->tx_flags & SKBTX_IN_PROGRESS)
 		return;
 
-	tsonly = tsflags & SOF_TIMESTAMPING_OPT_TSONLY;
+	tsonly = sk->sk_tsflags & SOF_TIMESTAMPING_OPT_TSONLY;
 	if (!skb_may_tx_timestamp(sk, tsonly))
 		return;
 
 	if (tsonly) {
 #ifdef CONFIG_INET
-		if ((tsflags & SOF_TIMESTAMPING_OPT_STATS) &&
+		if ((sk->sk_tsflags & SOF_TIMESTAMPING_OPT_STATS) &&
 		    sk_is_tcp(sk)) {
 			skb = tcp_get_timestamping_opt_stats(sk, orig_skb,
 							     ack_skb);
@@ -5556,11 +5577,11 @@ void skb_scrub_packet(struct sk_buff *skb, bool xnet)
 	skb->offload_fwd_mark = 0;
 	skb->offload_l3_fwd_mark = 0;
 #endif
-	ipvs_reset(skb);
 
 	if (!xnet)
 		return;
 
+	ipvs_reset(skb);
 	skb->mark = 0;
 	skb_clear_tstamp(skb);
 }
@@ -5791,6 +5812,7 @@ EXPORT_SYMBOL(skb_ensure_writable);
  */
 int __skb_vlan_pop(struct sk_buff *skb, u16 *vlan_tci)
 {
+	struct vlan_hdr *vhdr;
 	int offset = skb->data - skb_mac_header(skb);
 	int err;
 
@@ -5806,8 +5828,13 @@ int __skb_vlan_pop(struct sk_buff *skb, u16 *vlan_tci)
 
 	skb_postpull_rcsum(skb, skb->data + (2 * ETH_ALEN), VLAN_HLEN);
 
-	vlan_remove_tag(skb, vlan_tci);
+	vhdr = (struct vlan_hdr *)(skb->data + ETH_HLEN);
+	*vlan_tci = ntohs(vhdr->h_vlan_TCI);
 
+	memmove(skb->data + VLAN_HLEN, skb->data, 2 * ETH_ALEN);
+	__skb_pull(skb, VLAN_HLEN);
+
+	vlan_set_encap_proto(skb, vhdr);
 	skb->mac_header += VLAN_HLEN;
 
 	if (skb_network_offset(skb) < ETH_HLEN)
@@ -6504,14 +6531,6 @@ static struct skb_ext *skb_ext_maybe_cow(struct skb_ext *old,
 
 		for (i = 0; i < sp->len; i++)
 			xfrm_state_hold(sp->xvec[i]);
-	}
-#endif
-#ifdef CONFIG_MCTP_FLOWS
-	if (old_active & (1 << SKB_EXT_MCTP)) {
-		struct mctp_flow *flow = skb_ext_get_ptr(old, SKB_EXT_MCTP);
-
-		if (flow->key)
-			refcount_inc(&flow->key->refs);
 	}
 #endif
 	__skb_ext_put(old);

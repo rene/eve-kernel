@@ -4833,7 +4833,6 @@ S:	Maintained
 F:	Documentation/admin-guide/module-signing.rst
 F:	certs/
 F:	scripts/sign-file.c
-F:	scripts/ssl-common.h
 F:	tools/certs/
 
 CFAG12864B LCD DRIVER
@@ -7466,6 +7465,12 @@ L:	linux-edac@vger.kernel.org
 S:	Maintained
 F:	drivers/edac/mpc85xx_edac.[ch]
 
+EDAC-OCTEONTX
+M:	Vasyl Gomonovych <vgomonovych@marvell.com>
+M:	Piyush Malgujar <pmalgujar@marvell.com>
+S:	Maintained
+F:	drivers/edac/octeontx_edac.c
+
 EDAC-PASEMI
 M:	Egor Martovetsky <egor@pasemi.com>
 L:	linux-edac@vger.kernel.org
@@ -8032,7 +8037,7 @@ M:	Geoffrey D. Bennett <g@b4.vu>
 L:	alsa-devel@alsa-project.org (moderated for non-subscribers)
 S:	Maintained
 T:	git git://git.kernel.org/pub/scm/linux/kernel/git/tiwai/sound.git
-F:	sound/usb/mixer_scarlett2.c
+F:	sound/usb/mixer_scarlett_gen2.c
 
 FORCEDETH GIGABIT ETHERNET DRIVER
 M:	Rain River <rain.1986.08.12@gmail.com>
@@ -10052,7 +10057,6 @@ F:	drivers/infiniband/
 F:	include/rdma/
 F:	include/trace/events/ib_mad.h
 F:	include/trace/events/ib_umad.h
-F:	include/trace/misc/rdma.h
 F:	include/uapi/linux/if_infiniband.h
 F:	include/uapi/rdma/
 F:	samples/bpf/ibumad_kern.c
@@ -10805,8 +10809,6 @@ L:	linux-kernel@vger.kernel.org
 S:	Maintained
 T:	git git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git irq/core
 F:	kernel/irq/
-F:	include/linux/group_cpus.h
-F:	lib/group_cpus.c
 
 IRQCHIP DRIVERS
 M:	Thomas Gleixner <tglx@linutronix.de>
@@ -11141,12 +11143,6 @@ F:	fs/nfs_common/
 F:	fs/nfsd/
 F:	include/linux/lockd/
 F:	include/linux/sunrpc/
-F:	include/trace/events/rpcgss.h
-F:	include/trace/events/rpcrdma.h
-F:	include/trace/events/sunrpc.h
-F:	include/trace/misc/fs.h
-F:	include/trace/misc/nfs.h
-F:	include/trace/misc/sunrpc.h
 F:	include/uapi/linux/nfsd/
 F:	include/uapi/linux/sunrpc/
 F:	net/sunrpc/
@@ -12210,6 +12206,41 @@ F:	include/net/mctpdevice.h
 F:	include/net/netns/mctp.h
 F:	net/mctp/
 
+MAILBOX MARVELL MHU DRIVER
+M:	Wojciech Bartczak <wbartczak@marvell.com>
+M:	Piyush Malgujar <pmalgujar@marvell.com>
+S:	Maintained
+F:	drivers/mailbox/mvl_mhu.c
+
+MAILBOX MARVELL MUB DRIVER
+M:	Wojciech Bartczak <wbartczak@marvell.com>
+M:	Piyush Malgujar <pmalgujar@marvell.com>
+S:	Maintained
+F:	drivers/firmware/octeontx2/mub.c
+
+MAILBOX MARVELL RPRAM DRIVER
+M:	Wojciech Bartczak <wbartczak@marvell.com>
+M:	Piyush Malgujar <pmalgujar@marvell.com>
+S:	Maintained
+F:	drivers/firmware/octeontx2/rpram.c
+
+MAILBOX MARVELL RETIMER DRIVER
+M:	Damian Eppel <deppel@marvell.com>
+S:	Maintained
+F:	drivers/firmware/octeontx2/retimer-mgmt.c
+
+MAILBOX MARVELL MEMTEST DRIVER
+M:	Wojciech Bartczak <wbartczak@marvell.com>
+M:	Piyush Malgujar <pmalgujar@marvell.com>
+S:	Maintained
+F:	drivers/firmware/octeontx2/memtest.c
+
+MAILBOX MARVELL MAC MANAGEMENT DRIVER
+M:	Wojciech Bartczak <wbartczak@marvell.com>
+M:	Piyush Malgujar <pmalgujar@marvell.com>
+S:	Maintained
+F:	drivers/firmware/octeontx2/mac_mgmt.c
+
 MAN-PAGES: MANUAL PAGES FOR LINUX -- Sections 2, 3, 4, 5, and 7
 M:	Michael Kerrisk <mtk.manpages@gmail.com>
 L:	linux-man@vger.kernel.org
@@ -12355,6 +12386,7 @@ M:	Sunil Goutham <sgoutham@marvell.com>
 M:	Geetha sowjanya <gakula@marvell.com>
 M:	Subbaraya Sundeep <sbhatta@marvell.com>
 M:	hariprasad <hkelam@marvell.com>
+M:	Bharat Bhushan <bbhushan2@marvell.com>
 L:	netdev@vger.kernel.org
 S:	Supported
 F:	drivers/net/ethernet/marvell/octeontx2/nic/
@@ -17415,6 +17447,7 @@ S:	Supported
 F:	Documentation/x86/resctrl*
 F:	arch/x86/include/asm/resctrl.h
 F:	arch/x86/kernel/cpu/resctrl/
+F:	fs/resctrl/
 F:	tools/testing/selftests/resctrl/
 
 READ-COPY UPDATE (RCU)
@@ -20053,6 +20086,12 @@ F:	Documentation/filesystems/sysv-fs.rst
 F:	fs/sysv/
 F:	include/linux/sysv_fs.h
 
+TASK ISOLATION
+M:	Alex Belits <abelits@marvell.com>
+S:	Maintained
+F:	include/linux/isolation.h
+F:	kernel/isolation.c
+
 TASKSTATS STATISTICS INTERFACE
 M:	Balbir Singh <bsingharora@gmail.com>
 S:	Maintained
@@ -22558,7 +22597,6 @@ F:	include/xen/swiotlb-xen.h
 
 XFS FILESYSTEM
 C:	irc://irc.oftc.net/xfs
-M:	Leah Rumancik <leah.rumancik@gmail.com>
 M:	Darrick J. Wong <djwong@kernel.org>
 L:	linux-xfs@vger.kernel.org
 S:	Supported

@@ -53,7 +53,7 @@ enum tis_int_flags {
 enum tis_defaults {
 	TIS_MEM_LEN = 0x5000,
 	TIS_SHORT_TIMEOUT = 750,	/* ms */
-	TIS_LONG_TIMEOUT = 4000,	/* 4 secs */
+	TIS_LONG_TIMEOUT = 2000,	/* 2 sec */
 	TIS_TIMEOUT_MIN_ATML = 14700,	/* usecs */
 	TIS_TIMEOUT_MAX_ATML = 15000,	/* usecs */
 };
@@ -78,12 +78,6 @@ enum tis_defaults {
 #define	TPM_DID_VID(l)			(0x0F00 | ((l) << 12))
 #define	TPM_RID(l)			(0x0F04 | ((l) << 12))
 
-#ifdef CONFIG_ARCH_ADVANTECH
-/*+ fix BHO I2C implementation */
-#define TPM_INTF_CAPABILITY(l)	(0x0030 | ((l) << 12))
-/*- fix BHO I2C implementation */
-#endif
-
 #define LPC_CNTRL_OFFSET		0x84
 #define LPC_CLKRUN_EN			(1 << 2)
 #define INTEL_LEGACY_BLK_BASE_ADDR	0xFED08000
@@ -94,7 +88,6 @@ enum tpm_tis_flags {
 	TPM_TIS_INVALID_STATUS		= 1,
 	TPM_TIS_DEFAULT_CANCELLATION	= 2,
 	TPM_TIS_IRQ_TESTED		= 3,
-	TPM_TIS_STATUS_VALID_RETRY	= 4,
 };
 
 struct tpm_tis_data {

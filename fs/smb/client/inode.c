@@ -264,7 +264,7 @@ cifs_unix_basic_to_fattr(struct cifs_fattr *fattr, FILE_UNIX_BASIC_INFO *info,
 		fattr->cf_dtype = DT_REG;
 		break;
 	case UNIX_SYMLINK:
-		fattr->cf_mode |= S_IFLNK | cifs_sb->ctx->file_mode;
+		fattr->cf_mode |= S_IFLNK;
 		fattr->cf_dtype = DT_LNK;
 		break;
 	case UNIX_DIR:
@@ -1274,8 +1274,6 @@ cifs_find_inode(struct inode *inode, void *opaque)
 {
 	struct cifs_fattr *fattr = opaque;
 
-	/* [!] The compared values must be the same in struct cifs_fscache_inode_key. */
-
 	/* don't match inode with different uniqueid */
 	if (CIFS_I(inode)->uniqueid != fattr->cf_uniqueid)
 		return 0;
@@ -1649,23 +1647,14 @@ int cifs_unlink(struct inode *dir, struct dentry *dentry)
 	struct cifs_sb_info *cifs_sb = CIFS_SB(sb);
 	struct tcon_link *tlink;
 	struct cifs_tcon *tcon;
-	__u32 dosattr = 0, origattr = 0;
 	struct TCP_Server_Info *server;
 	struct iattr *attrs = NULL;
-	bool rehash = false;
+	__u32 dosattr = 0, origattr = 0;
 
 	cifs_dbg(FYI, "cifs_unlink, dir=0x%p, dentry=0x%p\n", dir, dentry);
 
 	if (unlikely(cifs_forced_shutdown(cifs_sb)))
 		return -EIO;
-
-	/* Unhash dentry in advance to prevent any concurrent opens */
-	spin_lock(&dentry->d_lock);
-	if (!d_unhashed(dentry)) {
-		__d_drop(dentry);
-		rehash = true;
-	}
-	spin_unlock(&dentry->d_lock);
 
 	tlink = cifs_sb_tlink(cifs_sb);
 	if (IS_ERR(tlink))
@@ -1715,8 +1704,7 @@ psx_del_no_retry:
 		if (inode)
 			cifs_drop_nlink(inode);
 	} else if (rc == -ENOENT) {
-		if (simple_positive(dentry))
-			d_delete(dentry);
+		d_drop(dentry);
 	} else if (rc == -EBUSY) {
 		if (server->ops->rename_pending_delete) {
 			rc = server->ops->rename_pending_delete(full_path,
@@ -1767,8 +1755,6 @@ unlink_out:
 	kfree(attrs);
 	free_xid(xid);
 	cifs_put_tlink(tlink);
-	if (rehash)
-		d_rehash(dentry);
 	return rc;
 }
 
@@ -2165,7 +2151,6 @@ cifs_rename2(struct user_namespace *mnt_userns, struct inode *source_dir,
 	struct cifs_sb_info *cifs_sb;
 	struct tcon_link *tlink;
 	struct cifs_tcon *tcon;
-	bool rehash = false;
 	unsigned int xid;
 	int rc, tmprc;
 	int retry_count = 0;
@@ -2180,17 +2165,6 @@ cifs_rename2(struct user_namespace *mnt_userns, struct inode *source_dir,
 	cifs_sb = CIFS_SB(source_dir->i_sb);
 	if (unlikely(cifs_forced_shutdown(cifs_sb)))
 		return -EIO;
-
-	/*
-	 * Prevent any concurrent opens on the target by unhashing the dentry.
-	 * VFS already unhashes the target when renaming directories.
-	 */
-	if (d_is_positive(target_dentry) && !d_is_dir(target_dentry)) {
-		if (!d_unhashed(target_dentry)) {
-			d_drop(target_dentry);
-			rehash = true;
-		}
-	}
 
 	tlink = cifs_sb_tlink(cifs_sb);
 	if (IS_ERR(tlink))
@@ -2231,8 +2205,6 @@ cifs_rename2(struct user_namespace *mnt_userns, struct inode *source_dir,
 		}
 	}
 
-	if (!rc)
-		rehash = false;
 	/*
 	 * No-replace is the natural behavior for CIFS, so skip unlink hacks.
 	 */
@@ -2291,8 +2263,6 @@ unlink_target:
 			goto cifs_rename_exit;
 		rc = cifs_do_rename(xid, source_dentry, from_name,
 				    target_dentry, to_name);
-		if (!rc)
-			rehash = false;
 	}
 
 	/* force revalidate to go get info when needed */
@@ -2302,8 +2272,6 @@ unlink_target:
 		target_dir->i_mtime = current_time(source_dir);
 
 cifs_rename_exit:
-	if (rehash)
-		d_rehash(target_dentry);
 	kfree(info_buf_source);
 	free_dentry_path(page2);
 	free_dentry_path(page1);

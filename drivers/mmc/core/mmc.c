@@ -1007,12 +1007,10 @@ static int mmc_select_bus_width(struct mmc_card *card)
 	static unsigned ext_csd_bits[] = {
 		EXT_CSD_BUS_WIDTH_8,
 		EXT_CSD_BUS_WIDTH_4,
-		EXT_CSD_BUS_WIDTH_1,
 	};
 	static unsigned bus_widths[] = {
 		MMC_BUS_WIDTH_8,
 		MMC_BUS_WIDTH_4,
-		MMC_BUS_WIDTH_1,
 	};
 	struct mmc_host *host = card->host;
 	unsigned idx, bus_width = 0;
@@ -1819,13 +1817,8 @@ static int mmc_init_card(struct mmc_host *host, u32 ocr,
 
 		if (err)
 			goto free_card;
-	} else if (mmc_card_hs400es(card)) {
-		if (host->ops->execute_hs400_tuning) {
-			err = host->ops->execute_hs400_tuning(host, card);
-			if (err)
-				goto free_card;
-		}
-	} else {
+
+	} else if (!mmc_card_hs400es(card)) {
 		/* Select the desired bus width optionally */
 		err = mmc_select_bus_width(card);
 		if (err > 0 && mmc_card_hs(card)) {

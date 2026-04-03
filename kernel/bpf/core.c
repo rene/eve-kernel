@@ -365,18 +365,9 @@ static int bpf_adj_delta_to_imm(struct bpf_insn *insn, u32 pos, s32 end_old,
 static int bpf_adj_delta_to_off(struct bpf_insn *insn, u32 pos, s32 end_old,
 				s32 end_new, s32 curr, const bool probe_pass)
 {
-	s64 off_min, off_max, off;
+	const s32 off_min = S16_MIN, off_max = S16_MAX;
 	s32 delta = end_new - end_old;
-
-	if (insn->code == (BPF_JMP32 | BPF_JA)) {
-		off = insn->imm;
-		off_min = S32_MIN;
-		off_max = S32_MAX;
-	} else {
-		off = insn->off;
-		off_min = S16_MIN;
-		off_max = S16_MAX;
-	}
+	s32 off = insn->off;
 
 	if (curr < pos && curr + off + 1 >= end_old)
 		off += delta;
@@ -384,12 +375,8 @@ static int bpf_adj_delta_to_off(struct bpf_insn *insn, u32 pos, s32 end_old,
 		off -= delta;
 	if (off < off_min || off > off_max)
 		return -ERANGE;
-	if (!probe_pass) {
-		if (insn->code == (BPF_JMP32 | BPF_JA))
-			insn->imm = off;
-		else
-			insn->off = off;
-	}
+	if (!probe_pass)
+		insn->off = off;
 	return 0;
 }
 
@@ -523,8 +510,6 @@ struct bpf_prog *bpf_patch_insn_single(struct bpf_prog *prog, u32 off,
 
 int bpf_remove_insns(struct bpf_prog *prog, u32 off, u32 cnt)
 {
-	int err;
-
 	/* Branch offsets can't overflow when program is shrinking, no need
 	 * to call bpf_adj_branches(..., true) here
 	 */
@@ -532,9 +517,7 @@ int bpf_remove_insns(struct bpf_prog *prog, u32 off, u32 cnt)
 		sizeof(struct bpf_insn) * (prog->len - off - cnt));
 	prog->len -= cnt;
 
-	err = bpf_adj_branches(prog, off, off + cnt, off, false);
-	WARN_ON_ONCE(err);
-	return err;
+	return WARN_ON_ONCE(bpf_adj_branches(prog, off, off + cnt, off, false));
 }
 
 static void bpf_prog_kallsyms_del_subprogs(struct bpf_prog *fp)
@@ -861,12 +844,7 @@ static LIST_HEAD(pack_list);
  * CONFIG_MMU=n. Use PAGE_SIZE in these cases.
  */
 #ifdef PMD_SIZE
-/* PMD_SIZE is really big for some archs. It doesn't make sense to
- * reserve too much memory in one allocation. Hardcode BPF_PROG_PACK_SIZE to
- * 2MiB * num_possible_nodes(). On most architectures PMD_SIZE will be
- * greater than or equal to 2MB.
- */
-#define BPF_PROG_PACK_SIZE (SZ_2M * num_possible_nodes())
+#define BPF_PROG_PACK_SIZE (PMD_SIZE * num_possible_nodes())
 #else
 #define BPF_PROG_PACK_SIZE PAGE_SIZE
 #endif
@@ -1608,7 +1586,6 @@ EXPORT_SYMBOL_GPL(__bpf_call_base);
 	INSN_3(JMP, JSLE, K),			\
 	INSN_3(JMP, JSET, K),			\
 	INSN_2(JMP, JA),			\
-	INSN_2(JMP32, JA),			\
 	/* Store instructions. */		\
 	/*   Register based. */			\
 	INSN_3(STX, MEM,  B),			\
@@ -1885,9 +1862,6 @@ out:
 	JMP_JA:
 		insn += insn->off;
 		CONT;
-	JMP32_JA:
-		insn += insn->imm;
-		CONT;
 	JMP_EXIT:
 		return BPF_R0;
 	/* JMP */
@@ -2038,7 +2012,6 @@ static unsigned int PROG_NAME(stack_size)(const void *ctx, const struct bpf_insn
 	u64 stack[stack_size / sizeof(u64)]; \
 	u64 regs[MAX_BPF_EXT_REG] = {}; \
 \
-	kmsan_unpoison_memory(stack, sizeof(stack)); \
 	FP = (u64) (unsigned long) &stack[ARRAY_SIZE(stack)]; \
 	ARG1 = (u64) (unsigned long) ctx; \
 	return ___bpf_prog_run(regs, insn); \
@@ -2052,7 +2025,6 @@ static u64 PROG_NAME_ARGS(stack_size)(u64 r1, u64 r2, u64 r3, u64 r4, u64 r5, \
 	u64 stack[stack_size / sizeof(u64)]; \
 	u64 regs[MAX_BPF_EXT_REG]; \
 \
-	kmsan_unpoison_memory(stack, sizeof(stack)); \
 	FP = (u64) (unsigned long) &stack[ARRAY_SIZE(stack)]; \
 	BPF_R1 = r1; \
 	BPF_R2 = r2; \
@@ -2120,58 +2092,27 @@ bool bpf_prog_map_compatible(struct bpf_map *map,
 			     const struct bpf_prog *fp)
 {
 	enum bpf_prog_type prog_type = resolve_prog_type(fp);
-	struct bpf_prog_aux *aux = fp->aux;
-	enum bpf_cgroup_storage_type i;
-	bool ret = false;
-	u64 cookie;
+	bool ret;
 
 	if (fp->kprobe_override)
-		return ret;
+		return false;
 
-	spin_lock(&map->owner_lock);
-	/* There's no owner yet where we could check for compatibility. */
-	if (!map->owner) {
-		map->owner = bpf_map_owner_alloc(map);
-		if (!map->owner)
-			goto err;
-		map->owner->type  = prog_type;
-		map->owner->jited = fp->jited;
-		map->owner->xdp_has_frags = aux->xdp_has_frags;
-		map->owner->attach_func_proto = aux->attach_func_proto;
-		for_each_cgroup_storage_type(i) {
-			map->owner->storage_cookie[i] =
-				aux->cgroup_storage[i] ?
-				aux->cgroup_storage[i]->cookie : 0;
-		}
+	spin_lock(&map->owner.lock);
+	if (!map->owner.type) {
+		/* There's no owner yet where we could check for
+		 * compatibility.
+		 */
+		map->owner.type  = prog_type;
+		map->owner.jited = fp->jited;
+		map->owner.xdp_has_frags = fp->aux->xdp_has_frags;
 		ret = true;
 	} else {
-		ret = map->owner->type  == prog_type &&
-		      map->owner->jited == fp->jited &&
-		      map->owner->xdp_has_frags == aux->xdp_has_frags;
-		for_each_cgroup_storage_type(i) {
-			if (!ret)
-				break;
-			cookie = aux->cgroup_storage[i] ?
-				 aux->cgroup_storage[i]->cookie : 0;
-			ret = map->owner->storage_cookie[i] == cookie ||
-			      !cookie;
-		}
-		if (ret &&
-		    map->owner->attach_func_proto != aux->attach_func_proto) {
-			switch (prog_type) {
-			case BPF_PROG_TYPE_TRACING:
-			case BPF_PROG_TYPE_LSM:
-			case BPF_PROG_TYPE_EXT:
-			case BPF_PROG_TYPE_STRUCT_OPS:
-				ret = false;
-				break;
-			default:
-				break;
-			}
-		}
+		ret = map->owner.type  == prog_type &&
+		      map->owner.jited == fp->jited &&
+		      map->owner.xdp_has_frags == fp->aux->xdp_has_frags;
 	}
-err:
-	spin_unlock(&map->owner_lock);
+	spin_unlock(&map->owner.lock);
+
 	return ret;
 }
 
@@ -2225,7 +2166,7 @@ struct bpf_prog *bpf_prog_select_runtime(struct bpf_prog *fp, int *err)
 	/* In case of BPF to BPF calls, verifier did all the prep
 	 * work with regards to JITing, etc.
 	 */
-	bool jit_needed = fp->jit_requested;
+	bool jit_needed = false;
 
 	if (fp->bpf_func)
 		goto finalize;
@@ -2260,9 +2201,7 @@ struct bpf_prog *bpf_prog_select_runtime(struct bpf_prog *fp, int *err)
 	}
 
 finalize:
-	*err = bpf_prog_lock_ro(fp);
-	if (*err)
-		return fp;
+	bpf_prog_lock_ro(fp);
 
 	/* The tail call compatibility check can only be done at
 	 * this late stage as we need to determine, if we deal

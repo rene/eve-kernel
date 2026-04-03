@@ -244,8 +244,6 @@ enum pci_dev_flags {
 	PCI_DEV_FLAGS_NO_RELAXED_ORDERING = (__force pci_dev_flags_t) (1 << 11),
 	/* Device does honor MSI masking despite saying otherwise */
 	PCI_DEV_FLAGS_HAS_MSI_MASKING = (__force pci_dev_flags_t) (1 << 12),
-	/* Device requires write to PCI_MSIX_ENTRY_DATA before any MSIX reads */
-	PCI_DEV_FLAGS_MSIX_TOUCH_ENTRY_DATA_FIRST = (__force pci_dev_flags_t) (1 << 13),
 };
 
 enum pci_irq_reroute_variant {
@@ -319,14 +317,7 @@ struct pci_sriov;
 struct pci_p2pdma;
 struct rcec_ea;
 
-/* struct pci_dev - describes a PCI device
- *
- * @is_hotplug_bridge:	Hotplug bridge of any kind (e.g. PCIe Hot-Plug Capable,
- *			Conventional PCI Hot-Plug, ACPI slot).
- *			Such bridges are allocated additional MMIO and bus
- *			number resources to allow for hierarchy expansion.
- * @is_pciehp:		PCIe Hot-Plug Capable bridge.
- */
+/* The pci_dev structure describes PCI devices */
 struct pci_dev {
 	struct list_head bus_list;	/* Node in per-bus list */
 	struct pci_bus	*bus;		/* Bus this device is on */
@@ -447,7 +438,6 @@ struct pci_dev {
 	unsigned int	is_physfn:1;
 	unsigned int	is_virtfn:1;
 	unsigned int	is_hotplug_bridge:1;
-	unsigned int	is_pciehp:1;
 	unsigned int	shpc_managed:1;		/* SHPC owned by shpchp */
 	unsigned int	is_thunderbolt:1;	/* Thunderbolt controller */
 	/*
@@ -1148,7 +1138,6 @@ int pci_get_interrupt_pin(struct pci_dev *dev, struct pci_dev **bridge);
 u8 pci_common_swizzle(struct pci_dev *dev, u8 *pinp);
 struct pci_dev *pci_dev_get(struct pci_dev *dev);
 void pci_dev_put(struct pci_dev *dev);
-DEFINE_FREE(pci_dev_put, struct pci_dev *, if (_T) pci_dev_put(_T))
 void pci_remove_bus(struct pci_bus *b);
 void pci_stop_and_remove_bus_device(struct pci_dev *dev);
 void pci_stop_and_remove_bus_device_locked(struct pci_dev *dev);
@@ -1394,7 +1383,6 @@ int pci_load_and_free_saved_state(struct pci_dev *dev,
 				  struct pci_saved_state **state);
 int pci_platform_power_transition(struct pci_dev *dev, pci_power_t state);
 int pci_set_power_state(struct pci_dev *dev, pci_power_t state);
-int pci_set_power_state_locked(struct pci_dev *dev, pci_power_t state);
 pci_power_t pci_choose_state(struct pci_dev *dev, pm_message_t state);
 bool pci_pme_capable(struct pci_dev *dev, pci_power_t state);
 void pci_pme_active(struct pci_dev *dev, bool enable);
@@ -1565,8 +1553,6 @@ int pci_scan_bridge(struct pci_bus *bus, struct pci_dev *dev, int max,
 
 void pci_walk_bus(struct pci_bus *top, int (*cb)(struct pci_dev *, void *),
 		  void *userdata);
-void pci_walk_bus_locked(struct pci_bus *top, int (*cb)(struct pci_dev *, void *),
-			 void *userdata);
 int pci_cfg_space_size(struct pci_dev *dev);
 unsigned char pci_bus_max_busnr(struct pci_bus *bus);
 void pci_setup_bridge(struct pci_bus *bus);
@@ -1757,7 +1743,6 @@ void pci_cfg_access_unlock(struct pci_dev *dev);
 void pci_dev_lock(struct pci_dev *dev);
 int pci_dev_trylock(struct pci_dev *dev);
 void pci_dev_unlock(struct pci_dev *dev);
-DEFINE_GUARD(pci_dev, struct pci_dev *, pci_dev_lock(_T), pci_dev_unlock(_T))
 
 /*
  * PCI domain support.  Sometimes called PCI segment (eg by ACPI),
@@ -1789,7 +1774,6 @@ static inline int acpi_pci_bus_find_domain_nr(struct pci_bus *bus)
 { return 0; }
 #endif
 int pci_bus_find_domain_nr(struct pci_bus *bus, struct device *parent);
-void pci_bus_release_domain_nr(struct pci_bus *bus, struct device *parent);
 #endif
 
 /* Some architectures require additional setup to direct VGA traffic */
@@ -1900,8 +1884,6 @@ static inline int pci_save_state(struct pci_dev *dev) { return 0; }
 static inline void pci_restore_state(struct pci_dev *dev) { }
 static inline int pci_set_power_state(struct pci_dev *dev, pci_power_t state)
 { return 0; }
-static inline int pci_set_power_state_locked(struct pci_dev *dev, pci_power_t state)
-{ return 0; }
 static inline int pci_wake_from_d3(struct pci_dev *dev, bool enable)
 { return 0; }
 static inline pci_power_t pci_choose_state(struct pci_dev *dev,
@@ -2007,13 +1989,14 @@ int pci_iobar_pfn(struct pci_dev *pdev, int bar, struct vm_area_struct *vma);
  * These helpers provide future and backwards compatibility
  * for accessing popular PCI BAR info
  */
-#define pci_resource_n(dev, bar)	(&(dev)->resource[(bar)])
-#define pci_resource_start(dev, bar)	(pci_resource_n(dev, bar)->start)
-#define pci_resource_end(dev, bar)	(pci_resource_n(dev, bar)->end)
-#define pci_resource_flags(dev, bar)	(pci_resource_n(dev, bar)->flags)
-#define pci_resource_len(dev,bar)					\
-	(pci_resource_end((dev), (bar)) ? 				\
-	 resource_size(pci_resource_n((dev), (bar))) : 0)
+#define pci_resource_start(dev, bar)	((dev)->resource[(bar)].start)
+#define pci_resource_end(dev, bar)	((dev)->resource[(bar)].end)
+#define pci_resource_flags(dev, bar)	((dev)->resource[(bar)].flags)
+#define pci_resource_len(dev,bar) \
+	((pci_resource_end((dev), (bar)) == 0) ? 0 :	\
+							\
+	 (pci_resource_end((dev), (bar)) -		\
+	  pci_resource_start((dev), (bar)) + 1))
 
 /*
  * Similar to the helpers above, these manipulate per-pci_dev
@@ -2372,11 +2355,6 @@ static inline struct pci_dev *pcie_find_root_port(struct pci_dev *dev)
 	return NULL;
 }
 
-static inline bool pci_dev_is_disconnected(const struct pci_dev *dev)
-{
-	return dev->error_state == pci_channel_io_perm_failure;
-}
-
 void pci_request_acs(void);
 bool pci_acs_enabled(struct pci_dev *pdev, u16 acs_flags);
 bool pci_acs_path_enabled(struct pci_dev *start,
@@ -2479,12 +2457,6 @@ bool pci_pr3_present(struct pci_dev *pdev);
 static inline struct irq_domain *
 pci_host_bridge_acpi_msi_domain(struct pci_bus *bus) { return NULL; }
 static inline bool pci_pr3_present(struct pci_dev *pdev) { return false; }
-#endif
-
-#if defined(CONFIG_X86) && defined(CONFIG_ACPI)
-bool arch_pci_dev_is_removable(struct pci_dev *pdev);
-#else
-static inline bool arch_pci_dev_is_removable(struct pci_dev *pdev) { return false; }
 #endif
 
 #ifdef CONFIG_EEH

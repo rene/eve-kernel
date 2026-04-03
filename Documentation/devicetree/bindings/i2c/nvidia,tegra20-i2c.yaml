@@ -103,10 +103,7 @@ properties:
 
   resets:
     items:
-      - description:
-          Module reset. This property is optional for controllers in Tegra194,
-          Tegra234 etc where an internal software reset is available as an
-          alternative.
+      - description: module reset
 
   reset-names:
     items:
@@ -121,13 +118,6 @@ properties:
     items:
       - const: rx
       - const: tx
-
-required:
-  - compatible
-  - reg
-  - interrupts
-  - clocks
-  - clock-names
 
 allOf:
   - $ref: /schemas/i2c/i2c-controller.yaml
@@ -181,18 +171,6 @@ allOf:
         power-domains:
           items:
             - description: phandle to the VENC power domain
-
-  - if:
-      not:
-        properties:
-          compatible:
-            contains:
-              enum:
-                - nvidia,tegra194-i2c
-    then:
-      required:
-        - resets
-        - reset-names
 
 unevaluatedProperties: false
 

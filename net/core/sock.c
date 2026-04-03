@@ -107,7 +107,6 @@
 #include <linux/interrupt.h>
 #include <linux/poll.h>
 #include <linux/tcp.h>
-#include <linux/udp.h>
 #include <linux/init.h>
 #include <linux/highmem.h>
 #include <linux/user_namespace.h>
@@ -279,7 +278,6 @@ __u32 sysctl_rmem_max __read_mostly = SK_RMEM_MAX;
 EXPORT_SYMBOL(sysctl_rmem_max);
 __u32 sysctl_wmem_default __read_mostly = SK_WMEM_MAX;
 __u32 sysctl_rmem_default __read_mostly = SK_RMEM_MAX;
-int sysctl_mem_pcpu_rsv __read_mostly = SK_MEMORY_PCPU_RESERVE;
 
 /* Maximal space eaten by iovec or ancillary data plus some space */
 int sysctl_optmem_max __read_mostly = sizeof(unsigned long)*(2*UIO_MAXIOV+512);
@@ -482,7 +480,7 @@ int __sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 	unsigned long flags;
 	struct sk_buff_head *list = &sk->sk_receive_queue;
 
-	if (atomic_read(&sk->sk_rmem_alloc) >= READ_ONCE(sk->sk_rcvbuf)) {
+	if (atomic_read(&sk->sk_rmem_alloc) >= sk->sk_rcvbuf) {
 		atomic_inc(&sk->sk_drops);
 		trace_sock_rcvqueue_full(sk, skb);
 		return -ENOMEM;
@@ -552,7 +550,7 @@ int __sk_receive_skb(struct sock *sk, struct sk_buff *skb,
 
 	skb->dev = NULL;
 
-	if (sk_rcvqueues_full(sk, READ_ONCE(sk->sk_rcvbuf))) {
+	if (sk_rcvqueues_full(sk, sk->sk_rcvbuf)) {
 		atomic_inc(&sk->sk_drops);
 		goto discard_and_relse;
 	}
@@ -892,7 +890,7 @@ static int sock_timestamping_bind_phc(struct sock *sk, int phc_index)
 	if (!match)
 		return -EINVAL;
 
-	WRITE_ONCE(sk->sk_bind_phc, phc_index);
+	sk->sk_bind_phc = phc_index;
 
 	return 0;
 }
@@ -928,7 +926,7 @@ int sock_set_timestamping(struct sock *sk, int optname,
 			return ret;
 	}
 
-	WRITE_ONCE(sk->sk_tsflags, val);
+	sk->sk_tsflags = val;
 	sock_valbool_flag(sk, SOCK_TSTAMP_NEW, optname == SO_TIMESTAMPING_NEW);
 
 	if (val & SOF_TIMESTAMPING_RX_SOFTWARE)
@@ -1122,10 +1120,7 @@ int sk_setsockopt(struct sock *sk, int level, int optname,
 		sk->sk_reuse = (valbool ? SK_CAN_REUSE : SK_NO_REUSE);
 		break;
 	case SO_REUSEPORT:
-		if (valbool && !sk_is_inet(sk))
-			ret = -EOPNOTSUPP;
-		else
-			sk->sk_reuseport = valbool;
+		sk->sk_reuseport = valbool;
 		break;
 	case SO_TYPE:
 	case SO_PROTOCOL:
@@ -1709,16 +1704,9 @@ int sk_getsockopt(struct sock *sk, int level, int optname,
 		break;
 
 	case SO_TIMESTAMPING_OLD:
-	case SO_TIMESTAMPING_NEW:
 		lv = sizeof(v.timestamping);
-		/* For the later-added case SO_TIMESTAMPING_NEW: Be strict about only
-		 * returning the flags when they were set through the same option.
-		 * Don't change the beviour for the old case SO_TIMESTAMPING_OLD.
-		 */
-		if (optname == SO_TIMESTAMPING_OLD || sock_flag(sk, SOCK_TSTAMP_NEW)) {
-			v.timestamping.flags = READ_ONCE(sk->sk_tsflags);
-			v.timestamping.bind_phc = READ_ONCE(sk->sk_bind_phc);
-		}
+		v.timestamping.flags = sk->sk_tsflags;
+		v.timestamping.bind_phc = sk->sk_bind_phc;
 		break;
 
 	case SO_RCVTIMEO_OLD:
@@ -1985,8 +1973,6 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
  */
 static inline void sock_lock_init(struct sock *sk)
 {
-	sk_owner_clear(sk);
-
 	if (sk->sk_kern_sock)
 		sock_lock_init_class_and_name(
 			sk,
@@ -2082,9 +2068,6 @@ static void sk_prot_free(struct proto *prot, struct sock *sk)
 	cgroup_sk_free(&sk->sk_cgrp_data);
 	mem_cgroup_sk_free(sk);
 	security_sk_free(sk);
-
-	sk_owner_put(sk);
-
 	if (slab != NULL)
 		kmem_cache_free(slab, sk);
 	else
@@ -2781,7 +2764,6 @@ int __sock_cmsg_send(struct sock *sk, struct msghdr *msg, struct cmsghdr *cmsg,
 		sockc->mark = *(u32 *)CMSG_DATA(cmsg);
 		break;
 	case SO_TIMESTAMPING_OLD:
-	case SO_TIMESTAMPING_NEW:
 		if (cmsg->cmsg_len != CMSG_LEN(sizeof(u32)))
 			return -EINVAL;
 
@@ -3703,9 +3685,6 @@ void sk_common_release(struct sock *sk)
 
 	sk->sk_prot->unhash(sk);
 
-	if (sk->sk_socket)
-		sk->sk_socket->sk = NULL;
-
 	/*
 	 * In this point socket cannot receive new packets, but it is possible
 	 * that some packets are in flight because some CPU runs receiver and
@@ -3802,7 +3781,7 @@ static int assign_proto_idx(struct proto *prot)
 {
 	prot->inuse_idx = find_first_zero_bit(proto_inuse_idx, PROTO_INUSE_NR);
 
-	if (unlikely(prot->inuse_idx == PROTO_INUSE_NR)) {
+	if (unlikely(prot->inuse_idx == PROTO_INUSE_NR - 1)) {
 		pr_err("PROTO_INUSE_NR exhausted\n");
 		return -ENOSPC;
 	}
@@ -3813,7 +3792,7 @@ static int assign_proto_idx(struct proto *prot)
 
 static void release_proto_idx(struct proto *prot)
 {
-	if (prot->inuse_idx != PROTO_INUSE_NR)
+	if (prot->inuse_idx != PROTO_INUSE_NR - 1)
 		clear_bit(prot->inuse_idx, proto_inuse_idx);
 }
 #else
@@ -4122,14 +4101,8 @@ bool sk_busy_loop_end(void *p, unsigned long start_time)
 {
 	struct sock *sk = p;
 
-	if (!skb_queue_empty_lockless(&sk->sk_receive_queue))
-		return true;
-
-	if (sk_is_udp(sk) &&
-	    !skb_queue_empty_lockless(&udp_sk(sk)->reader_queue))
-		return true;
-
-	return sk_busy_loop_timeout(sk, start_time);
+	return !skb_queue_empty_lockless(&sk->sk_receive_queue) ||
+	       sk_busy_loop_timeout(sk, start_time);
 }
 EXPORT_SYMBOL(sk_busy_loop_end);
 #endif /* CONFIG_NET_RX_BUSY_POLL */

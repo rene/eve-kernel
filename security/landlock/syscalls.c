@@ -32,18 +32,6 @@
 #include "ruleset.h"
 #include "setup.h"
 
-static bool is_initialized(void)
-{
-	if (likely(landlock_initialized))
-		return true;
-
-	pr_warn_once(
-		"Disabled but requested by user space. "
-		"You should enable Landlock at boot time: "
-		"https://docs.kernel.org/userspace-api/landlock.html#boot-time-configuration\n");
-	return false;
-}
-
 /**
  * copy_min_struct_from_user - Safe future-proof argument copying
  *
@@ -150,9 +138,7 @@ static const struct file_operations ruleset_fops = {
  *        the new ruleset.
  * @size: Size of the pointed &struct landlock_ruleset_attr (needed for
  *        backward and forward compatibility).
- * @flags: Supported value:
- *         - %LANDLOCK_CREATE_RULESET_VERSION
- *         - %LANDLOCK_CREATE_RULESET_ERRATA
+ * @flags: Supported value: %LANDLOCK_CREATE_RULESET_VERSION.
  *
  * This system call enables to create a new Landlock ruleset, and returns the
  * related file descriptor on success.
@@ -160,10 +146,6 @@ static const struct file_operations ruleset_fops = {
  * If @flags is %LANDLOCK_CREATE_RULESET_VERSION and @attr is NULL and @size is
  * 0, then the returned value is the highest supported Landlock ABI version
  * (starting at 1).
- *
- * If @flags is %LANDLOCK_CREATE_RULESET_ERRATA and @attr is NULL and @size is
- * 0, then the returned value is a bitmask of fixed issues for the current
- * Landlock ABI version.
  *
  * Possible returned errors are:
  *
@@ -183,19 +165,13 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 	/* Build-time checks. */
 	build_check_abi();
 
-	if (!is_initialized())
+	if (!landlock_initialized)
 		return -EOPNOTSUPP;
 
 	if (flags) {
-		if (attr || size)
-			return -EINVAL;
-
-		if (flags == LANDLOCK_CREATE_RULESET_VERSION)
-			return landlock_abi_version;
-
-		if (flags == LANDLOCK_CREATE_RULESET_ERRATA)
-			return landlock_errata;
-
+		if ((flags == LANDLOCK_CREATE_RULESET_VERSION) && !attr &&
+		    !size)
+			return LANDLOCK_ABI_VERSION;
 		return -EINVAL;
 	}
 
@@ -224,8 +200,6 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 		landlock_put_ruleset(ruleset);
 	return ruleset_fd;
 }
-
-const int landlock_abi_version = LANDLOCK_ABI_VERSION;
 
 /*
  * Returns an owned ruleset from a FD. It is thus needed to call
@@ -337,7 +311,7 @@ SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
 	struct landlock_ruleset *ruleset;
 	int res, err;
 
-	if (!is_initialized())
+	if (!landlock_initialized)
 		return -EOPNOTSUPP;
 
 	/* No flag for now. */
@@ -428,7 +402,7 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 	struct landlock_cred_security *new_llcred;
 	int err;
 
-	if (!is_initialized())
+	if (!landlock_initialized)
 		return -EOPNOTSUPP;
 
 	/*

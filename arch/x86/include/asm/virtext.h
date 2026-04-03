@@ -43,9 +43,9 @@ static inline int cpu_has_vmx(void)
  */
 static inline int cpu_vmxoff(void)
 {
-	asm goto("1: vmxoff\n\t"
-		  _ASM_EXTABLE(1b, %l[fault])
-		  ::: "cc", "memory" : fault);
+	asm_volatile_goto("1: vmxoff\n\t"
+			  _ASM_EXTABLE(1b, %l[fault])
+			  ::: "cc", "memory" : fault);
 
 	cr4_clear_bits(X86_CR4_VMXE);
 	return 0;
@@ -69,6 +69,16 @@ static inline void __cpu_emergency_vmxoff(void)
 	if (cpu_vmx_enabled())
 		cpu_vmxoff();
 }
+
+/** Disable VMX if it is supported and enabled on the current CPU
+ */
+static inline void cpu_emergency_vmxoff(void)
+{
+	if (cpu_has_vmx())
+		__cpu_emergency_vmxoff();
+}
+
+
 
 
 /*
@@ -119,9 +129,9 @@ static inline void cpu_svm_disable(void)
 		 * case, GIF must already be set, otherwise the NMI would have
 		 * been blocked, so just eat the fault.
 		 */
-		asm goto("1: stgi\n\t"
-			  _ASM_EXTABLE(1b, %l[fault])
-			  ::: "memory" : fault);
+		asm_volatile_goto("1: stgi\n\t"
+				  _ASM_EXTABLE(1b, %l[fault])
+				  ::: "memory" : fault);
 fault:
 		wrmsrl(MSR_EFER, efer & ~EFER_SVME);
 	}

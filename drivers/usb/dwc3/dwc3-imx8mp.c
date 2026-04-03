@@ -5,7 +5,6 @@
  * Copyright (c) 2020 NXP.
  */
 
-#include <linux/busfreq-imx.h>
 #include <linux/clk.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
@@ -96,8 +95,7 @@ static void imx8mp_configure_glue(struct dwc3_imx8mp *dwc3_imx)
 	writel(value, dwc3_imx->glue_base + USB_CTRL1);
 }
 
-static void dwc3_imx8mp_wakeup_enable(struct dwc3_imx8mp *dwc3_imx,
-				      pm_message_t msg)
+static void dwc3_imx8mp_wakeup_enable(struct dwc3_imx8mp *dwc3_imx)
 {
 	struct dwc3	*dwc3 = platform_get_drvdata(dwc3_imx->dwc3);
 	u32		val;
@@ -107,14 +105,12 @@ static void dwc3_imx8mp_wakeup_enable(struct dwc3_imx8mp *dwc3_imx,
 
 	val = readl(dwc3_imx->hsio_blk_base + USB_WAKEUP_CTRL);
 
-	if ((dwc3->current_dr_role == DWC3_GCTL_PRTCAP_HOST) && dwc3->xhci) {
-		val |= USB_WAKEUP_EN | USB_WAKEUP_DPDM_EN;
-		if (PMSG_IS_AUTO(msg))
-			val |= USB_WAKEUP_SS_CONN | USB_WAKEUP_U3_EN;
-	} else {
+	if ((dwc3->current_dr_role == DWC3_GCTL_PRTCAP_HOST) && dwc3->xhci)
+		val |= USB_WAKEUP_EN | USB_WAKEUP_SS_CONN |
+		       USB_WAKEUP_U3_EN | USB_WAKEUP_DPDM_EN;
+	else if (dwc3->current_dr_role == DWC3_GCTL_PRTCAP_DEVICE)
 		val |= USB_WAKEUP_EN | USB_WAKEUP_VBUS_EN |
 		       USB_WAKEUP_VBUS_SRC_SESS_VAL;
-	}
 
 	writel(val, dwc3_imx->hsio_blk_base + USB_WAKEUP_CTRL);
 }
@@ -146,45 +142,6 @@ static irqreturn_t dwc3_imx8mp_interrupt(int irq, void *_dwc3_imx)
 
 	return IRQ_HANDLED;
 }
-
-static void dwc3_imx8mp_set_role_post(struct dwc3 *dwc, u32 role)
-{
-	switch (role) {
-	case DWC3_GCTL_PRTCAP_HOST:
-		/*
-		 * For xhci host, we need disable dwc core auto
-		 * suspend, because during this auto suspend delay(5s),
-		 * xhci host RUN_STOP is cleared and wakeup is not
-		 * enabled, if device is inserted, xhci host can't
-		 * response the connection.
-		 */
-		pm_runtime_dont_use_autosuspend(dwc->dev);
-		break;
-	case DWC3_GCTL_PRTCAP_DEVICE:
-		pm_runtime_use_autosuspend(dwc->dev);
-		break;
-	default:
-		break;
-	}
-}
-
-static struct xhci_plat_priv dwc3_imx8mp_xhci_priv = {
-	.quirks = XHCI_MISSING_CAS |
-		  XHCI_SKIP_PHY_INIT,
-};
-
-static struct dwc3_platform_data dwc3_imx8mp_pdata = {
-	.xhci_priv = &dwc3_imx8mp_xhci_priv,
-	.set_role_post = dwc3_imx8mp_set_role_post,
-};
-
-static struct of_dev_auxdata dwc3_imx8mp_auxdata[] = {
-	{
-	.compatible = "snps,dwc3",
-	.platform_data = &dwc3_imx8mp_pdata,
-	},
-	{},
-};
 
 static int dwc3_imx8mp_probe(struct platform_device *pdev)
 {
@@ -220,12 +177,11 @@ static int dwc3_imx8mp_probe(struct platform_device *pdev)
 			return PTR_ERR(dwc3_imx->glue_base);
 	}
 
-	request_bus_freq(BUS_FREQ_HIGH);
 	dwc3_imx->hsio_clk = devm_clk_get(dev, "hsio");
 	if (IS_ERR(dwc3_imx->hsio_clk)) {
 		err = PTR_ERR(dwc3_imx->hsio_clk);
 		dev_err(dev, "Failed to get hsio clk, err=%d\n", err);
-		goto rel_high_bus;
+		return err;
 	}
 
 	err = clk_prepare_enable(dwc3_imx->hsio_clk);
@@ -269,7 +225,7 @@ static int dwc3_imx8mp_probe(struct platform_device *pdev)
 		goto disable_rpm;
 	}
 
-	err = of_platform_populate(node, NULL, dwc3_imx8mp_auxdata, dev);
+	err = of_platform_populate(node, NULL, NULL, dev);
 	if (err) {
 		dev_err(&pdev->dev, "failed to create dwc3 core\n");
 		goto err_node_put;
@@ -287,7 +243,7 @@ static int dwc3_imx8mp_probe(struct platform_device *pdev)
 					IRQF_ONESHOT, dev_name(dev), dwc3_imx);
 	if (err) {
 		dev_err(dev, "failed to request IRQ #%d --> %d\n", irq, err);
-		goto put_dwc3;
+		goto depopulate;
 	}
 
 	device_set_wakeup_capable(dev, true);
@@ -295,8 +251,6 @@ static int dwc3_imx8mp_probe(struct platform_device *pdev)
 
 	return 0;
 
-put_dwc3:
-	put_device(&dwc3_imx->dwc3->dev);
 depopulate:
 	of_platform_depopulate(dev);
 err_node_put:
@@ -308,8 +262,6 @@ disable_clks:
 	clk_disable_unprepare(dwc3_imx->suspend_clk);
 disable_hsio_clk:
 	clk_disable_unprepare(dwc3_imx->hsio_clk);
-rel_high_bus:
-	release_bus_freq(BUS_FREQ_HIGH);
 
 	return err;
 }
@@ -319,14 +271,12 @@ static int dwc3_imx8mp_remove(struct platform_device *pdev)
 	struct dwc3_imx8mp *dwc3_imx = platform_get_drvdata(pdev);
 	struct device *dev = &pdev->dev;
 
-	put_device(&dwc3_imx->dwc3->dev);
-
 	pm_runtime_get_sync(dev);
 	of_platform_depopulate(dev);
 
 	clk_disable_unprepare(dwc3_imx->suspend_clk);
 	clk_disable_unprepare(dwc3_imx->hsio_clk);
-	release_bus_freq(BUS_FREQ_HIGH);
+
 	pm_runtime_disable(dev);
 	pm_runtime_put_noidle(dev);
 	platform_set_drvdata(pdev, NULL);
@@ -342,9 +292,8 @@ static int __maybe_unused dwc3_imx8mp_suspend(struct dwc3_imx8mp *dwc3_imx,
 
 	/* Wakeup enable */
 	if (PMSG_IS_AUTO(msg) || device_may_wakeup(dwc3_imx->dev))
-		dwc3_imx8mp_wakeup_enable(dwc3_imx, msg);
+		dwc3_imx8mp_wakeup_enable(dwc3_imx);
 
-	release_bus_freq(BUS_FREQ_HIGH);
 	dwc3_imx->pm_suspended = true;
 
 	return 0;
@@ -359,7 +308,6 @@ static int __maybe_unused dwc3_imx8mp_resume(struct dwc3_imx8mp *dwc3_imx,
 	if (!dwc3_imx->pm_suspended)
 		return 0;
 
-	request_bus_freq(BUS_FREQ_HIGH);
 	/* Wakeup disable */
 	dwc3_imx8mp_wakeup_disable(dwc3_imx);
 	dwc3_imx->pm_suspended = false;

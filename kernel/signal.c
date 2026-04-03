@@ -45,6 +45,7 @@
 #include <linux/posix-timers.h>
 #include <linux/cgroup.h>
 #include <linux/audit.h>
+#include <linux/isolation.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/signal.h>
@@ -426,8 +427,7 @@ __sigqueue_alloc(int sig, struct task_struct *t, gfp_t gfp_flags,
 	 */
 	rcu_read_lock();
 	ucounts = task_ucounts(t);
-	sigpending = inc_rlimit_get_ucounts(ucounts, UCOUNT_RLIMIT_SIGPENDING,
-					    override_rlimit);
+	sigpending = inc_rlimit_get_ucounts(ucounts, UCOUNT_RLIMIT_SIGPENDING);
 	rcu_read_unlock();
 	if (!sigpending)
 		return NULL;
@@ -769,6 +769,7 @@ void signal_wake_up_state(struct task_struct *t, unsigned int state)
 {
 	lockdep_assert_held(&t->sighand->siglock);
 
+	task_isolation_signal(t);
 	set_tsk_thread_flag(t, TIF_SIGPENDING);
 
 	/*
@@ -2559,14 +2560,6 @@ static void do_freezer_trap(void)
 	spin_unlock_irq(&current->sighand->siglock);
 	cgroup_enter_frozen();
 	schedule();
-
-	/*
-	 * We could've been woken by task_work, run it to clear
-	 * TIF_NOTIFY_SIGNAL. The caller will retry if necessary.
-	 */
-	clear_notify_signal();
-	if (unlikely(task_work_pending(current)))
-		task_work_run();
 }
 
 static int ptrace_signal(int signr, kernel_siginfo_t *info, enum pid_type type)

@@ -72,7 +72,7 @@ static sector_t high(struct dm_table *t, unsigned int l, unsigned int n)
 		n = get_child(n, CHILDREN_PER_NODE - 1);
 
 	if (n >= t->counts[l])
-		return (sector_t) -1;
+		return (sector_t) - 1;
 
 	return get_node(t, l, n)[KEYS_PER_NODE - 1];
 }
@@ -128,12 +128,7 @@ static int alloc_targets(struct dm_table *t, unsigned int num)
 int dm_table_create(struct dm_table **result, fmode_t mode,
 		    unsigned int num_targets, struct mapped_device *md)
 {
-	struct dm_table *t;
-
-	if (num_targets > DM_MAX_TARGETS)
-		return -EOVERFLOW;
-
-	t = kzalloc(sizeof(*t), GFP_KERNEL);
+	struct dm_table *t = kzalloc(sizeof(*t), GFP_KERNEL);
 
 	if (!t)
 		return -ENOMEM;
@@ -148,7 +143,7 @@ int dm_table_create(struct dm_table **result, fmode_t mode,
 
 	if (!num_targets) {
 		kfree(t);
-		return -EOVERFLOW;
+		return -ENOMEM;
 	}
 
 	if (alloc_targets(t, num_targets)) {
@@ -502,9 +497,8 @@ static char **realloc_argv(unsigned int *size, char **old_argv)
 		gfp = GFP_NOIO;
 	}
 	argv = kmalloc_array(new_size, sizeof(*argv), gfp);
-	if (argv) {
-		if (old_argv)
-			memcpy(argv, old_argv, *size * sizeof(*argv));
+	if (argv && old_argv) {
+		memcpy(argv, old_argv, *size * sizeof(*argv));
 		*size = new_size;
 	}
 
@@ -669,10 +663,6 @@ int dm_table_add_target(struct dm_table *t, const char *type,
 
 	if (!len) {
 		DMERR("%s: zero-length target", dm_device_name(t->md));
-		return -EINVAL;
-	}
-	if (start + len < start || start + len > LLONG_MAX >> SECTOR_SHIFT) {
-		DMERR("%s: too large device", dm_device_name(t->md));
 		return -EINVAL;
 	}
 
@@ -863,17 +853,17 @@ static bool dm_table_supports_dax(struct dm_table *t,
 	return true;
 }
 
-static int device_is_not_rq_stackable(struct dm_target *ti, struct dm_dev *dev,
-				      sector_t start, sector_t len, void *data)
+static int device_is_rq_stackable(struct dm_target *ti, struct dm_dev *dev,
+				  sector_t start, sector_t len, void *data)
 {
 	struct block_device *bdev = dev->bdev;
 	struct request_queue *q = bdev_get_queue(bdev);
 
 	/* request-based cannot stack on partitions! */
 	if (bdev_is_partition(bdev))
-		return true;
+		return false;
 
-	return !queue_is_mq(q);
+	return queue_is_mq(q);
 }
 
 static int dm_table_determine_type(struct dm_table *t)
@@ -969,7 +959,7 @@ verify_rq_based:
 
 	/* Non-request-stackable devices can't be used for request-based dm */
 	if (!ti->type->iterate_devices ||
-	    ti->type->iterate_devices(ti, device_is_not_rq_stackable, NULL)) {
+	    !ti->type->iterate_devices(ti, device_is_rq_stackable, NULL)) {
 		DMERR("table load rejected: including non-request-stackable devices");
 		return -EINVAL;
 	}
@@ -1247,7 +1237,7 @@ static int dm_keyslot_evict(struct blk_crypto_profile *profile,
 
 	t = dm_get_live_table(md, &srcu_idx);
 	if (!t)
-		goto put_live_table;
+		return 0;
 
 	for (unsigned int i = 0; i < t->num_targets; i++) {
 		struct dm_target *ti = dm_table_get_target(t, i);
@@ -1258,7 +1248,6 @@ static int dm_keyslot_evict(struct blk_crypto_profile *profile,
 					  (void *)key);
 	}
 
-put_live_table:
 	dm_put_live_table(md, srcu_idx);
 	return 0;
 }
@@ -1539,7 +1528,7 @@ static bool dm_table_any_dev_attr(struct dm_table *t,
 		if (ti->type->iterate_devices &&
 		    ti->type->iterate_devices(ti, func, data))
 			return true;
-	}
+        }
 
 	return false;
 }

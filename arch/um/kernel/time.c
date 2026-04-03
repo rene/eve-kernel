@@ -432,29 +432,9 @@ static void time_travel_update_time(unsigned long long next, bool idle)
 	time_travel_del_event(&ne);
 }
 
-static void time_travel_update_time_rel(unsigned long long offs)
-{
-	unsigned long flags;
-
-	/*
-	 * Disable interrupts before calculating the new time so
-	 * that a real timer interrupt (signal) can't happen at
-	 * a bad time e.g. after we read time_travel_time but
-	 * before we've completed updating the time.
-	 */
-	local_irq_save(flags);
-	time_travel_update_time(time_travel_time + offs, false);
-	local_irq_restore(flags);
-}
-
 void time_travel_ndelay(unsigned long nsec)
 {
-	/*
-	 * Not strictly needed to use _rel() version since this is
-	 * only used in INFCPU/EXT modes, but it doesn't hurt and
-	 * is more readable too.
-	 */
-	time_travel_update_time_rel(nsec);
+	time_travel_update_time(time_travel_time + nsec, false);
 }
 EXPORT_SYMBOL(time_travel_ndelay);
 
@@ -588,11 +568,7 @@ static void time_travel_set_start(void)
 #define time_travel_time 0
 #define time_travel_ext_waiting 0
 
-static inline void time_travel_update_time(unsigned long long ns, bool idle)
-{
-}
-
-static inline void time_travel_update_time_rel(unsigned long long offs)
+static inline void time_travel_update_time(unsigned long long ns, bool retearly)
 {
 }
 
@@ -744,7 +720,9 @@ static u64 timer_read(struct clocksource *cs)
 		 */
 		if (!irqs_disabled() && !in_interrupt() && !in_softirq() &&
 		    !time_travel_ext_waiting)
-			time_travel_update_time_rel(TIMER_MULTIPLIER);
+			time_travel_update_time(time_travel_time +
+						TIMER_MULTIPLIER,
+						false);
 		return time_travel_time / TIMER_MULTIPLIER;
 	}
 
@@ -874,9 +852,9 @@ int setup_time_travel_start(char *str)
 	return 1;
 }
 
-__setup("time-travel-start=", setup_time_travel_start);
+__setup("time-travel-start", setup_time_travel_start);
 __uml_help(setup_time_travel_start,
-"time-travel-start=<nanoseconds>\n"
+"time-travel-start=<seconds>\n"
 "Configure the UML instance's wall clock to start at this value rather than\n"
 "the host's wall clock at the time of UML boot.\n");
 #endif

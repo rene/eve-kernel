@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Copyright (C) 2023 Marvell
+ *
+ */
+
+#include "cn9130-crb-B.dts"
+#include "cn9130-crb-dsa.dtsi"
+
+/ {
+	model = "Marvell Armada CN9130-CRB-B (DSA)";
+};

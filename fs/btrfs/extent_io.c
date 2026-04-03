@@ -1324,14 +1324,19 @@ int btrfs_alloc_page_array(unsigned int nr_pages, struct page **page_array)
 		unsigned int last = allocated;
 
 		allocated = alloc_pages_bulk_array(GFP_NOFS, nr_pages, page_array);
-		if (unlikely(allocated == last)) {
-			/* No progress, fail and do cleanup. */
-			for (int i = 0; i < allocated; i++) {
-				__free_page(page_array[i]);
-				page_array[i] = NULL;
-			}
+
+		if (allocated == nr_pages)
+			return 0;
+
+		/*
+		 * During this iteration, no page could be allocated, even
+		 * though alloc_pages_bulk_array() falls back to alloc_page()
+		 * if  it could not bulk-allocate. So we must be out of memory.
+		 */
+		if (allocated == last)
 			return -ENOMEM;
-		}
+
+		memalloc_retry_wait(GFP_NOFS);
 	}
 	return 0;
 }
@@ -1748,7 +1753,7 @@ static int btrfs_do_readpage(struct page *page, struct extent_map **em_cached,
 	int ret = 0;
 	size_t pg_offset = 0;
 	size_t iosize;
-	size_t blocksize = fs_info->sectorsize;
+	size_t blocksize = inode->i_sb->s_blocksize;
 	struct extent_io_tree *tree = &BTRFS_I(inode)->io_tree;
 
 	ret = set_page_extent_mapped(page);
@@ -2807,7 +2812,7 @@ static int submit_eb_subpage(struct page *page,
 			      subpage->bitmaps)) {
 			spin_unlock_irqrestore(&subpage->lock, flags);
 			spin_unlock(&page->mapping->private_lock);
-			bit_start += sectors_per_node;
+			bit_start++;
 			continue;
 		}
 
@@ -3348,7 +3353,7 @@ int extent_invalidate_folio(struct extent_io_tree *tree,
 	struct extent_state *cached_state = NULL;
 	u64 start = folio_pos(folio);
 	u64 end = start + folio_size(folio) - 1;
-	size_t blocksize = btrfs_sb(folio->mapping->host->i_sb)->sectorsize;
+	size_t blocksize = folio->mapping->host->i_sb->s_blocksize;
 
 	/* This function is only called for the btree inode */
 	ASSERT(tree->owner == IO_TREE_BTREE_INODE_IO);
@@ -3385,8 +3390,7 @@ static int try_release_extent_state(struct extent_io_tree *tree,
 		ret = 0;
 	} else {
 		u32 clear_bits = ~(EXTENT_LOCKED | EXTENT_NODATASUM |
-				   EXTENT_DELALLOC_NEW | EXTENT_CTLBITS |
-				   EXTENT_QGROUP_RESERVED);
+				   EXTENT_DELALLOC_NEW | EXTENT_CTLBITS);
 
 		/*
 		 * At this point we can safely clear everything except the
@@ -4459,10 +4463,10 @@ struct extent_buffer *find_extent_buffer(struct btrfs_fs_info *fs_info,
 	return eb;
 }
 
+#ifdef CONFIG_BTRFS_FS_RUN_SANITY_TESTS
 struct extent_buffer *alloc_test_extent_buffer(struct btrfs_fs_info *fs_info,
 					u64 start)
 {
-#ifdef CONFIG_BTRFS_FS_RUN_SANITY_TESTS
 	struct extent_buffer *eb, *exists = NULL;
 	int ret;
 
@@ -4498,11 +4502,8 @@ again:
 free_eb:
 	btrfs_release_extent_buffer(eb);
 	return exists;
-#else
-	/* Stub to avoid linker error when compiled with optimizations turned off. */
-	return NULL;
-#endif
 }
+#endif
 
 static struct extent_buffer *grab_extent_buffer(
 		struct btrfs_fs_info *fs_info, struct page *page)

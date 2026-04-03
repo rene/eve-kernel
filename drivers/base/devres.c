@@ -564,7 +564,6 @@ void * devres_open_group(struct device *dev, void *id, gfp_t gfp)
 	grp->id = grp;
 	if (id)
 		grp->id = id;
-	grp->color = 0;
 
 	spin_lock_irqsave(&dev->devres_lock, flags);
 	add_dr(dev, &grp->node[0]);
@@ -684,13 +683,6 @@ int devres_release_group(struct device *dev, void *id)
 		spin_unlock_irqrestore(&dev->devres_lock, flags);
 
 		release_nodes(dev, &todo);
-	} else if (list_empty(&dev->devres_head)) {
-		/*
-		 * dev is probably dying via devres_release_all(): groups
-		 * have already been removed and are on the process of
-		 * being released - don't touch and don't warn.
-		 */
-		spin_unlock_irqrestore(&dev->devres_lock, flags);
 	} else {
 		WARN_ON(1);
 		spin_unlock_irqrestore(&dev->devres_lock, flags);
@@ -900,12 +892,9 @@ void *devm_krealloc(struct device *dev, void *ptr, size_t new_size, gfp_t gfp)
 	/*
 	 * Otherwise: allocate new, larger chunk. We need to allocate before
 	 * taking the lock as most probably the caller uses GFP_KERNEL.
-	 * alloc_dr() will call check_dr_size() to reserve extra memory
-	 * for struct devres automatically, so size @new_size user request
-	 * is delivered to it directly as devm_kmalloc() does.
 	 */
 	new_dr = alloc_dr(devm_kmalloc_release,
-			  new_size, gfp, dev_to_node(dev));
+			  total_new_size, gfp, dev_to_node(dev));
 	if (!new_dr)
 		return NULL;
 
@@ -1229,11 +1218,7 @@ EXPORT_SYMBOL_GPL(__devm_alloc_percpu);
  */
 void devm_free_percpu(struct device *dev, void __percpu *pdata)
 {
-	/*
-	 * Use devres_release() to prevent memory leakage as
-	 * devm_free_pages() does.
-	 */
-	WARN_ON(devres_release(dev, devm_percpu_release, devm_percpu_match,
+	WARN_ON(devres_destroy(dev, devm_percpu_release, devm_percpu_match,
 			       (__force void *)pdata));
 }
 EXPORT_SYMBOL_GPL(devm_free_percpu);

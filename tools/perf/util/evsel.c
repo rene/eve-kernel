@@ -1486,15 +1486,6 @@ static void evsel__free_config_terms(struct evsel *evsel)
 	free_config_terms(&evsel->config_terms);
 }
 
-static void (*evsel__priv_destructor)(void *priv);
-
-void evsel__set_priv_destructor(void (*destructor)(void *priv))
-{
-	assert(evsel__priv_destructor == NULL);
-
-	evsel__priv_destructor = destructor;
-}
-
 void evsel__exit(struct evsel *evsel)
 {
 	assert(list_empty(&evsel->core.node));
@@ -1517,8 +1508,6 @@ void evsel__exit(struct evsel *evsel)
 	hashmap__free(evsel->per_pkg_mask);
 	evsel->per_pkg_mask = NULL;
 	zfree(&evsel->metric_events);
-	if (evsel__priv_destructor)
-		evsel__priv_destructor(evsel->priv);
 	perf_evsel__object.fini(evsel);
 }
 
@@ -2386,6 +2375,7 @@ int evsel__parse_sample(struct evsel *evsel, union perf_event *event,
 	data->period = evsel->core.attr.sample_period;
 	data->cpumode = event->header.misc & PERF_RECORD_MISC_CPUMODE_MASK;
 	data->misc    = event->header.misc;
+	data->id = -1ULL;
 	data->data_src = PERF_MEM_DATA_SRC_NONE;
 	data->vcpu = -1;
 

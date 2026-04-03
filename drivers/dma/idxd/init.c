@@ -48,7 +48,6 @@ static struct idxd_driver_data idxd_driver_data[] = {
 		.compl_size = sizeof(struct dsa_completion_record),
 		.align = 32,
 		.dev_type = &dsa_device_type,
-		.user_submission_safe = false, /* See INTEL-SA-01084 security advisory */
 	},
 	[IDXD_TYPE_IAX] = {
 		.name_prefix = "iax",
@@ -56,7 +55,6 @@ static struct idxd_driver_data idxd_driver_data[] = {
 		.compl_size = sizeof(struct iax_completion_record),
 		.align = 64,
 		.dev_type = &iax_device_type,
-		.user_submission_safe = false, /* See INTEL-SA-01084 security advisory */
 	},
 };
 
@@ -141,25 +139,6 @@ static void idxd_cleanup_interrupts(struct idxd_device *idxd)
 	pci_free_irq_vectors(pdev);
 }
 
-static void idxd_clean_wqs(struct idxd_device *idxd)
-{
-	struct idxd_wq *wq;
-	struct device *conf_dev;
-	int i;
-
-	for (i = 0; i < idxd->max_wqs; i++) {
-		wq = idxd->wqs[i];
-		if (idxd->hw.wq_cap.op_config)
-			bitmap_free(wq->opcap_bmap);
-		kfree(wq->wqcfg);
-		conf_dev = wq_confdev(wq);
-		put_device(conf_dev);
-		kfree(wq);
-	}
-	bitmap_free(idxd->wq_enable_map);
-	kfree(idxd->wqs);
-}
-
 static int idxd_setup_wqs(struct idxd_device *idxd)
 {
 	struct device *dev = &idxd->pdev->dev;
@@ -174,30 +153,29 @@ static int idxd_setup_wqs(struct idxd_device *idxd)
 
 	idxd->wq_enable_map = bitmap_zalloc_node(idxd->max_wqs, GFP_KERNEL, dev_to_node(dev));
 	if (!idxd->wq_enable_map) {
-		rc = -ENOMEM;
-		goto err_free_wqs;
+		kfree(idxd->wqs);
+		return -ENOMEM;
 	}
 
 	for (i = 0; i < idxd->max_wqs; i++) {
 		wq = kzalloc_node(sizeof(*wq), GFP_KERNEL, dev_to_node(dev));
 		if (!wq) {
 			rc = -ENOMEM;
-			goto err_unwind;
+			goto err;
 		}
 
 		idxd_dev_set_type(&wq->idxd_dev, IDXD_DEV_WQ);
 		conf_dev = wq_confdev(wq);
 		wq->id = i;
 		wq->idxd = idxd;
-		device_initialize(conf_dev);
+		device_initialize(wq_confdev(wq));
 		conf_dev->parent = idxd_confdev(idxd);
 		conf_dev->bus = &dsa_bus_type;
 		conf_dev->type = &idxd_wq_device_type;
 		rc = dev_set_name(conf_dev, "wq%d.%d", idxd->id, wq->id);
 		if (rc < 0) {
 			put_device(conf_dev);
-			kfree(wq);
-			goto err_unwind;
+			goto err;
 		}
 
 		mutex_init(&wq->wq_lock);
@@ -210,60 +188,31 @@ static int idxd_setup_wqs(struct idxd_device *idxd)
 		wq->wqcfg = kzalloc_node(idxd->wqcfg_size, GFP_KERNEL, dev_to_node(dev));
 		if (!wq->wqcfg) {
 			put_device(conf_dev);
-			kfree(wq);
 			rc = -ENOMEM;
-			goto err_unwind;
+			goto err;
 		}
 
 		if (idxd->hw.wq_cap.op_config) {
 			wq->opcap_bmap = bitmap_zalloc(IDXD_MAX_OPCAP_BITS, GFP_KERNEL);
 			if (!wq->opcap_bmap) {
-				kfree(wq->wqcfg);
 				put_device(conf_dev);
-				kfree(wq);
 				rc = -ENOMEM;
-				goto err_unwind;
+				goto err;
 			}
 			bitmap_copy(wq->opcap_bmap, idxd->opcap_bmap, IDXD_MAX_OPCAP_BITS);
 		}
-		mutex_init(&wq->uc_lock);
-		xa_init(&wq->upasid_xa);
 		idxd->wqs[i] = wq;
 	}
 
 	return 0;
 
-err_unwind:
+ err:
 	while (--i >= 0) {
 		wq = idxd->wqs[i];
-		if (idxd->hw.wq_cap.op_config)
-			bitmap_free(wq->opcap_bmap);
-		kfree(wq->wqcfg);
 		conf_dev = wq_confdev(wq);
 		put_device(conf_dev);
-		kfree(wq);
 	}
-	bitmap_free(idxd->wq_enable_map);
-
-err_free_wqs:
-	kfree(idxd->wqs);
-
 	return rc;
-}
-
-static void idxd_clean_engines(struct idxd_device *idxd)
-{
-	struct idxd_engine *engine;
-	struct device *conf_dev;
-	int i;
-
-	for (i = 0; i < idxd->max_engines; i++) {
-		engine = idxd->engines[i];
-		conf_dev = engine_confdev(engine);
-		put_device(conf_dev);
-		kfree(engine);
-	}
-	kfree(idxd->engines);
 }
 
 static int idxd_setup_engines(struct idxd_device *idxd)
@@ -296,7 +245,6 @@ static int idxd_setup_engines(struct idxd_device *idxd)
 		rc = dev_set_name(conf_dev, "engine%d.%d", idxd->id, engine->id);
 		if (rc < 0) {
 			put_device(conf_dev);
-			kfree(engine);
 			goto err;
 		}
 
@@ -310,24 +258,8 @@ static int idxd_setup_engines(struct idxd_device *idxd)
 		engine = idxd->engines[i];
 		conf_dev = engine_confdev(engine);
 		put_device(conf_dev);
-		kfree(engine);
 	}
-	kfree(idxd->engines);
-
 	return rc;
-}
-
-static void idxd_clean_groups(struct idxd_device *idxd)
-{
-	struct idxd_group *group;
-	int i;
-
-	for (i = 0; i < idxd->max_groups; i++) {
-		group = idxd->groups[i];
-		put_device(group_confdev(group));
-		kfree(group);
-	}
-	kfree(idxd->groups);
 }
 
 static int idxd_setup_groups(struct idxd_device *idxd)
@@ -360,7 +292,6 @@ static int idxd_setup_groups(struct idxd_device *idxd)
 		rc = dev_set_name(conf_dev, "group%d.%d", idxd->id, group->id);
 		if (rc < 0) {
 			put_device(conf_dev);
-			kfree(group);
 			goto err;
 		}
 
@@ -380,25 +311,27 @@ static int idxd_setup_groups(struct idxd_device *idxd)
 	while (--i >= 0) {
 		group = idxd->groups[i];
 		put_device(group_confdev(group));
-		kfree(group);
 	}
-	kfree(idxd->groups);
-
 	return rc;
 }
 
 static void idxd_cleanup_internals(struct idxd_device *idxd)
 {
-	idxd_clean_groups(idxd);
-	idxd_clean_engines(idxd);
-	idxd_clean_wqs(idxd);
+	int i;
+
+	for (i = 0; i < idxd->max_groups; i++)
+		put_device(group_confdev(idxd->groups[i]));
+	for (i = 0; i < idxd->max_engines; i++)
+		put_device(engine_confdev(idxd->engines[i]));
+	for (i = 0; i < idxd->max_wqs; i++)
+		put_device(wq_confdev(idxd->wqs[i]));
 	destroy_workqueue(idxd->wq);
 }
 
 static int idxd_setup_internals(struct idxd_device *idxd)
 {
 	struct device *dev = &idxd->pdev->dev;
-	int rc;
+	int rc, i;
 
 	init_waitqueue_head(&idxd->cmd_waitq);
 
@@ -423,11 +356,14 @@ static int idxd_setup_internals(struct idxd_device *idxd)
 	return 0;
 
  err_wkq_create:
-	idxd_clean_groups(idxd);
+	for (i = 0; i < idxd->max_groups; i++)
+		put_device(group_confdev(idxd->groups[i]));
  err_group:
-	idxd_clean_engines(idxd);
+	for (i = 0; i < idxd->max_engines; i++)
+		put_device(engine_confdev(idxd->engines[i]));
  err_engine:
-	idxd_clean_wqs(idxd);
+	for (i = 0; i < idxd->max_wqs; i++)
+		put_device(wq_confdev(idxd->wqs[i]));
  err_wqs:
 	return rc;
 }
@@ -523,17 +459,6 @@ static void idxd_read_caps(struct idxd_device *idxd)
 	multi_u64_to_bmap(idxd->opcap_bmap, &idxd->hw.opcap.bits[0], 4);
 }
 
-static void idxd_free(struct idxd_device *idxd)
-{
-	if (!idxd)
-		return;
-
-	put_device(idxd_confdev(idxd));
-	bitmap_free(idxd->opcap_bmap);
-	ida_free(&idxd_ida, idxd->id);
-	kfree(idxd);
-}
-
 static struct idxd_device *idxd_alloc(struct pci_dev *pdev, struct idxd_driver_data *data)
 {
 	struct device *dev = &pdev->dev;
@@ -551,34 +476,28 @@ static struct idxd_device *idxd_alloc(struct pci_dev *pdev, struct idxd_driver_d
 	idxd_dev_set_type(&idxd->idxd_dev, idxd->data->type);
 	idxd->id = ida_alloc(&idxd_ida, GFP_KERNEL);
 	if (idxd->id < 0)
-		goto err_ida;
+		return NULL;
 
 	idxd->opcap_bmap = bitmap_zalloc_node(IDXD_MAX_OPCAP_BITS, GFP_KERNEL, dev_to_node(dev));
-	if (!idxd->opcap_bmap)
-		goto err_opcap;
+	if (!idxd->opcap_bmap) {
+		ida_free(&idxd_ida, idxd->id);
+		return NULL;
+	}
 
 	device_initialize(conf_dev);
 	conf_dev->parent = dev;
 	conf_dev->bus = &dsa_bus_type;
 	conf_dev->type = idxd->data->dev_type;
 	rc = dev_set_name(conf_dev, "%s%d", idxd->data->name_prefix, idxd->id);
-	if (rc < 0)
-		goto err_name;
+	if (rc < 0) {
+		put_device(conf_dev);
+		return NULL;
+	}
 
 	spin_lock_init(&idxd->dev_lock);
 	spin_lock_init(&idxd->cmd_lock);
 
 	return idxd;
-
-err_name:
-	put_device(conf_dev);
-	bitmap_free(idxd->opcap_bmap);
-err_opcap:
-	ida_free(&idxd_ida, idxd->id);
-err_ida:
-	kfree(idxd);
-
-	return NULL;
 }
 
 static int idxd_enable_system_pasid(struct idxd_device *idxd)
@@ -744,8 +663,6 @@ static int idxd_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	dev_info(&pdev->dev, "Intel(R) Accelerator Device (v%x)\n",
 		 idxd->hw.version);
 
-	idxd->user_submission_safe = data->user_submission_safe;
-
 	return 0;
 
  err_dev_register:
@@ -753,7 +670,7 @@ static int idxd_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
  err:
 	pci_iounmap(pdev, idxd->reg_base);
  err_iomap:
-	idxd_free(idxd);
+	put_device(idxd_confdev(idxd));
  err_idxd_alloc:
 	pci_disable_device(pdev);
 	return rc;
@@ -816,7 +733,6 @@ static void idxd_remove(struct pci_dev *pdev)
 	destroy_workqueue(idxd->wq);
 	perfmon_pmu_remove(idxd);
 	put_device(idxd_confdev(idxd));
-	idxd_free(idxd);
 }
 
 static struct pci_driver idxd_pci_driver = {

@@ -178,7 +178,7 @@ delete_mid(struct mid_q_entry *mid)
  * Our basic "send data to server" function. Should be called with srv_mutex
  * held. The caller is responsible for handling the results.
  */
-int
+static int
 smb_send_kvec(struct TCP_Server_Info *server, struct msghdr *smb_msg,
 	      size_t *sent)
 {
@@ -427,17 +427,10 @@ unmask:
 						  server->conn_id, server->hostname);
 	}
 smbd_done:
-	/*
-	 * there's hardly any use for the layers above to know the
-	 * actual error code here. All they should do at this point is
-	 * to retry the connection and hope it goes away.
-	 */
-	if (rc < 0 && rc != -EINTR && rc != -EAGAIN) {
+	if (rc < 0 && rc != -EINTR)
 		cifs_server_dbg(VFS, "Error %d sending data on socket to server\n",
 			 rc);
-		rc = -ECONNABORTED;
-		cifs_signal_cifsd_for_reconnect(server, false);
-	} else if (rc > 0)
+	else if (rc > 0)
 		rc = 0;
 out:
 	cifs_in_send_dec(server);
@@ -456,8 +449,8 @@ smb_send_rqst(struct TCP_Server_Info *server, int num_rqst,
 	if (!(flags & CIFS_TRANSFORM_REQ))
 		return __smb_send_rqst(server, num_rqst, rqst);
 
-	if (WARN_ON_ONCE(num_rqst > MAX_COMPOUND - 1))
-		return -EIO;
+	if (num_rqst > MAX_COMPOUND - 1)
+		return -ENOMEM;
 
 	if (!server->ops->init_transform_rq) {
 		cifs_server_dbg(VFS, "Encryption requested but transform callback is missing\n");
@@ -931,15 +924,12 @@ cifs_sync_mid_result(struct mid_q_entry *mid, struct TCP_Server_Info *server)
 			list_del_init(&mid->qhead);
 			mid->mid_flags |= MID_DELETED;
 		}
-		spin_unlock(&server->mid_lock);
 		cifs_server_dbg(VFS, "%s: invalid mid state mid=%llu state=%d\n",
 			 __func__, mid->mid, mid->mid_state);
 		rc = -EIO;
-		goto sync_mid_done;
 	}
 	spin_unlock(&server->mid_lock);
 
-sync_mid_done:
 	release_mid(mid);
 	return rc;
 }
@@ -1045,45 +1035,18 @@ cifs_cancelled_callback(struct mid_q_entry *mid)
 struct TCP_Server_Info *cifs_pick_channel(struct cifs_ses *ses)
 {
 	uint index = 0;
-	unsigned int min_in_flight = UINT_MAX, max_in_flight = 0;
-	struct TCP_Server_Info *server = NULL;
-	int i;
 
 	if (!ses)
 		return NULL;
 
+	/* round robin */
+	index = (uint)atomic_inc_return(&ses->chan_seq);
+
 	spin_lock(&ses->chan_lock);
-	for (i = 0; i < ses->chan_count; i++) {
-		server = ses->chans[i].server;
-		if (!server)
-			continue;
-
-		/*
-		 * strictly speaking, we should pick up req_lock to read
-		 * server->in_flight. But it shouldn't matter much here if we
-		 * race while reading this data. The worst that can happen is
-		 * that we could use a channel that's not least loaded. Avoiding
-		 * taking the lock could help reduce wait time, which is
-		 * important for this function
-		 */
-		if (server->in_flight < min_in_flight) {
-			min_in_flight = server->in_flight;
-			index = i;
-		}
-		if (server->in_flight > max_in_flight)
-			max_in_flight = server->in_flight;
-	}
-
-	/* if all channels are equally loaded, fall back to round-robin */
-	if (min_in_flight == max_in_flight) {
-		index = (uint)atomic_inc_return(&ses->chan_seq);
-		index %= ses->chan_count;
-	}
-
-	server = ses->chans[index].server;
+	index %= ses->chan_count;
 	spin_unlock(&ses->chan_lock);
 
-	return server;
+	return ses->chans[index].server;
 }
 
 int

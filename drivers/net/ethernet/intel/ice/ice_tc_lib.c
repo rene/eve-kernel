@@ -663,7 +663,7 @@ ice_eswitch_add_tc_fltr(struct ice_vsi *vsi, struct ice_tc_flower_fltr *fltr)
 	int ret;
 	int i;
 
-	if (flags & ICE_TC_FLWR_FIELD_ENC_SRC_L4_PORT) {
+	if (!flags || (flags & ICE_TC_FLWR_FIELD_ENC_SRC_L4_PORT)) {
 		NL_SET_ERR_MSG_MOD(fltr->extack, "Unsupported encap field(s)");
 		return -EOPNOTSUPP;
 	}
@@ -1237,10 +1237,10 @@ ice_parse_cls_flower(struct net_device *filter_dev, struct ice_vsi *vsi,
 		 */
 		headers = &fltr->inner_headers;
 	} else if (dissector->used_keys &
-		  (BIT(FLOW_DISSECTOR_KEY_ENC_IPV4_ADDRS) |
-		   BIT(FLOW_DISSECTOR_KEY_ENC_IPV6_ADDRS) |
-		   BIT(FLOW_DISSECTOR_KEY_ENC_KEYID) |
-		   BIT(FLOW_DISSECTOR_KEY_ENC_PORTS))) {
+		  (BIT_ULL(FLOW_DISSECTOR_KEY_ENC_IPV4_ADDRS) |
+		   BIT_ULL(FLOW_DISSECTOR_KEY_ENC_IPV6_ADDRS) |
+		   BIT_ULL(FLOW_DISSECTOR_KEY_ENC_KEYID) |
+		   BIT_ULL(FLOW_DISSECTOR_KEY_ENC_PORTS))) {
 		NL_SET_ERR_MSG_MOD(fltr->extack, "Tunnel key used, but device isn't a tunnel");
 		return -EOPNOTSUPP;
 	} else {

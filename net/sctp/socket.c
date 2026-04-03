@@ -70,9 +70,8 @@
 /* Forward declarations for internal helper functions. */
 static bool sctp_writeable(const struct sock *sk);
 static void sctp_wfree(struct sk_buff *skb);
-static int sctp_wait_for_sndbuf(struct sctp_association *asoc,
-				struct sctp_transport *transport,
-				long *timeo_p, size_t msg_len);
+static int sctp_wait_for_sndbuf(struct sctp_association *asoc, long *timeo_p,
+				size_t msg_len);
 static int sctp_wait_for_packet(struct sock *sk, int *err, long *timeo_p);
 static int sctp_wait_for_connect(struct sctp_association *, long *timeo_p);
 static int sctp_wait_for_accept(struct sock *sk, long timeo);
@@ -1827,7 +1826,7 @@ static int sctp_sendmsg_to_asoc(struct sctp_association *asoc,
 
 	if (sctp_wspace(asoc) <= 0 || !sk_wmem_schedule(sk, msg_len)) {
 		timeo = sock_sndtimeo(sk, msg->msg_flags & MSG_DONTWAIT);
-		err = sctp_wait_for_sndbuf(asoc, transport, &timeo, msg_len);
+		err = sctp_wait_for_sndbuf(asoc, &timeo, msg_len);
 		if (err)
 			goto err;
 		if (unlikely(sinfo->sinfo_stream >= asoc->stream.outcnt)) {
@@ -2098,13 +2097,6 @@ static int sctp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 
 	pr_debug("%s: sk:%p, msghdr:%p, len:%zd, flags:0x%x, addr_len:%p)\n",
 		 __func__, sk, msg, len, flags, addr_len);
-
-	if (unlikely(flags & MSG_ERRQUEUE))
-		return inet_recv_error(sk, msg, len, addr_len);
-
-	if (sk_can_busy_loop(sk) &&
-	    skb_queue_empty_lockless(&sk->sk_receive_queue))
-		sk_busy_loop(sk, flags & MSG_DONTWAIT);
 
 	lock_sock(sk);
 
@@ -7117,7 +7109,6 @@ static int sctp_getsockopt_assoc_ids(struct sock *sk, int len,
 	struct sctp_sock *sp = sctp_sk(sk);
 	struct sctp_association *asoc;
 	struct sctp_assoc_ids *ids;
-	size_t ids_size;
 	u32 num = 0;
 
 	if (sctp_style(sk, TCP))
@@ -7130,11 +7121,11 @@ static int sctp_getsockopt_assoc_ids(struct sock *sk, int len,
 		num++;
 	}
 
-	ids_size = struct_size(ids, gaids_assoc_id, num);
-	if (len < ids_size)
+	if (len < sizeof(struct sctp_assoc_ids) + sizeof(sctp_assoc_t) * num)
 		return -EINVAL;
 
-	len = ids_size;
+	len = sizeof(struct sctp_assoc_ids) + sizeof(sctp_assoc_t) * num;
+
 	ids = kmalloc(len, GFP_USER | __GFP_NOWARN);
 	if (unlikely(!ids))
 		return -ENOMEM;
@@ -8521,7 +8512,6 @@ static int sctp_listen_start(struct sock *sk, int backlog)
 	struct sctp_endpoint *ep = sp->ep;
 	struct crypto_shash *tfm = NULL;
 	char alg[32];
-	int err;
 
 	/* Allocate HMAC for generating cookie. */
 	if (!sp->hmac && sp->sctp_hmac_alg) {
@@ -8548,26 +8538,17 @@ static int sctp_listen_start(struct sock *sk, int backlog)
 	 */
 	inet_sk_set_state(sk, SCTP_SS_LISTENING);
 	if (!ep->base.bind_addr.port) {
-		if (sctp_autobind(sk)) {
-			err = -EAGAIN;
-			goto err;
-		}
+		if (sctp_autobind(sk))
+			return -EAGAIN;
 	} else {
 		if (sctp_get_port(sk, inet_sk(sk)->inet_num)) {
-			err = -EADDRINUSE;
-			goto err;
+			inet_sk_set_state(sk, SCTP_SS_CLOSED);
+			return -EADDRINUSE;
 		}
 	}
 
 	WRITE_ONCE(sk->sk_max_ack_backlog, backlog);
-	err = sctp_hash_endpoint(ep);
-	if (err)
-		goto err;
-
-	return 0;
-err:
-	inet_sk_set_state(sk, SCTP_SS_CLOSED);
-	return err;
+	return sctp_hash_endpoint(ep);
 }
 
 /*
@@ -9057,6 +9038,12 @@ struct sk_buff *sctp_skb_recv_datagram(struct sock *sk, int flags, int *err)
 		if (sk->sk_shutdown & RCV_SHUTDOWN)
 			break;
 
+		if (sk_can_busy_loop(sk)) {
+			sk_busy_loop(sk, flags & MSG_DONTWAIT);
+
+			if (!skb_queue_empty_lockless(&sk->sk_receive_queue))
+				continue;
+		}
 
 		/* User doesn't want to wait.  */
 		error = -EAGAIN;
@@ -9089,8 +9076,7 @@ static void __sctp_write_space(struct sctp_association *asoc)
 		wq = rcu_dereference(sk->sk_wq);
 		if (wq) {
 			if (waitqueue_active(&wq->wait))
-				wake_up_interruptible_poll(&wq->wait, EPOLLOUT |
-						EPOLLWRNORM | EPOLLWRBAND);
+				wake_up_interruptible(&wq->wait);
 
 			/* Note that we try to include the Async I/O support
 			 * here by modeling from the current TCP/UDP code.
@@ -9205,9 +9191,8 @@ void sctp_sock_rfree(struct sk_buff *skb)
 
 
 /* Helper function to wait for space in the sndbuf.  */
-static int sctp_wait_for_sndbuf(struct sctp_association *asoc,
-				struct sctp_transport *transport,
-				long *timeo_p, size_t msg_len)
+static int sctp_wait_for_sndbuf(struct sctp_association *asoc, long *timeo_p,
+				size_t msg_len)
 {
 	struct sock *sk = asoc->base.sk;
 	long current_timeo = *timeo_p;
@@ -9217,9 +9202,7 @@ static int sctp_wait_for_sndbuf(struct sctp_association *asoc,
 	pr_debug("%s: asoc:%p, timeo:%ld, msg_len:%zu\n", __func__, asoc,
 		 *timeo_p, msg_len);
 
-	/* Increment the transport and association's refcnt. */
-	if (transport)
-		sctp_transport_hold(transport);
+	/* Increment the association's refcnt.  */
 	sctp_association_hold(asoc);
 
 	/* Wait on the association specific sndbuf space. */
@@ -9228,7 +9211,7 @@ static int sctp_wait_for_sndbuf(struct sctp_association *asoc,
 					  TASK_INTERRUPTIBLE);
 		if (asoc->base.dead)
 			goto do_dead;
-		if ((!*timeo_p) || (transport && transport->dead))
+		if (!*timeo_p)
 			goto do_nonblock;
 		if (sk->sk_err || asoc->state >= SCTP_STATE_SHUTDOWN_PENDING)
 			goto do_error;
@@ -9253,9 +9236,7 @@ static int sctp_wait_for_sndbuf(struct sctp_association *asoc,
 out:
 	finish_wait(&asoc->wait, &wait);
 
-	/* Release the transport and association's refcnt. */
-	if (transport)
-		sctp_transport_put(transport);
+	/* Release the association's refcnt.  */
 	sctp_association_put(asoc);
 
 	return err;

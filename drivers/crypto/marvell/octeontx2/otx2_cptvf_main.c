@@ -10,26 +10,40 @@
 
 #define OTX2_CPTVF_DRV_NAME "rvu_cptvf"
 
+static unsigned int cpt_block_num;
+module_param(cpt_block_num, uint, 0644);
+MODULE_PARM_DESC(cpt_block_num, "cpt block number (0=CPT0 1=CPT1, default 0)");
+
 static void cptvf_enable_pfvf_mbox_intrs(struct otx2_cptvf_dev *cptvf)
 {
+	u64 intr_bits = BIT_ULL(0);
+
+	if (is_cn20k(cptvf->pdev))
+		intr_bits |= BIT_ULL(1) | BIT_ULL(2) | BIT_ULL(3);
+
 	/* Clear interrupt if any */
 	otx2_cpt_write64(cptvf->reg_base, BLKADDR_RVUM, 0, OTX2_RVU_VF_INT,
-			 0x1ULL);
+			 intr_bits);
 
 	/* Enable PF-VF interrupt */
 	otx2_cpt_write64(cptvf->reg_base, BLKADDR_RVUM, 0,
-			 OTX2_RVU_VF_INT_ENA_W1S, 0x1ULL);
+			 OTX2_RVU_VF_INT_ENA_W1S, intr_bits);
 }
 
 static void cptvf_disable_pfvf_mbox_intrs(struct otx2_cptvf_dev *cptvf)
 {
+	u64 intr_bits = BIT_ULL(0);
+
+	if (is_cn20k(cptvf->pdev))
+		intr_bits |= BIT_ULL(1) | BIT_ULL(2) | BIT_ULL(3);
+
 	/* Disable PF-VF interrupt */
 	otx2_cpt_write64(cptvf->reg_base, BLKADDR_RVUM, 0,
-			 OTX2_RVU_VF_INT_ENA_W1C, 0x1ULL);
+			 OTX2_RVU_VF_INT_ENA_W1C, intr_bits);
 
 	/* Clear interrupt if any */
 	otx2_cpt_write64(cptvf->reg_base, BLKADDR_RVUM, 0, OTX2_RVU_VF_INT,
-			 0x1ULL);
+			 intr_bits);
 }
 
 static int cptvf_register_interrupts(struct otx2_cptvf_dev *cptvf)
@@ -52,8 +66,10 @@ static int cptvf_register_interrupts(struct otx2_cptvf_dev *cptvf)
 	irq = pci_irq_vector(cptvf->pdev, OTX2_CPT_VF_INT_VEC_E_MBOX);
 	/* Register VF<=>PF mailbox interrupt handler */
 	ret = devm_request_irq(&cptvf->pdev->dev, irq,
-			       otx2_cptvf_pfvf_mbox_intr, 0,
-			       "CPTPFVF Mbox", cptvf);
+			       is_cn20k(cptvf->pdev) ?
+			       cptvf_cn20k_pfvf_mbox_intr :
+			       otx2_cptvf_pfvf_mbox_intr,
+			       0, "CPTVF PFVF Mbox", cptvf);
 	if (ret)
 		return ret;
 	/* Enable PF-VF mailbox interrupts */
@@ -75,13 +91,18 @@ static int cptvf_pfvf_mbox_init(struct otx2_cptvf_dev *cptvf)
 	resource_size_t offset, size;
 	int ret;
 
-	cptvf->pfvf_mbox_wq = alloc_workqueue("cpt_pfvf_mailbox",
-					      WQ_UNBOUND | WQ_HIGHPRI |
-					      WQ_MEM_RECLAIM, 1);
+	cptvf->pfvf_mbox_wq =
+		alloc_ordered_workqueue("cpt_pfvf_mailbox",
+					WQ_HIGHPRI | WQ_MEM_RECLAIM);
 	if (!cptvf->pfvf_mbox_wq)
 		return -ENOMEM;
 
-	if (test_bit(CN10K_MBOX, &cptvf->cap_flag)) {
+	if (is_cn20k(pdev)) {
+		cptvf->pfvf_mbox_base = cptvf->reg_base +
+					CPT_CN20K_VF_MBOX_BASE +
+					((u64)BLKADDR_MBOX <<
+					 OTX2_CPT_RVU_FUNC_BLKADDR_SHIFT);
+	} else if (test_bit(CN10K_MBOX, &cptvf->cap_flag)) {
 		/* For cn10k platform, VF mailbox region is in its BAR2
 		 * register space
 		 */
@@ -105,7 +126,7 @@ static int cptvf_pfvf_mbox_init(struct otx2_cptvf_dev *cptvf)
 	if (ret)
 		goto free_wqe;
 
-	ret = otx2_cpt_mbox_bbuf_init(cptvf, pdev);
+	ret = otx2_cptvf_mbox_bbuf_init(cptvf, pdev);
 	if (ret)
 		goto destroy_mbox;
 
@@ -246,7 +267,8 @@ static void cptvf_lf_shutdown(struct otx2_cptlfs_info *lfs)
 	/* Unregister crypto algorithms */
 	otx2_cpt_crypto_exit(lfs->pdev, THIS_MODULE);
 	/* Unregister LFs interrupts */
-	otx2_cptlf_unregister_interrupts(lfs);
+	otx2_cptlf_unregister_misc_interrupts(lfs);
+	otx2_cptlf_unregister_done_interrupts(lfs);
 	/* Cleanup LFs software side */
 	lf_sw_cleanup(lfs);
 	/* Free instruction queues */
@@ -261,32 +283,41 @@ static int cptvf_lf_init(struct otx2_cptvf_dev *cptvf)
 	struct otx2_cptlfs_info *lfs = &cptvf->lfs;
 	struct device *dev = &cptvf->pdev->dev;
 	int ret, lfs_num;
-	u8 eng_grp_msk;
 
 	/* Get engine group number for symmetric crypto */
-	cptvf->lfs.kcrypto_eng_grp_num = OTX2_CPT_INVALID_CRYPTO_ENG_GRP;
+	cptvf->lfs.kcrypto_se_eng_grp_num = OTX2_CPT_INVALID_CRYPTO_ENG_GRP;
 	ret = otx2_cptvf_send_eng_grp_num_msg(cptvf, OTX2_CPT_SE_TYPES);
 	if (ret)
 		return ret;
 
-	if (cptvf->lfs.kcrypto_eng_grp_num == OTX2_CPT_INVALID_CRYPTO_ENG_GRP) {
-		dev_err(dev, "Engine group for kernel crypto not available\n");
-		ret = -ENOENT;
-		return ret;
+	if (cptvf->lfs.kcrypto_se_eng_grp_num ==
+		OTX2_CPT_INVALID_CRYPTO_ENG_GRP) {
+		dev_err(dev,
+			"Symmetric Engine group for crypto not available\n");
+		return -ENOENT;
 	}
-	eng_grp_msk = 1 << cptvf->lfs.kcrypto_eng_grp_num;
+
+	/* Get engine group number for asymmetric crypto */
+	cptvf->lfs.kcrypto_ae_eng_grp_num = OTX2_CPT_INVALID_CRYPTO_ENG_GRP;
+	ret = otx2_cptvf_send_eng_grp_num_msg(cptvf, OTX2_CPT_AE_TYPES);
+	if (ret)
+		return ret;
+
+	if (cptvf->lfs.kcrypto_ae_eng_grp_num ==
+		OTX2_CPT_INVALID_CRYPTO_ENG_GRP) {
+		dev_err(dev,
+			"Asymmetric Engine group for crypto not available\n");
+		return -ENOENT;
+	}
 
 	ret = otx2_cptvf_send_kvf_limits_msg(cptvf);
 	if (ret)
 		return ret;
 
-	lfs->reg_base = cptvf->reg_base;
-	lfs->pdev = cptvf->pdev;
-	lfs->mbox = &cptvf->pfvf_mbox;
+	lfs_num = cptvf->lfs.kvf_limits;
 
-	lfs_num = cptvf->lfs.kvf_limits ? cptvf->lfs.kvf_limits :
-		  num_online_cpus();
-	ret = otx2_cptlf_init(lfs, eng_grp_msk, OTX2_CPT_QUEUE_HI_PRIO,
+	ret = otx2_cptlf_init(lfs, 0xF,
+			      otx2_cpt_queue_get_default_pri(cptvf->pdev),
 			      lfs_num);
 	if (ret)
 		return ret;
@@ -302,7 +333,11 @@ static int cptvf_lf_init(struct otx2_cptvf_dev *cptvf)
 		goto cleanup_lf;
 
 	/* Register LFs interrupts */
-	ret = otx2_cptlf_register_interrupts(lfs);
+	ret = otx2_cptlf_register_misc_interrupts(lfs);
+	if (ret)
+		goto cleanup_lf_sw;
+
+	ret = otx2_cptlf_register_done_interrupts(lfs);
 	if (ret)
 		goto cleanup_lf_sw;
 
@@ -323,7 +358,8 @@ static int cptvf_lf_init(struct otx2_cptvf_dev *cptvf)
 disable_irqs:
 	otx2_cptlf_free_irqs_affinity(lfs);
 unregister_intr:
-	otx2_cptlf_unregister_interrupts(lfs);
+	otx2_cptlf_unregister_misc_interrupts(lfs);
+	otx2_cptlf_unregister_done_interrupts(lfs);
 cleanup_lf_sw:
 	lf_sw_cleanup(lfs);
 cleanup_lf:
@@ -369,10 +405,6 @@ static int otx2_cptvf_probe(struct pci_dev *pdev,
 
 	otx2_cpt_set_hw_caps(pdev, &cptvf->cap_flag);
 
-	ret = cn10k_cptvf_lmtst_init(cptvf);
-	if (ret)
-		goto clear_drvdata;
-
 	/* Initialize PF<=>VF mailbox */
 	ret = cptvf_pfvf_mbox_init(cptvf);
 	if (ret)
@@ -383,13 +415,34 @@ static int otx2_cptvf_probe(struct pci_dev *pdev,
 	if (ret)
 		goto destroy_pfvf_mbox;
 
-	/* Initialize CPT LFs */
-	ret = cptvf_lf_init(cptvf);
+	cptvf->blkaddr = (cpt_block_num == 0) ? BLKADDR_CPT0 : BLKADDR_CPT1;
+
+	cptvf_hw_ops_get(cptvf);
+
+	ret = otx2_cptvf_send_caps_msg(cptvf);
+	if (ret) {
+		dev_err(&pdev->dev, "Couldn't get CPT engine capabilities.\n");
+		goto unregister_interrupts;
+	}
+	if (cptvf->eng_caps[OTX2_CPT_SE_TYPES] & BIT_ULL(35))
+		cptvf->lfs.ops->cpt_sg_info_create = cn10k_sgv2_info_create;
+
+	otx2_cptlf_set_dev_info(&cptvf->lfs, cptvf->pdev, cptvf->reg_base,
+				&cptvf->pfvf_mbox, cptvf->blkaddr);
+
+	ret = cn10k_cptvf_lmtst_init(cptvf);
 	if (ret)
 		goto unregister_interrupts;
 
+	/* Initialize CPT LFs */
+	ret = cptvf_lf_init(cptvf);
+	if (ret)
+		goto free_lmtst;
+
 	return 0;
 
+free_lmtst:
+	cn10k_cpt_lmtst_free(pdev, &cptvf->lfs);
 unregister_interrupts:
 	cptvf_disable_pfvf_mbox_intrs(cptvf);
 destroy_pfvf_mbox:
@@ -413,6 +466,8 @@ static void otx2_cptvf_remove(struct pci_dev *pdev)
 	cptvf_disable_pfvf_mbox_intrs(cptvf);
 	/* Destroy PF-VF mbox */
 	cptvf_pfvf_mbox_destroy(cptvf);
+	/* Free LMTST memory */
+	cn10k_cpt_lmtst_free(pdev, &cptvf->lfs);
 	pci_set_drvdata(pdev, NULL);
 }
 

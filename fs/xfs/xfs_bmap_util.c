@@ -314,13 +314,15 @@ xfs_getbmap_report_one(
 	if (isnullstartblock(got->br_startblock) ||
 	    got->br_startblock == DELAYSTARTBLOCK) {
 		/*
-		 * Take the flush completion as being a point-in-time snapshot
-		 * where there are no delalloc extents, and if any new ones
-		 * have been created racily, just skip them as being 'after'
-		 * the flush and so don't get reported.
+		 * Delalloc extents that start beyond EOF can occur due to
+		 * speculative EOF allocation when the delalloc extent is larger
+		 * than the largest freespace extent at conversion time.  These
+		 * extents cannot be converted by data writeback, so can exist
+		 * here even if we are not supposed to be finding delalloc
+		 * extents.
 		 */
-		if (!(bmv->bmv_iflags & BMV_IF_DELALLOC))
-			return 0;
+		if (got->br_startoff < XFS_B_TO_FSB(ip->i_mount, XFS_ISIZE(ip)))
+			ASSERT((bmv->bmv_iflags & BMV_IF_DELALLOC) != 0);
 
 		p->bmv_oflags |= BMV_OF_DELALLOC;
 		p->bmv_block = -2;
@@ -558,9 +560,7 @@ xfs_getbmap(
 		if (!xfs_iext_next_extent(ifp, &icur, &got)) {
 			xfs_fileoff_t	end = XFS_B_TO_FSB(mp, XFS_ISIZE(ip));
 
-			if (bmv->bmv_entries > 0)
-				out[bmv->bmv_entries - 1].bmv_oflags |=
-								BMV_OF_LAST;
+			out[bmv->bmv_entries - 1].bmv_oflags |= BMV_OF_LAST;
 
 			if (whichfork != XFS_ATTR_FORK && bno < end &&
 			    !xfs_getbmap_full(bmv)) {
@@ -590,13 +590,11 @@ out_unlock_iolock:
 int
 xfs_bmap_punch_delalloc_range(
 	struct xfs_inode	*ip,
-	xfs_off_t		start_byte,
-	xfs_off_t		end_byte)
+	xfs_fileoff_t		start_fsb,
+	xfs_fileoff_t		length)
 {
-	struct xfs_mount	*mp = ip->i_mount;
 	struct xfs_ifork	*ifp = &ip->i_df;
-	xfs_fileoff_t		start_fsb = XFS_B_TO_FSBT(mp, start_byte);
-	xfs_fileoff_t		end_fsb = XFS_B_TO_FSB(mp, end_byte);
+	xfs_fileoff_t		end_fsb = start_fsb + length;
 	struct xfs_bmbt_irec	got, del;
 	struct xfs_iext_cursor	icur;
 	int			error = 0;
@@ -609,7 +607,7 @@ xfs_bmap_punch_delalloc_range(
 
 	while (got.br_startoff + got.br_blockcount > start_fsb) {
 		del = got;
-		xfs_trim_extent(&del, start_fsb, end_fsb - start_fsb);
+		xfs_trim_extent(&del, start_fsb, length);
 
 		/*
 		 * A delete can push the cursor forward. Step back to the
@@ -636,11 +634,13 @@ out_unlock:
 
 /*
  * Test whether it is appropriate to check an inode for and free post EOF
- * blocks.
+ * blocks. The 'force' parameter determines whether we should also consider
+ * regular files that are marked preallocated or append-only.
  */
 bool
 xfs_can_free_eofblocks(
-	struct xfs_inode	*ip)
+	struct xfs_inode	*ip,
+	bool			force)
 {
 	struct xfs_bmbt_irec	imap;
 	struct xfs_mount	*mp = ip->i_mount;
@@ -674,11 +674,11 @@ xfs_can_free_eofblocks(
 		return false;
 
 	/*
-	 * Only free real extents for inodes with persistent preallocations or
-	 * the append-only flag.
+	 * Do not free real preallocated or append-only files unless the file
+	 * has delalloc blocks and we are forced to remove them.
 	 */
 	if (ip->i_diflags & (XFS_DIFLAG_PREALLOC | XFS_DIFLAG_APPEND))
-		if (ip->i_delayed_blks == 0)
+		if (!force || ip->i_delayed_blks == 0)
 			return false;
 
 	/*
@@ -732,22 +732,6 @@ xfs_free_eofblocks(
 	/* Wait on dio to ensure i_size has settled. */
 	inode_dio_wait(VFS_I(ip));
 
-	/*
-	 * For preallocated files only free delayed allocations.
-	 *
-	 * Note that this means we also leave speculative preallocations in
-	 * place for preallocated files.
-	 */
-	if (ip->i_diflags & (XFS_DIFLAG_PREALLOC | XFS_DIFLAG_APPEND)) {
-		if (ip->i_delayed_blks) {
-			xfs_bmap_punch_delalloc_range(ip,
-				round_up(XFS_ISIZE(ip), mp->m_sb.sb_blocksize),
-				LLONG_MAX);
-		}
-		xfs_inode_clear_eofblocks_tag(ip);
-		return 0;
-	}
-
 	error = xfs_trans_alloc(mp, &M_RES(mp)->tr_itruncate, 0, 0, 0, &tp);
 	if (error) {
 		ASSERT(xfs_is_shutdown(mp));
@@ -794,10 +778,12 @@ xfs_alloc_file_space(
 {
 	xfs_mount_t		*mp = ip->i_mount;
 	xfs_off_t		count;
+	xfs_filblks_t		allocated_fsb;
 	xfs_filblks_t		allocatesize_fsb;
 	xfs_extlen_t		extsz, temp;
 	xfs_fileoff_t		startoffset_fsb;
 	xfs_fileoff_t		endoffset_fsb;
+	int			nimaps;
 	int			rt;
 	xfs_trans_t		*tp;
 	xfs_bmbt_irec_t		imaps[1], *imapp;
@@ -820,6 +806,7 @@ xfs_alloc_file_space(
 
 	count = len;
 	imapp = &imaps[0];
+	nimaps = 1;
 	startoffset_fsb	= XFS_B_TO_FSBT(mp, offset);
 	endoffset_fsb = XFS_B_TO_FSB(mp, offset + count);
 	allocatesize_fsb = endoffset_fsb - startoffset_fsb;
@@ -830,7 +817,6 @@ xfs_alloc_file_space(
 	while (allocatesize_fsb && !error) {
 		xfs_fileoff_t	s, e;
 		unsigned int	dblocks, rblocks, resblks;
-		int		nimaps = 1;
 
 		/*
 		 * Determine space reservations for data/realtime.
@@ -882,32 +868,29 @@ xfs_alloc_file_space(
 		if (error)
 			goto error;
 
-		/*
-		 * If the allocator cannot find a single free extent large
-		 * enough to cover the start block of the requested range,
-		 * xfs_bmapi_write will return -ENOSR.
-		 *
-		 * In that case we simply need to keep looping with the same
-		 * startoffset_fsb so that one of the following allocations
-		 * will eventually reach the requested range.
-		 */
 		error = xfs_bmapi_write(tp, ip, startoffset_fsb,
 				allocatesize_fsb, XFS_BMAPI_PREALLOC, 0, imapp,
 				&nimaps);
-		if (error) {
-			if (error != -ENOSR)
-				goto error;
-			error = 0;
-		} else {
-			startoffset_fsb += imapp->br_blockcount;
-			allocatesize_fsb -= imapp->br_blockcount;
-		}
+		if (error)
+			goto error;
 
 		ip->i_diflags |= XFS_DIFLAG_PREALLOC;
 		xfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
 
 		error = xfs_trans_commit(tp);
 		xfs_iunlock(ip, XFS_ILOCK_EXCL);
+		if (error)
+			break;
+
+		allocated_fsb = imapp->br_blockcount;
+
+		if (nimaps == 0) {
+			error = -ENOSPC;
+			break;
+		}
+
+		startoffset_fsb += allocated_fsb;
+		allocatesize_fsb -= allocated_fsb;
 	}
 
 	return error;
@@ -963,18 +946,14 @@ xfs_flush_unmap_range(
 	xfs_off_t		offset,
 	xfs_off_t		len)
 {
+	struct xfs_mount	*mp = ip->i_mount;
 	struct inode		*inode = VFS_I(ip);
 	xfs_off_t		rounding, start, end;
 	int			error;
 
-	/*
-	 * Make sure we extend the flush out to extent alignment
-	 * boundaries so any extent range overlapping the start/end
-	 * of the modification we are about to do is clean and idle.
-	 */
-	rounding = max_t(xfs_off_t, xfs_inode_alloc_unitsize(ip), PAGE_SIZE);
-	start = rounddown_64(offset, rounding);
-	end = roundup_64(offset + len, rounding) - 1;
+	rounding = max_t(xfs_off_t, mp->m_sb.sb_blocksize, PAGE_SIZE);
+	start = round_down(offset, rounding);
+	end = round_up(offset + len, rounding) - 1;
 
 	error = filemap_write_and_wait_range(inode->i_mapping, start, end);
 	if (error)
@@ -1059,14 +1038,14 @@ xfs_prepare_shift(
 	struct xfs_inode	*ip,
 	loff_t			offset)
 {
-	unsigned int		rounding;
+	struct xfs_mount	*mp = ip->i_mount;
 	int			error;
 
 	/*
 	 * Trim eofblocks to avoid shifting uninitialized post-eof preallocation
 	 * into the accessible region of the file.
 	 */
-	if (xfs_can_free_eofblocks(ip)) {
+	if (xfs_can_free_eofblocks(ip, true)) {
 		error = xfs_free_eofblocks(ip);
 		if (error)
 			return error;
@@ -1077,13 +1056,11 @@ xfs_prepare_shift(
 	 * with the full range of the operation. If we don't, a COW writeback
 	 * completion could race with an insert, front merge with the start
 	 * extent (after split) during the shift and corrupt the file. Start
-	 * with the allocation unit just prior to the start to stabilize the
-	 * boundary.
+	 * with the block just prior to the start to stabilize the boundary.
 	 */
-	rounding = xfs_inode_alloc_unitsize(ip);
-	offset = rounddown_64(offset, rounding);
+	offset = round_down(offset, mp->m_sb.sb_blocksize);
 	if (offset)
-		offset -= rounding;
+		offset -= mp->m_sb.sb_blocksize;
 
 	/*
 	 * Writeback and invalidate cache for the remainder of the file as we're

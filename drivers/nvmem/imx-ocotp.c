@@ -14,7 +14,6 @@
  * Copyright (C) 2010-2013 Freescale Semiconductor, Inc
  */
 
-#include <linux/busfreq-imx.h>
 #include <linux/clk.h>
 #include <linux/device.h>
 #include <linux/io.h>
@@ -178,6 +177,7 @@ static int imx_ocotp_read(void *context, unsigned int offset,
 		return -ENOMEM;
 
 	mutex_lock(&ocotp_mutex);
+
 	buf = p;
 
 	ret = clk_prepare_enable(priv->clk);
@@ -339,8 +339,6 @@ static int imx_ocotp_write(void *context, unsigned int offset, void *val,
 		return ret;
 	}
 
-	request_bus_freq(BUS_FREQ_HIGH);
-
 	/* Setup the write timing values */
 	priv->params->set_timing(priv);
 
@@ -478,8 +476,6 @@ static int imx_ocotp_write(void *context, unsigned int offset, void *val,
 		dev_err(priv->dev, "timeout during shadow register reload\n");
 
 write_end:
-	release_bus_freq(BUS_FREQ_HIGH);
-
 	clk_disable_unprepare(priv->clk);
 	mutex_unlock(&ocotp_mutex);
 	return ret < 0 ? ret : bytes;

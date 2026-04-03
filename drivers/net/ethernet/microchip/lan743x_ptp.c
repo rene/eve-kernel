@@ -58,7 +58,7 @@ int lan743x_gpio_init(struct lan743x_adapter *adapter)
 static void lan743x_ptp_wait_till_cmd_done(struct lan743x_adapter *adapter,
 					   u32 bit_mask)
 {
-	int timeout = PTP_CMD_CTL_TIMEOUT_CNT;
+	int timeout = 1000;
 	u32 data = 0;
 
 	while (timeout &&

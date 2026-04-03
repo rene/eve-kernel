@@ -1655,17 +1655,8 @@ static void __init free_pci_segments(void)
 	}
 }
 
-static void __init free_sysfs(struct amd_iommu *iommu)
-{
-	if (iommu->iommu.dev) {
-		iommu_device_unregister(&iommu->iommu);
-		iommu_device_sysfs_remove(&iommu->iommu);
-	}
-}
-
 static void __init free_iommu_one(struct amd_iommu *iommu)
 {
-	free_sysfs(iommu);
 	free_cwwb_sem(iommu);
 	free_command_buffer(iommu);
 	free_event_buffer(iommu);
@@ -2055,9 +2046,6 @@ static int __init iommu_init_pci(struct amd_iommu *iommu)
 
 	/* Prevent binding other PCI device drivers to IOMMU devices */
 	iommu->dev->match_driver = false;
-
-	/* ACPI _PRT won't have an IRQ for IOMMU */
-	iommu->dev->irq_managed = 1;
 
 	pci_read_config_dword(iommu->dev, cap_ptr + MMIO_CAP_HDR_OFFSET,
 			      &iommu->cap);
@@ -3553,7 +3541,7 @@ static int __init parse_ivrs_acpihid(char *str)
 {
 	u32 seg = 0, bus, dev, fn;
 	char *hid, *uid, *p, *addr;
-	char acpiid[ACPIID_LEN + 1] = { }; /* size with NULL terminator */
+	char acpiid[ACPIID_LEN] = {0};
 	int i;
 
 	addr = strchr(str, '@');
@@ -3579,7 +3567,7 @@ static int __init parse_ivrs_acpihid(char *str)
 	/* We have the '@', make it the terminator to get just the acpiid */
 	*addr++ = 0;
 
-	if (strlen(str) > ACPIID_LEN)
+	if (strlen(str) > ACPIID_LEN + 1)
 		goto not_found;
 
 	if (sscanf(str, "=%s", acpiid) != 1)
@@ -3609,14 +3597,6 @@ found:
 	 */
 	while (*uid == '0' && *(uid + 1))
 		uid++;
-
-	if (strlen(hid) >= ACPIHID_HID_LEN) {
-		pr_err("Invalid command line: hid is too long\n");
-		return 1;
-	} else if (strlen(uid) >= ACPIHID_UID_LEN) {
-		pr_err("Invalid command line: uid is too long\n");
-		return 1;
-	}
 
 	i = early_acpihid_map_size++;
 	memcpy(early_acpihid_map[i].hid, hid, strlen(hid));

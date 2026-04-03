@@ -467,7 +467,6 @@ static int vmap_pages_pte_range(pmd_t *pmd, unsigned long addr,
 		unsigned long end, pgprot_t prot, struct page **pages, int *nr,
 		pgtbl_mod_mask *mask)
 {
-	int err = 0;
 	pte_t *pte;
 
 	/*
@@ -481,25 +480,18 @@ static int vmap_pages_pte_range(pmd_t *pmd, unsigned long addr,
 	do {
 		struct page *page = pages[*nr];
 
-		if (WARN_ON(!pte_none(*pte))) {
-			err = -EBUSY;
-			break;
-		}
-		if (WARN_ON(!page)) {
-			err = -ENOMEM;
-			break;
-		}
-		if (WARN_ON(!pfn_valid(page_to_pfn(page)))) {
-			err = -EINVAL;
-			break;
-		}
+		if (WARN_ON(!pte_none(*pte)))
+			return -EBUSY;
+		if (WARN_ON(!page))
+			return -ENOMEM;
+		if (WARN_ON(!pfn_valid(page_to_pfn(page))))
+			return -EINVAL;
 
 		set_pte_at(&init_mm, addr, pte, mk_pte(page, prot));
 		(*nr)++;
 	} while (pte++, addr += PAGE_SIZE, addr != end);
 	*mask |= PGTBL_PTE_MODIFIED;
-
-	return err;
+	return 0;
 }
 
 static int vmap_pages_pmd_range(pud_t *pud, unsigned long addr,
@@ -574,13 +566,13 @@ static int vmap_small_pages_range_noflush(unsigned long addr, unsigned long end,
 			mask |= PGTBL_PGD_MODIFIED;
 		err = vmap_pages_p4d_range(pgd, addr, next, prot, pages, &nr, &mask);
 		if (err)
-			break;
+			return err;
 	} while (pgd++, addr = next, addr != end);
 
 	if (mask & ARCH_PAGE_TABLE_SYNC_MASK)
 		arch_sync_kernel_mappings(start, end);
 
-	return err;
+	return 0;
 }
 
 /*
@@ -2717,8 +2709,7 @@ static void __vunmap(const void *addr, int deallocate_pages)
 			struct page *page = area->pages[i];
 
 			BUG_ON(!page);
-			if (!(area->flags & VM_MAP_PUT_PAGES))
-				mod_memcg_page_state(page, MEMCG_VMALLOC, -1);
+			mod_memcg_page_state(page, MEMCG_VMALLOC, -1);
 			/*
 			 * High-order allocs for huge vmallocs are split, so
 			 * can be freed as an array of order-0 allocations
@@ -2726,8 +2717,7 @@ static void __vunmap(const void *addr, int deallocate_pages)
 			__free_pages(page, 0);
 			cond_resched();
 		}
-		if (!(area->flags & VM_MAP_PUT_PAGES))
-			atomic_long_sub(area->nr_pages, &nr_vmalloc_pages);
+		atomic_long_sub(area->nr_pages, &nr_vmalloc_pages);
 
 		kvfree(area->pages);
 	}
@@ -2933,8 +2923,6 @@ vm_area_alloc_pages(gfp_t gfp, int nid,
 		unsigned int order, unsigned int nr_pages, struct page **pages)
 {
 	unsigned int nr_allocated = 0;
-	gfp_t alloc_gfp = gfp;
-	bool nofail = gfp & __GFP_NOFAIL;
 	struct page *page;
 	int i;
 
@@ -2945,7 +2933,6 @@ vm_area_alloc_pages(gfp_t gfp, int nid,
 	 * more permissive.
 	 */
 	if (!order) {
-		/* bulk allocator doesn't support nofail req. officially */
 		gfp_t bulk_gfp = gfp & ~__GFP_NOFAIL;
 
 		while (nr_allocated < nr_pages) {
@@ -2984,27 +2971,20 @@ vm_area_alloc_pages(gfp_t gfp, int nid,
 			if (nr != nr_pages_request)
 				break;
 		}
-	} else if (gfp & __GFP_NOFAIL) {
-		/*
-		 * Higher order nofail allocations are really expensive and
-		 * potentially dangerous (pre-mature OOM, disruptive reclaim
-		 * and compaction etc.
-		 */
-		alloc_gfp &= ~__GFP_NOFAIL;
 	}
 
 	/* High-order pages or fallback path if "bulk" fails. */
+
 	while (nr_allocated < nr_pages) {
-		if (!nofail && fatal_signal_pending(current))
+		if (fatal_signal_pending(current))
 			break;
 
 		if (nid == NUMA_NO_NODE)
-			page = alloc_pages(alloc_gfp, order);
+			page = alloc_pages(gfp, order);
 		else
-			page = alloc_pages_node(nid, alloc_gfp, order);
+			page = alloc_pages_node(nid, gfp, order);
 		if (unlikely(!page))
 			break;
-
 		/*
 		 * Higher order allocations must be able to be treated as
 		 * indepdenent small pages by callers (as they can with

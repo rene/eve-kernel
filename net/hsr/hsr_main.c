@@ -22,7 +22,7 @@ static bool hsr_slave_empty(struct hsr_priv *hsr)
 {
 	struct hsr_port *port;
 
-	hsr_for_each_port_rtnl(hsr, port)
+	hsr_for_each_port(hsr, port)
 		if (port->type != HSR_PT_MASTER)
 			return false;
 	return true;
@@ -125,7 +125,7 @@ struct hsr_port *hsr_port_get_hsr(struct hsr_priv *hsr, enum hsr_port_type pt)
 {
 	struct hsr_port *port;
 
-	hsr_for_each_port_rtnl(hsr, port)
+	hsr_for_each_port(hsr, port)
 		if (port->type == pt)
 			return port;
 	return NULL;
@@ -148,21 +148,14 @@ static struct notifier_block hsr_nb = {
 
 static int __init hsr_init(void)
 {
-	int err;
+	int res;
 
 	BUILD_BUG_ON(sizeof(struct hsr_tag) != HSR_HLEN);
 
-	err = register_netdevice_notifier(&hsr_nb);
-	if (err)
-		return err;
+	register_netdevice_notifier(&hsr_nb);
+	res = hsr_netlink_init();
 
-	err = hsr_netlink_init();
-	if (err) {
-		unregister_netdevice_notifier(&hsr_nb);
-		return err;
-	}
-
-	return 0;
+	return res;
 }
 
 static void __exit hsr_exit(void)

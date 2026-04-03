@@ -481,8 +481,6 @@ retry:
 	 * Search through everything else, we should not get here often.
 	 */
 	for_each_process(g) {
-		if (atomic_read(&mm->mm_users) <= 1)
-			break;
 		if (g->flags & PF_KTHREAD)
 			continue;
 		for_each_thread(g, c) {
@@ -804,6 +802,68 @@ static void synchronize_group_exit(struct task_struct *tsk, long code)
 	spin_unlock_irq(&sighand->siglock);
 }
 
+#ifdef CONFIG_MRVL_OCTEONTX_EL0_INTR
+struct task_cleanup_handler {
+	void (*handler)(struct task_struct *task);
+	struct list_head list;
+};
+
+static DEFINE_MUTEX(task_cleanup_handlers_mutex);
+static LIST_HEAD(task_cleanup_handlers);
+
+int task_cleanup_handler_add(void (*handler)(struct task_struct *))
+{
+	struct task_cleanup_handler *newhandler;
+
+	newhandler = (struct task_cleanup_handler *)
+		kmalloc(sizeof(struct task_cleanup_handler), GFP_KERNEL);
+	if (newhandler == NULL)
+		return -1;
+	newhandler->handler = handler;
+	mutex_lock(&task_cleanup_handlers_mutex);
+	list_add(&newhandler->list, &task_cleanup_handlers);
+	mutex_unlock(&task_cleanup_handlers_mutex);
+	return 0;
+}
+EXPORT_SYMBOL(task_cleanup_handler_add);
+
+int task_cleanup_handler_remove(void (*handler)(struct task_struct *))
+{
+	struct list_head *pos, *tmppos;
+	struct task_cleanup_handler *curr_task_cleanup_handler;
+	int retval = -1;
+
+	mutex_lock(&task_cleanup_handlers_mutex);
+	list_for_each_safe(pos, tmppos, &task_cleanup_handlers)	{
+		curr_task_cleanup_handler
+			= list_entry(pos, struct task_cleanup_handler, list);
+		if (curr_task_cleanup_handler->handler == handler) {
+			list_del(pos);
+			kfree(curr_task_cleanup_handler);
+			retval = 0;
+		}
+	}
+	mutex_unlock(&task_cleanup_handlers_mutex);
+	return retval;
+}
+EXPORT_SYMBOL(task_cleanup_handler_remove);
+
+static void task_cleanup_handlers_call(struct task_struct *task)
+{
+	struct list_head *pos;
+	struct task_cleanup_handler *curr_task_cleanup_handler;
+
+	mutex_lock(&task_cleanup_handlers_mutex);
+	list_for_each(pos, &task_cleanup_handlers) {
+		curr_task_cleanup_handler =
+			list_entry(pos, struct task_cleanup_handler, list);
+		if (curr_task_cleanup_handler->handler != NULL)
+			curr_task_cleanup_handler->handler(task);
+	}
+	mutex_unlock(&task_cleanup_handlers_mutex);
+}
+#endif
+
 void __noreturn do_exit(long code)
 {
 	struct task_struct *tsk = current;
@@ -855,14 +915,9 @@ void __noreturn do_exit(long code)
 	tsk->exit_code = code;
 	taskstats_exit(tsk, group_dead);
 
-	/*
-	 * Since sampling can touch ->mm, make sure to stop everything before we
-	 * tear it down.
-	 *
-	 * Also flushes inherited counters to the parent - before the parent
-	 * gets woken up by child-exit notifications.
-	 */
-	perf_event_exit_task(tsk);
+#ifdef CONFIG_MRVL_OCTEONTX_EL0_INTR
+	task_cleanup_handlers_call(tsk);
+#endif
 
 	exit_mm();
 
@@ -879,6 +934,14 @@ void __noreturn do_exit(long code)
 	exit_task_namespaces(tsk);
 	exit_task_work(tsk);
 	exit_thread(tsk);
+
+	/*
+	 * Flush inherited counters to the parent - before the parent
+	 * gets woken up by child-exit notifications.
+	 *
+	 * because of cgroup mode, must be called before cgroup_exit()
+	 */
+	perf_event_exit_task(tsk);
 
 	sched_autogroup_exit_task(tsk);
 	cgroup_exit(tsk);

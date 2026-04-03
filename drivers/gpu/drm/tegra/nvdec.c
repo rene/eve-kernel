@@ -209,8 +209,10 @@ static int nvdec_load_firmware(struct nvdec *nvdec)
 
 	if (!client->group) {
 		virt = dma_alloc_coherent(nvdec->dev, size, &iova, GFP_KERNEL);
-		if (!virt)
-			return -ENOMEM;
+
+		err = dma_mapping_error(nvdec->dev, iova);
+		if (err < 0)
+			return err;
 	} else {
 		virt = tegra_drm_alloc(tegra, size, &iova);
 	}

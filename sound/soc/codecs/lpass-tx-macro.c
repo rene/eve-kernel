@@ -1795,7 +1795,7 @@ static int tx_macro_register_mclk_output(struct tx_macro *tx)
 }
 
 static const struct snd_soc_component_driver tx_macro_component_drv = {
-	.name = "TX-MACRO",
+	.name = "RX-MACRO",
 	.probe = tx_macro_component_probe,
 	.controls = tx_macro_snd_controls,
 	.num_controls = ARRAY_SIZE(tx_macro_snd_controls),
@@ -1870,11 +1870,6 @@ static int tx_macro_probe(struct platform_device *pdev)
 	dev_set_drvdata(dev, tx);
 
 	tx->dev = dev;
-
-	/* Set active_decimator default value */
-	tx->active_decimator[TX_MACRO_AIF1_CAP] = -1;
-	tx->active_decimator[TX_MACRO_AIF2_CAP] = -1;
-	tx->active_decimator[TX_MACRO_AIF3_CAP] = -1;
 
 	/* set MCLK and NPL rates */
 	clk_set_rate(tx->mclk, MCLK_FREQ);

@@ -324,10 +324,10 @@ static ssize_t ext4_handle_inode_extension(struct inode *inode, loff_t offset,
  * Clean up the inode after DIO or DAX extending write has completed and the
  * inode size has been updated using ext4_handle_inode_extension().
  */
-static void ext4_inode_extension_cleanup(struct inode *inode, bool need_trunc)
+static void ext4_inode_extension_cleanup(struct inode *inode, ssize_t count)
 {
 	lockdep_assert_held_write(&inode->i_rwsem);
-	if (need_trunc) {
+	if (count < 0) {
 		ext4_truncate_failed_write(inode);
 		/*
 		 * If the truncate operation failed early, then the inode may
@@ -339,10 +339,9 @@ static void ext4_inode_extension_cleanup(struct inode *inode, bool need_trunc)
 		return;
 	}
 	/*
-	 * If i_disksize got extended either due to writeback of delalloc
-	 * blocks or extending truncate while the DIO was running we could fail
-	 * to cleanup the orphan list in ext4_handle_inode_extension(). Do it
-	 * now.
+	 * If i_disksize got extended due to writeback of delalloc blocks while
+	 * the DIO was running we could fail to cleanup the orphan list in
+	 * ext4_handle_inode_extension(). Do it now.
 	 */
 	if (!list_empty(&EXT4_I(inode)->i_orphan) && inode->i_nlink) {
 		handle_t *handle = ext4_journal_start(inode, EXT4_HT_INODE, 2);
@@ -377,11 +376,10 @@ static int ext4_dio_write_end_io(struct kiocb *iocb, ssize_t size,
 	 * blocks. But the code in ext4_iomap_alloc() is careful to use
 	 * zeroed/unwritten extents if this is possible; thus we won't leave
 	 * uninitialized blocks in a file even if we didn't succeed in writing
-	 * as much as we intended. Also we can race with truncate or write
-	 * expanding the file so we have to be a bit careful here.
+	 * as much as we intended.
 	 */
-	if (pos + size <= READ_ONCE(EXT4_I(inode)->i_disksize) &&
-	    pos + size <= i_size_read(inode))
+	WARN_ON_ONCE(i_size_read(inode) < READ_ONCE(EXT4_I(inode)->i_disksize));
+	if (pos + size <= READ_ONCE(EXT4_I(inode)->i_disksize))
 		return size;
 	return ext4_handle_inode_extension(inode, pos, size);
 }
@@ -567,7 +565,7 @@ static ssize_t ext4_dio_write_iter(struct kiocb *iocb, struct iov_iter *from)
 		 * writeback of delalloc blocks.
 		 */
 		WARN_ON_ONCE(ret == -EIOCBQUEUED);
-		ext4_inode_extension_cleanup(inode, ret < 0);
+		ext4_inode_extension_cleanup(inode, ret);
 	}
 
 out:
@@ -651,7 +649,7 @@ ext4_dax_write_iter(struct kiocb *iocb, struct iov_iter *from)
 
 	if (extend) {
 		ret = ext4_handle_inode_extension(inode, offset, ret);
-		ext4_inode_extension_cleanup(inode, ret < (ssize_t)count);
+		ext4_inode_extension_cleanup(inode, ret);
 	}
 out:
 	inode_unlock(inode);
@@ -880,7 +878,12 @@ static int ext4_file_open(struct inode *inode, struct file *filp)
 loff_t ext4_llseek(struct file *file, loff_t offset, int whence)
 {
 	struct inode *inode = file->f_mapping->host;
-	loff_t maxbytes = ext4_get_maxbytes(inode);
+	loff_t maxbytes;
+
+	if (!(ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS)))
+		maxbytes = EXT4_SB(inode->i_sb)->s_bitmap_maxbytes;
+	else
+		maxbytes = inode->i_sb->s_maxbytes;
 
 	switch (whence) {
 	default:

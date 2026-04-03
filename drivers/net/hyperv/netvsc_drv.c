@@ -42,13 +42,9 @@
 #define LINKCHANGE_INT (2 * HZ)
 #define VF_TAKEOVER_INT (HZ / 10)
 
-/* Macros to define the context of vf registration */
-#define VF_REG_IN_PROBE		1
-#define VF_REG_IN_NOTIFIER	2
-
 static unsigned int ring_size __ro_after_init = 128;
 module_param(ring_size, uint, 0444);
-MODULE_PARM_DESC(ring_size, "Ring buffer size (# of 4K pages)");
+MODULE_PARM_DESC(ring_size, "Ring buffer size (# of pages)");
 unsigned int netvsc_ring_bytes __ro_after_init;
 
 static const u32 default_msg = NETIF_MSG_DRV | NETIF_MSG_PROBE |
@@ -325,10 +321,43 @@ static u16 netvsc_select_queue(struct net_device *ndev, struct sk_buff *skb,
 	return txq;
 }
 
+static u32 fill_pg_buf(unsigned long hvpfn, u32 offset, u32 len,
+		       struct hv_page_buffer *pb)
+{
+	int j = 0;
+
+	hvpfn += offset >> HV_HYP_PAGE_SHIFT;
+	offset = offset & ~HV_HYP_PAGE_MASK;
+
+	while (len > 0) {
+		unsigned long bytes;
+
+		bytes = HV_HYP_PAGE_SIZE - offset;
+		if (bytes > len)
+			bytes = len;
+		pb[j].pfn = hvpfn;
+		pb[j].offset = offset;
+		pb[j].len = bytes;
+
+		offset += bytes;
+		len -= bytes;
+
+		if (offset == HV_HYP_PAGE_SIZE && len) {
+			hvpfn++;
+			offset = 0;
+			j++;
+		}
+	}
+
+	return j + 1;
+}
+
 static u32 init_page_array(void *hdr, u32 len, struct sk_buff *skb,
 			   struct hv_netvsc_packet *packet,
 			   struct hv_page_buffer *pb)
 {
+	u32 slots_used = 0;
+	char *data = skb->data;
 	int frags = skb_shinfo(skb)->nr_frags;
 	int i;
 
@@ -337,27 +366,28 @@ static u32 init_page_array(void *hdr, u32 len, struct sk_buff *skb,
 	 * 2. skb linear data
 	 * 3. skb fragment data
 	 */
+	slots_used += fill_pg_buf(virt_to_hvpfn(hdr),
+				  offset_in_hvpage(hdr),
+				  len,
+				  &pb[slots_used]);
 
-	pb[0].offset = offset_in_hvpage(hdr);
-	pb[0].len = len;
-	pb[0].pfn = virt_to_hvpfn(hdr);
 	packet->rmsg_size = len;
+	packet->rmsg_pgcnt = slots_used;
 
-	pb[1].offset = offset_in_hvpage(skb->data);
-	pb[1].len = skb_headlen(skb);
-	pb[1].pfn = virt_to_hvpfn(skb->data);
+	slots_used += fill_pg_buf(virt_to_hvpfn(data),
+				  offset_in_hvpage(data),
+				  skb_headlen(skb),
+				  &pb[slots_used]);
 
 	for (i = 0; i < frags; i++) {
 		skb_frag_t *frag = skb_shinfo(skb)->frags + i;
-		struct hv_page_buffer *cur_pb = &pb[i + 2];
-		u64 pfn = page_to_hvpfn(skb_frag_page(frag));
-		u32 offset = skb_frag_off(frag);
 
-		cur_pb->offset = offset_in_hvpage(offset);
-		cur_pb->len = skb_frag_size(frag);
-		cur_pb->pfn = pfn + (offset >> HV_HYP_PAGE_SHIFT);
+		slots_used += fill_pg_buf(page_to_hvpfn(skb_frag_page(frag)),
+					  skb_frag_off(frag),
+					  skb_frag_size(frag),
+					  &pb[slots_used]);
 	}
-	return frags + 2;
+	return slots_used;
 }
 
 static int count_skb_frag_slots(struct sk_buff *skb)
@@ -448,7 +478,7 @@ static int netvsc_xmit(struct sk_buff *skb, struct net_device *net, bool xdp_tx)
 	struct net_device *vf_netdev;
 	u32 rndis_msg_size;
 	u32 hash;
-	struct hv_page_buffer pb[MAX_DATA_RANGES];
+	struct hv_page_buffer pb[MAX_PAGE_BUFFER_COUNT];
 
 	/* If VF is present and up then redirect packets to it.
 	 * Skip the VF if it is marked down or has no carrier.
@@ -2151,7 +2181,7 @@ static rx_handler_result_t netvsc_vf_handle_frame(struct sk_buff **pskb)
 }
 
 static int netvsc_vf_join(struct net_device *vf_netdev,
-			  struct net_device *ndev, int context)
+			  struct net_device *ndev)
 {
 	struct net_device_context *ndev_ctx = netdev_priv(ndev);
 	int ret;
@@ -2174,11 +2204,7 @@ static int netvsc_vf_join(struct net_device *vf_netdev,
 		goto upper_link_failed;
 	}
 
-	/* If this registration is called from probe context vf_takeover
-	 * is taken care of later in probe itself.
-	 */
-	if (context == VF_REG_IN_NOTIFIER)
-		schedule_delayed_work(&ndev_ctx->vf_takeover, VF_TAKEOVER_INT);
+	schedule_delayed_work(&ndev_ctx->vf_takeover, VF_TAKEOVER_INT);
 
 	call_netdevice_notifiers(NETDEV_JOIN, vf_netdev);
 
@@ -2316,7 +2342,7 @@ static int netvsc_prepare_bonding(struct net_device *vf_netdev)
 	return NOTIFY_DONE;
 }
 
-static int netvsc_register_vf(struct net_device *vf_netdev, int context)
+static int netvsc_register_vf(struct net_device *vf_netdev)
 {
 	struct net_device_context *net_device_ctx;
 	struct netvsc_device *netvsc_dev;
@@ -2356,7 +2382,7 @@ static int netvsc_register_vf(struct net_device *vf_netdev, int context)
 
 	netdev_info(ndev, "VF registering: %s\n", vf_netdev->name);
 
-	if (netvsc_vf_join(vf_netdev, ndev, context) != 0)
+	if (netvsc_vf_join(vf_netdev, ndev) != 0)
 		return NOTIFY_DONE;
 
 	dev_hold(vf_netdev);
@@ -2454,31 +2480,10 @@ static int netvsc_unregister_vf(struct net_device *vf_netdev)
 	return NOTIFY_OK;
 }
 
-static int check_dev_is_matching_vf(struct net_device *event_ndev)
-{
-	/* Skip NetVSC interfaces */
-	if (event_ndev->netdev_ops == &device_ops)
-		return -ENODEV;
-
-	/* Avoid non-Ethernet type devices */
-	if (event_ndev->type != ARPHRD_ETHER)
-		return -ENODEV;
-
-	/* Avoid Vlan dev with same MAC registering as VF */
-	if (is_vlan_dev(event_ndev))
-		return -ENODEV;
-
-	/* Avoid Bonding master dev with same MAC registering as VF */
-	if (netif_is_bond_master(event_ndev))
-		return -ENODEV;
-
-	return 0;
-}
-
 static int netvsc_probe(struct hv_device *dev,
 			const struct hv_vmbus_device_id *dev_id)
 {
-	struct net_device *net = NULL, *vf_netdev;
+	struct net_device *net = NULL;
 	struct net_device_context *net_device_ctx;
 	struct netvsc_device_info *device_info = NULL;
 	struct netvsc_device *nvdev;
@@ -2508,7 +2513,6 @@ static int netvsc_probe(struct hv_device *dev,
 	spin_lock_init(&net_device_ctx->lock);
 	INIT_LIST_HEAD(&net_device_ctx->reconfig_events);
 	INIT_DELAYED_WORK(&net_device_ctx->vf_takeover, netvsc_vf_setup);
-	INIT_DELAYED_WORK(&net_device_ctx->vfns_work, netvsc_vfns_work);
 
 	net_device_ctx->vf_stats
 		= netdev_alloc_pcpu_stats(struct netvsc_vf_pcpu_stats);
@@ -2588,30 +2592,6 @@ static int netvsc_probe(struct hv_device *dev,
 	}
 
 	list_add(&net_device_ctx->list, &netvsc_dev_list);
-
-	/* When the hv_netvsc driver is unloaded and reloaded, the
-	 * NET_DEVICE_REGISTER for the vf device is replayed before probe
-	 * is complete. This is because register_netdevice_notifier() gets
-	 * registered before vmbus_driver_register() so that callback func
-	 * is set before probe and we don't miss events like NETDEV_POST_INIT
-	 * So, in this section we try to register the matching vf device that
-	 * is present as a netdevice, knowing that its register call is not
-	 * processed in the netvsc_netdev_notifier(as probing is progress and
-	 * get_netvsc_byslot fails).
-	 */
-	for_each_netdev(dev_net(net), vf_netdev) {
-		ret = check_dev_is_matching_vf(vf_netdev);
-		if (ret != 0)
-			continue;
-
-		if (net != get_netvsc_byslot(vf_netdev))
-			continue;
-
-		netvsc_prepare_bonding(vf_netdev);
-		netvsc_register_vf(vf_netdev, VF_REG_IN_PROBE);
-		__netvsc_vf_setup(net, vf_netdev);
-		break;
-	}
 	rtnl_unlock();
 
 	netvsc_devinfo_put(device_info);
@@ -2648,8 +2628,6 @@ static int netvsc_remove(struct hv_device *dev)
 	cancel_delayed_work_sync(&ndev_ctx->dwork);
 
 	rtnl_lock();
-	cancel_delayed_work_sync(&ndev_ctx->vfns_work);
-
 	nvdev = rtnl_dereference(ndev_ctx->nvdev);
 	if (nvdev) {
 		cancel_work_sync(&nvdev->subchan_work);
@@ -2692,7 +2670,6 @@ static int netvsc_suspend(struct hv_device *dev)
 	cancel_delayed_work_sync(&ndev_ctx->dwork);
 
 	rtnl_lock();
-	cancel_delayed_work_sync(&ndev_ctx->vfns_work);
 
 	nvdev = rtnl_dereference(ndev_ctx->nvdev);
 	if (nvdev == NULL) {
@@ -2761,52 +2738,6 @@ static struct  hv_driver netvsc_drv = {
 	},
 };
 
-/* Set VF's namespace same as the synthetic NIC */
-static void netvsc_event_set_vf_ns(struct net_device *ndev)
-{
-	struct net_device_context *ndev_ctx = netdev_priv(ndev);
-	struct net_device *vf_netdev;
-	int ret;
-
-	vf_netdev = rtnl_dereference(ndev_ctx->vf_netdev);
-	if (!vf_netdev)
-		return;
-
-	if (!net_eq(dev_net(ndev), dev_net(vf_netdev))) {
-		ret = dev_change_net_namespace(vf_netdev, dev_net(ndev),
-					       "eth%d");
-		if (ret)
-			netdev_err(vf_netdev,
-				   "Cannot move to same namespace as %s: %d\n",
-				   ndev->name, ret);
-		else
-			netdev_info(vf_netdev,
-				    "Moved VF to namespace with: %s\n",
-				    ndev->name);
-	}
-}
-
-void netvsc_vfns_work(struct work_struct *w)
-{
-	struct net_device_context *ndev_ctx =
-		container_of(w, struct net_device_context, vfns_work.work);
-	struct net_device *ndev;
-
-	if (!rtnl_trylock()) {
-		schedule_delayed_work(&ndev_ctx->vfns_work, 1);
-		return;
-	}
-
-	ndev = hv_get_drvdata(ndev_ctx->device_ctx);
-	if (!ndev)
-		goto out;
-
-	netvsc_event_set_vf_ns(ndev);
-
-out:
-	rtnl_unlock();
-}
-
 /*
  * On Hyper-V, every VF interface is matched with a corresponding
  * synthetic interface. The synthetic interface is presented first
@@ -2817,24 +2748,28 @@ static int netvsc_netdev_event(struct notifier_block *this,
 			       unsigned long event, void *ptr)
 {
 	struct net_device *event_dev = netdev_notifier_info_to_dev(ptr);
-	struct net_device_context *ndev_ctx;
-	int ret = 0;
 
-	if (event_dev->netdev_ops == &device_ops && event == NETDEV_REGISTER) {
-		ndev_ctx = netdev_priv(event_dev);
-		schedule_delayed_work(&ndev_ctx->vfns_work, 0);
+	/* Skip our own events */
+	if (event_dev->netdev_ops == &device_ops)
 		return NOTIFY_DONE;
-	}
 
-	ret = check_dev_is_matching_vf(event_dev);
-	if (ret != 0)
+	/* Avoid non-Ethernet type devices */
+	if (event_dev->type != ARPHRD_ETHER)
+		return NOTIFY_DONE;
+
+	/* Avoid Vlan dev with same MAC registering as VF */
+	if (is_vlan_dev(event_dev))
+		return NOTIFY_DONE;
+
+	/* Avoid Bonding master dev with same MAC registering as VF */
+	if (netif_is_bond_master(event_dev))
 		return NOTIFY_DONE;
 
 	switch (event) {
 	case NETDEV_POST_INIT:
 		return netvsc_prepare_bonding(event_dev);
 	case NETDEV_REGISTER:
-		return netvsc_register_vf(event_dev, VF_REG_IN_NOTIFIER);
+		return netvsc_register_vf(event_dev);
 	case NETDEV_UNREGISTER:
 		return netvsc_unregister_vf(event_dev);
 	case NETDEV_UP:
@@ -2866,7 +2801,7 @@ static int __init netvsc_drv_init(void)
 		pr_info("Increased ring_size to %u (min allowed)\n",
 			ring_size);
 	}
-	netvsc_ring_bytes = VMBUS_RING_SIZE(ring_size * 4096);
+	netvsc_ring_bytes = ring_size * PAGE_SIZE;
 
 	register_netdevice_notifier(&netvsc_netdev_notifier);
 

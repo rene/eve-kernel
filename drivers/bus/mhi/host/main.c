@@ -268,8 +268,7 @@ static void mhi_del_ring_element(struct mhi_controller *mhi_cntrl,
 
 static bool is_valid_ring_ptr(struct mhi_ring *ring, dma_addr_t addr)
 {
-	return addr >= ring->iommu_base && addr < ring->iommu_base + ring->len &&
-			!(addr & (sizeof(struct mhi_ring_element) - 1));
+	return addr >= ring->iommu_base && addr < ring->iommu_base + ring->len;
 }
 
 int mhi_destroy_device(struct device *dev, void *data)
@@ -603,7 +602,7 @@ static int parse_xfer_event(struct mhi_controller *mhi_cntrl,
 	{
 		dma_addr_t ptr = MHI_TRE_GET_EV_PTR(event);
 		struct mhi_ring_element *local_rp, *ev_tre;
-		void *dev_rp, *next_rp;
+		void *dev_rp;
 		struct mhi_buf_info *buf_info;
 		u16 xfer_len;
 
@@ -622,16 +621,6 @@ static int parse_xfer_event(struct mhi_controller *mhi_cntrl,
 		result.dir = mhi_chan->dir;
 
 		local_rp = tre_ring->rp;
-
-		next_rp = local_rp + 1;
-		if (next_rp >= tre_ring->base + tre_ring->len)
-			next_rp = tre_ring->base;
-		if (dev_rp != next_rp && !MHI_TRE_DATA_GET_CHAIN(local_rp)) {
-			dev_err(&mhi_cntrl->mhi_dev->dev,
-				"Event element points to an unexpected TRE\n");
-			break;
-		}
-
 		while (local_rp != dev_rp) {
 			buf_info = buf_ring->rp;
 			/* If it's the last TRE, get length from the event */
@@ -652,8 +641,6 @@ static int parse_xfer_event(struct mhi_controller *mhi_cntrl,
 			mhi_del_ring_element(mhi_cntrl, buf_ring);
 			mhi_del_ring_element(mhi_cntrl, tre_ring);
 			local_rp = tre_ring->rp;
-
-			read_unlock_bh(&mhi_chan->lock);
 
 			/* notify client */
 			mhi_chan->xfer_cb(mhi_chan->mhi_dev, &result);
@@ -680,8 +667,6 @@ static int parse_xfer_event(struct mhi_controller *mhi_cntrl,
 					kfree(buf_info->cb_buf);
 				}
 			}
-
-			read_lock_bh(&mhi_chan->lock);
 		}
 		break;
 	} /* CC_EOT */
@@ -1134,15 +1119,17 @@ static int mhi_queue(struct mhi_device *mhi_dev, struct mhi_buf_info *buf_info,
 	if (unlikely(MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state)))
 		return -EIO;
 
+	read_lock_irqsave(&mhi_cntrl->pm_lock, flags);
+
 	ret = mhi_is_ring_full(mhi_cntrl, tre_ring);
-	if (unlikely(ret))
-		return -EAGAIN;
+	if (unlikely(ret)) {
+		ret = -EAGAIN;
+		goto exit_unlock;
+	}
 
 	ret = mhi_gen_tre(mhi_cntrl, mhi_chan, buf_info, mflags);
 	if (unlikely(ret))
-		return ret;
-
-	read_lock_irqsave(&mhi_cntrl->pm_lock, flags);
+		goto exit_unlock;
 
 	/* Packet is queued, take a usage ref to exit M3 if necessary
 	 * for host->device buffer, balanced put is done on buffer completion
@@ -1162,6 +1149,7 @@ static int mhi_queue(struct mhi_device *mhi_dev, struct mhi_buf_info *buf_info,
 	if (dir == DMA_FROM_DEVICE)
 		mhi_cntrl->runtime_put(mhi_cntrl);
 
+exit_unlock:
 	read_unlock_irqrestore(&mhi_cntrl->pm_lock, flags);
 
 	return ret;
@@ -1211,15 +1199,7 @@ int mhi_gen_tre(struct mhi_controller *mhi_cntrl, struct mhi_chan *mhi_chan,
 	struct mhi_ring_element *mhi_tre;
 	struct mhi_buf_info *buf_info;
 	int eot, eob, chain, bei;
-	int ret = 0;
-
-	/* Protect accesses for reading and incrementing WP */
-	write_lock_bh(&mhi_chan->lock);
-
-	if (mhi_chan->ch_state != MHI_CH_STATE_ENABLED) {
-		ret = -ENODEV;
-		goto out;
-	}
+	int ret;
 
 	buf_ring = &mhi_chan->buf_ring;
 	tre_ring = &mhi_chan->tre_ring;
@@ -1239,7 +1219,7 @@ int mhi_gen_tre(struct mhi_controller *mhi_cntrl, struct mhi_chan *mhi_chan,
 	if (!info->pre_mapped) {
 		ret = mhi_cntrl->map_single(mhi_cntrl, buf_info);
 		if (ret)
-			goto out;
+			return ret;
 	}
 
 	eob = !!(flags & MHI_EOB);
@@ -1256,10 +1236,7 @@ int mhi_gen_tre(struct mhi_controller *mhi_cntrl, struct mhi_chan *mhi_chan,
 	mhi_add_ring_element(mhi_cntrl, tre_ring);
 	mhi_add_ring_element(mhi_cntrl, buf_ring);
 
-out:
-	write_unlock_bh(&mhi_chan->lock);
-
-	return ret;
+	return 0;
 }
 
 int mhi_queue_buf(struct mhi_device *mhi_dev, enum dma_data_direction dir,

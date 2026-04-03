@@ -301,7 +301,7 @@ struct nf_bridge_info {
 	u8			bridged_dnat:1;
 	u8			sabotage_in_done:1;
 	__u16			frag_max_size;
-	int			physinif;
+	struct net_device	*physindev;
 
 	/* always valid & non-NULL from FORWARD on, for physdev match */
 	struct net_device	*physoutdev;
@@ -635,7 +635,6 @@ struct skb_shared_info {
 #define SKB_DATAREF_SHIFT 16
 #define SKB_DATAREF_MASK ((1 << SKB_DATAREF_SHIFT) - 1)
 
-
 enum {
 	SKB_FCLONE_UNAVAILABLE,	/* skb has no fclone (from head_cache) */
 	SKB_FCLONE_ORIG,	/* orig skb (from fclone_cache) */
@@ -745,6 +744,8 @@ typedef unsigned char *sk_buff_data_t;
  *	@list: queue head
  *	@ll_node: anchor in an llist (eg socket defer_list)
  *	@sk: Socket we are owned by
+ *	@ip_defrag_offset: (aka @sk) alternate use of @sk, used in
+ *		fragmentation management
  *	@dev: Device we arrived on/are leaving by
  *	@dev_scratch: (aka @dev) alternate use of @dev when @dev would be %NULL
  *	@cb: Control buffer. Free for use by every layer. Put private vars here
@@ -868,7 +869,10 @@ struct sk_buff {
 		struct llist_node	ll_node;
 	};
 
-	struct sock		*sk;
+	union {
+		struct sock		*sk;
+		int			ip_defrag_offset;
+	};
 
 	union {
 		ktime_t		tstamp;
@@ -1788,7 +1792,6 @@ static inline bool skb_queue_empty_lockless(const struct sk_buff_head *list)
 	return READ_ONCE(list->next) == (const struct sk_buff *) list;
 }
 
-
 /**
  *	skb_queue_is_last - check if skb is the last entry in the queue
  *	@list: queue head
@@ -1948,7 +1951,6 @@ static inline void __skb_header_release(struct sk_buff *skb)
 	skb->nohdr = 1;
 	atomic_set(&skb_shinfo(skb)->dataref, 1 + (1 << SKB_DATAREF_SHIFT));
 }
-
 
 /**
  *	skb_shared - is the buffer shared
@@ -2372,7 +2374,6 @@ static inline struct sk_buff *__skb_dequeue_tail(struct sk_buff_head *list)
 }
 struct sk_buff *skb_dequeue_tail(struct sk_buff_head *list);
 
-
 static inline bool skb_is_nonlinear(const struct sk_buff *skb)
 {
 	return skb->data_len;
@@ -2603,8 +2604,6 @@ static inline void skb_put_u8(struct sk_buff *skb, u8 val)
 void *skb_push(struct sk_buff *skb, unsigned int len);
 static inline void *__skb_push(struct sk_buff *skb, unsigned int len)
 {
-	DEBUG_NET_WARN_ON_ONCE(len > INT_MAX);
-
 	skb->data -= len;
 	skb->len  += len;
 	return skb->data;
@@ -2613,8 +2612,6 @@ static inline void *__skb_push(struct sk_buff *skb, unsigned int len)
 void *skb_pull(struct sk_buff *skb, unsigned int len);
 static inline void *__skb_pull(struct sk_buff *skb, unsigned int len)
 {
-	DEBUG_NET_WARN_ON_ONCE(len > INT_MAX);
-
 	skb->len -= len;
 	if (unlikely(skb->len < skb->data_len)) {
 #if defined(CONFIG_DEBUG_NET)
@@ -2636,26 +2633,13 @@ void *skb_pull_data(struct sk_buff *skb, size_t len);
 
 void *__pskb_pull_tail(struct sk_buff *skb, int delta);
 
-static inline enum skb_drop_reason
-pskb_may_pull_reason(struct sk_buff *skb, unsigned int len)
-{
-	DEBUG_NET_WARN_ON_ONCE(len > INT_MAX);
-
-	if (likely(len <= skb_headlen(skb)))
-		return SKB_NOT_DROPPED_YET;
-
-	if (unlikely(len > skb->len))
-		return SKB_DROP_REASON_PKT_TOO_SMALL;
-
-	if (unlikely(!__pskb_pull_tail(skb, len - skb_headlen(skb))))
-		return SKB_DROP_REASON_NOMEM;
-
-	return SKB_NOT_DROPPED_YET;
-}
-
 static inline bool pskb_may_pull(struct sk_buff *skb, unsigned int len)
 {
-	return pskb_may_pull_reason(skb, len) == SKB_NOT_DROPPED_YET;
+	if (likely(len <= skb_headlen(skb)))
+		return true;
+	if (unlikely(len > skb->len))
+		return false;
+	return __pskb_pull_tail(skb, len - skb_headlen(skb)) != NULL;
 }
 
 static inline void *pskb_pull(struct sk_buff *skb, unsigned int len)
@@ -2813,11 +2797,6 @@ static inline void skb_set_inner_network_header(struct sk_buff *skb,
 	skb->inner_network_header += offset;
 }
 
-static inline bool skb_inner_network_header_was_set(const struct sk_buff *skb)
-{
-	return skb->inner_network_header > 0;
-}
-
 static inline unsigned char *skb_inner_mac_header(const struct sk_buff *skb)
 {
 	return skb->head + skb->inner_mac_header;
@@ -2848,29 +2827,6 @@ static inline unsigned char *skb_transport_header(const struct sk_buff *skb)
 static inline void skb_reset_transport_header(struct sk_buff *skb)
 {
 	skb->transport_header = skb->data - skb->head;
-}
-
-/**
- * skb_reset_transport_header_careful - conditionally reset transport header
- * @skb: buffer to alter
- *
- * Hardened version of skb_reset_transport_header().
- *
- * Returns: true if the operation was a success.
- */
-static inline bool __must_check
-skb_reset_transport_header_careful(struct sk_buff *skb)
-{
-	long offset = skb->data - skb->head;
-
-	if (unlikely(offset != (typeof(skb->transport_header))offset))
-		return false;
-
-	if (unlikely(offset == (typeof(skb->transport_header))~0U))
-		return false;
-
-	skb->transport_header = offset;
-	return true;
 }
 
 static inline void skb_set_transport_header(struct sk_buff *skb,
@@ -2958,21 +2914,6 @@ static inline void skb_mac_header_rebuild(struct sk_buff *skb)
 
 		skb_set_mac_header(skb, -skb->mac_len);
 		memmove(skb_mac_header(skb), old_mac, skb->mac_len);
-	}
-}
-
-/* Move the full mac header up to current network_header.
- * Leaves skb->data pointing at offset skb->mac_len into the mac_header.
- * Must be provided the complete mac header length.
- */
-static inline void skb_mac_header_rebuild_full(struct sk_buff *skb, u32 full_mac_len)
-{
-	if (skb_mac_header_was_set(skb)) {
-		const unsigned char *old_mac = skb_mac_header(skb);
-
-		skb_set_mac_header(skb, -full_mac_len);
-		memmove(skb_mac_header(skb), old_mac, full_mac_len);
-		__skb_push(skb, full_mac_len - skb->mac_len);
 	}
 }
 
@@ -3242,7 +3183,6 @@ static inline struct sk_buff *dev_alloc_skb(unsigned int length)
 	return netdev_alloc_skb(NULL, length);
 }
 
-
 static inline struct sk_buff *__netdev_alloc_skb_ip_align(struct net_device *dev,
 		unsigned int length, gfp_t gfp)
 {
@@ -3428,6 +3368,18 @@ static inline void __skb_frag_ref(skb_frag_t *frag)
 	get_page(skb_frag_page(frag));
 }
 
+bool napi_pp_put_page(struct page *page, bool napi_safe);
+
+static inline void
+skb_page_unref(const struct sk_buff *skb, struct page *page, bool napi_safe)
+{
+#ifdef CONFIG_PAGE_POOL
+	if (skb->pp_recycle && napi_pp_put_page(page, napi_safe))
+		return;
+#endif
+	put_page(page);
+}
+
 /**
  * skb_frag_ref - take an addition reference on a paged fragment of an skb.
  * @skb: the buffer
@@ -3495,13 +3447,7 @@ static inline void *skb_frag_address(const skb_frag_t *frag)
  */
 static inline void *skb_frag_address_safe(const skb_frag_t *frag)
 {
-	struct page *page = skb_frag_page(frag);
-	void *ptr;
-
-	if (!page)
-		return NULL;
-
-	ptr = page_address(page);
+	void *ptr = page_address(skb_frag_page(frag));
 	if (unlikely(!ptr))
 		return NULL;
 
@@ -3573,13 +3519,11 @@ static inline struct sk_buff *pskb_copy(struct sk_buff *skb,
 	return __pskb_copy(skb, skb_headroom(skb), gfp_mask);
 }
 
-
 static inline struct sk_buff *pskb_copy_for_clone(struct sk_buff *skb,
 						  gfp_t gfp_mask)
 {
 	return __pskb_copy_fclone(skb, skb_headroom(skb), gfp_mask, true);
 }
-
 
 /**
  *	skb_clone_writable - is the header of a clone writable
@@ -3957,7 +3901,6 @@ static inline void skb_frag_list_init(struct sk_buff *skb)
 
 #define skb_walk_frags(skb, iter)	\
 	for (iter = skb_shinfo(skb)->frag_list; iter; iter = iter->next)
-
 
 int __skb_wait_for_more_packets(struct sock *sk, struct sk_buff_head *queue,
 				int *err, long *timeo_p,

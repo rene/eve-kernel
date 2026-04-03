@@ -126,12 +126,6 @@ struct nf_conn {
 };
 
 static inline struct nf_conn *
-nf_ct_to_nf_conn(const struct nf_conntrack *nfct)
-{
-	return container_of(nfct, struct nf_conn, ct_general);
-}
-
-static inline struct nf_conn *
 nf_ct_tuplehash_to_ctrack(const struct nf_conntrack_tuple_hash *hash)
 {
 	return container_of(hash, struct nf_conn,
@@ -180,8 +174,6 @@ nf_ct_get(const struct sk_buff *skb, enum ip_conntrack_info *ctinfo)
 }
 
 void nf_ct_destroy(struct nf_conntrack *nfct);
-
-void nf_conntrack_tcp_set_closing(struct nf_conn *ct);
 
 /* decrement reference count on a conntrack */
 static inline void nf_ct_put(struct nf_conn *ct)
@@ -306,19 +298,8 @@ static inline bool nf_ct_is_expired(const struct nf_conn *ct)
 /* use after obtaining a reference count */
 static inline bool nf_ct_should_gc(const struct nf_conn *ct)
 {
-	if (!nf_ct_is_confirmed(ct))
-		return false;
-
-	/* load ct->timeout after is_confirmed() test.
-	 * Pairs with __nf_conntrack_confirm() which:
-	 * 1. Increases ct->timeout value
-	 * 2. Inserts ct into rcu hlist
-	 * 3. Sets the confirmed bit
-	 * 4. Unlocks the hlist lock
-	 */
-	smp_acquire__after_ctrl_dep();
-
-	return nf_ct_is_expired(ct) && !nf_ct_is_dying(ct);
+	return nf_ct_is_expired(ct) && nf_ct_is_confirmed(ct) &&
+	       !nf_ct_is_dying(ct);
 }
 
 #define	NF_CT_DAY	(86400 * HZ)

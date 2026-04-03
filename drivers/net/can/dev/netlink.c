@@ -252,12 +252,6 @@ static int can_changelink(struct net_device *dev, struct nlattr *tb[],
 	}
 
 	if (data[IFLA_CAN_RESTART_MS]) {
-		if (!priv->do_set_mode) {
-			NL_SET_ERR_MSG(extack,
-				       "Device doesn't support restart from Bus Off");
-			return -EOPNOTSUPP;
-		}
-
 		/* Do not allow changing restart delay while running */
 		if (dev->flags & IFF_UP)
 			return -EBUSY;
@@ -265,12 +259,6 @@ static int can_changelink(struct net_device *dev, struct nlattr *tb[],
 	}
 
 	if (data[IFLA_CAN_RESTART]) {
-		if (!priv->do_set_mode) {
-			NL_SET_ERR_MSG(extack,
-				       "Device doesn't support restart from Bus Off");
-			return -EOPNOTSUPP;
-		}
-
 		/* Do not allow a restart while not running */
 		if (!(dev->flags & IFF_UP))
 			return -EINVAL;
@@ -323,7 +311,7 @@ static int can_changelink(struct net_device *dev, struct nlattr *tb[],
 			/* Neither of TDC parameters nor TDC flags are
 			 * provided: do calculation
 			 */
-			can_calc_tdco(&priv->tdc, priv->tdc_const, &dbt,
+			can_calc_tdco(&priv->tdc, priv->tdc_const, &priv->data_bittiming,
 				      &priv->ctrlmode, priv->ctrlmode_supported);
 		} /* else: both CAN_CTRLMODE_TDC_{AUTO,MANUAL} are explicitly
 		   * turned off. TDC is disabled: do nothing

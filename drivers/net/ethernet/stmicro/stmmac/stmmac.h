@@ -236,7 +236,6 @@ struct stmmac_priv {
 
 	struct phylink_config phylink_config;
 	struct phylink *phylink;
-	bool is_phy_started;
 
 	struct stmmac_extra_stats xstats ____cacheline_aligned_in_smp;
 	struct stmmac_safety_stats sstats;
@@ -248,7 +247,6 @@ struct stmmac_priv {
 	u32 msg_enable;
 	int wolopts;
 	int wol_irq;
-	bool wol_irq_disabled;
 	int clk_csr;
 	struct timer_list eee_ctrl_timer;
 	int lpi_irq;

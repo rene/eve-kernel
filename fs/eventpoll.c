@@ -216,7 +216,6 @@ struct eventpoll {
 	/* used to optimize loop detection check */
 	u64 gen;
 	struct hlist_head refs;
-	u8 loop_check_depth;
 
 #ifdef CONFIG_NET_RX_BUSY_POLL
 	/* used to track busy poll napi_id */
@@ -704,8 +703,7 @@ static int ep_remove(struct eventpoll *ep, struct epitem *epi)
 	to_free = NULL;
 	head = file->f_ep;
 	if (head->first == &epi->fllink && !epi->fllink.next) {
-		/* See eventpoll_release() for details. */
-		WRITE_ONCE(file->f_ep, NULL);
+		file->f_ep = NULL;
 		if (!is_file_epoll(file)) {
 			struct epitems_head *v;
 			v = container_of(head, struct epitems_head, epitems);
@@ -842,34 +840,6 @@ static __poll_t __ep_eventpoll_poll(struct file *file, poll_table *wait, int dep
 }
 
 /*
- * The ffd.file pointer may be in the process of being torn down due to
- * being closed, but we may not have finished eventpoll_release() yet.
- *
- * Normally, even with the atomic_long_inc_not_zero, the file may have
- * been free'd and then gotten re-allocated to something else (since
- * files are not RCU-delayed, they are SLAB_TYPESAFE_BY_RCU).
- *
- * But for epoll, users hold the ep->mtx mutex, and as such any file in
- * the process of being free'd will block in eventpoll_release_file()
- * and thus the underlying file allocation will not be free'd, and the
- * file re-use cannot happen.
- *
- * For the same reason we can avoid a rcu_read_lock() around the
- * operation - 'ffd.file' cannot go away even if the refcount has
- * reached zero (but we must still not call out to ->poll() functions
- * etc).
- */
-static struct file *epi_fget(const struct epitem *epi)
-{
-	struct file *file;
-
-	file = epi->ffd.file;
-	if (!atomic_long_inc_not_zero(&file->f_count))
-		file = NULL;
-	return file;
-}
-
-/*
  * Differs from ep_eventpoll_poll() in that internal callers already have
  * the ep->mtx so we need to start from depth=1, such that mutex_lock_nested()
  * is correctly annotated.
@@ -877,22 +847,14 @@ static struct file *epi_fget(const struct epitem *epi)
 static __poll_t ep_item_poll(const struct epitem *epi, poll_table *pt,
 				 int depth)
 {
-	struct file *file = epi_fget(epi);
+	struct file *file = epi->ffd.file;
 	__poll_t res;
-
-	/*
-	 * We could return EPOLLERR | EPOLLHUP or something, but let's
-	 * treat this more as "file doesn't exist, poll didn't happen".
-	 */
-	if (!file)
-		return 0;
 
 	pt->_key = epi->event.events;
 	if (!is_file_epoll(file))
 		res = vfs_poll(file, pt);
 	else
 		res = __ep_eventpoll_poll(file, pt, depth);
-	fput(file);
 	return res & epi->event.events;
 }
 
@@ -1238,10 +1200,7 @@ static int ep_poll_callback(wait_queue_entry_t *wait, unsigned mode, int sync, v
 				break;
 			}
 		}
-		if (sync)
-			wake_up_sync(&ep->wq);
-		else
-			wake_up(&ep->wq);
+		wake_up(&ep->wq);
 	}
 	if (waitqueue_active(&ep->poll_wait))
 		pwake++;
@@ -1472,8 +1431,7 @@ allocate:
 			spin_unlock(&file->f_lock);
 			goto allocate;
 		}
-		/* See eventpoll_release() for details. */
-		WRITE_ONCE(file->f_ep, head);
+		file->f_ep = head;
 		to_free = NULL;
 	}
 	hlist_add_head_rcu(&epi->fllink, file->f_ep);
@@ -1952,23 +1910,22 @@ static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
 }
 
 /**
- * ep_loop_check_proc - verify that adding an epoll file @ep inside another
- *                      epoll file does not create closed loops, and
- *                      determine the depth of the subtree starting at @ep
+ * ep_loop_check_proc - verify that adding an epoll file inside another
+ *                      epoll structure does not violate the constraints, in
+ *                      terms of closed loops, or too deep chains (which can
+ *                      result in excessive stack usage).
  *
  * @ep: the &struct eventpoll to be currently checked.
  * @depth: Current depth of the path being checked.
  *
- * Return: depth of the subtree, or INT_MAX if we found a loop or went too deep.
+ * Return: %zero if adding the epoll @file inside current epoll
+ *          structure @ep does not violate the constraints, or %-1 otherwise.
  */
 static int ep_loop_check_proc(struct eventpoll *ep, int depth)
 {
-	int result = 0;
+	int error = 0;
 	struct rb_node *rbp;
 	struct epitem *epi;
-
-	if (ep->gen == loop_check_gen)
-		return ep->loop_check_depth;
 
 	mutex_lock_nested(&ep->mtx, depth + 1);
 	ep->gen = loop_check_gen;
@@ -1977,11 +1934,13 @@ static int ep_loop_check_proc(struct eventpoll *ep, int depth)
 		if (unlikely(is_file_epoll(epi->ffd.file))) {
 			struct eventpoll *ep_tovisit;
 			ep_tovisit = epi->ffd.file->private_data;
+			if (ep_tovisit->gen == loop_check_gen)
+				continue;
 			if (ep_tovisit == inserting_into || depth > EP_MAX_NESTS)
-				result = INT_MAX;
+				error = -1;
 			else
-				result = max(result, ep_loop_check_proc(ep_tovisit, depth + 1) + 1);
-			if (result > EP_MAX_NESTS)
+				error = ep_loop_check_proc(ep_tovisit, depth + 1);
+			if (error != 0)
 				break;
 		} else {
 			/*
@@ -1995,27 +1954,9 @@ static int ep_loop_check_proc(struct eventpoll *ep, int depth)
 			list_file(epi->ffd.file);
 		}
 	}
-	ep->loop_check_depth = result;
 	mutex_unlock(&ep->mtx);
 
-	return result;
-}
-
-/**
- * ep_get_upwards_depth_proc - determine depth of @ep when traversed upwards
- */
-static int ep_get_upwards_depth_proc(struct eventpoll *ep, int depth)
-{
-	int result = 0;
-	struct epitem *epi;
-
-	if (ep->gen == loop_check_gen)
-		return ep->loop_check_depth;
-	hlist_for_each_entry_rcu(epi, &ep->refs, fllink)
-		result = max(result, ep_get_upwards_depth_proc(epi->ep, depth + 1) + 1);
-	ep->gen = loop_check_gen;
-	ep->loop_check_depth = result;
-	return result;
+	return error;
 }
 
 /**
@@ -2031,22 +1972,8 @@ static int ep_get_upwards_depth_proc(struct eventpoll *ep, int depth)
  */
 static int ep_loop_check(struct eventpoll *ep, struct eventpoll *to)
 {
-	int depth, upwards_depth;
-
 	inserting_into = ep;
-	/*
-	 * Check how deep down we can get from @to, and whether it is possible
-	 * to loop up to @ep.
-	 */
-	depth = ep_loop_check_proc(to, 0);
-	if (depth > EP_MAX_NESTS)
-		return -1;
-	/* Check how far up we can go from @ep. */
-	rcu_read_lock();
-	upwards_depth = ep_get_upwards_depth_proc(ep, 0);
-	rcu_read_unlock();
-
-	return (depth+1+upwards_depth > EP_MAX_NESTS) ? -1 : 0;
+	return ep_loop_check_proc(to, 0);
 }
 
 static void clear_tfile_check_list(void)

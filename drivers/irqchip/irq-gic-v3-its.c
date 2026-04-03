@@ -783,7 +783,6 @@ static struct its_vpe *its_build_vmapp_cmd(struct its_node *its,
 					   struct its_cmd_block *cmd,
 					   struct its_cmd_desc *desc)
 {
-	struct its_vpe *vpe = valid_vpe(its, desc->its_vmapp_cmd.vpe);
 	unsigned long vpt_addr, vconf_addr;
 	u64 target;
 	bool alloc;
@@ -793,14 +792,9 @@ static struct its_vpe *its_build_vmapp_cmd(struct its_node *its,
 	its_encode_valid(cmd, desc->its_vmapp_cmd.valid);
 
 	if (!desc->its_vmapp_cmd.valid) {
-		alloc = !atomic_dec_return(&desc->its_vmapp_cmd.vpe->vmapp_count);
 		if (is_v4_1(its)) {
+			alloc = !atomic_dec_return(&desc->its_vmapp_cmd.vpe->vmapp_count);
 			its_encode_alloc(cmd, alloc);
-			/*
-			 * Unmapping a VPE is self-synchronizing on GICv4.1,
-			 * no need to issue a VSYNC.
-			 */
-			vpe = NULL;
 		}
 
 		goto out;
@@ -813,12 +807,12 @@ static struct its_vpe *its_build_vmapp_cmd(struct its_node *its,
 	its_encode_vpt_addr(cmd, vpt_addr);
 	its_encode_vpt_size(cmd, LPI_NRBITS - 1);
 
-	alloc = !atomic_fetch_inc(&desc->its_vmapp_cmd.vpe->vmapp_count);
-
 	if (!is_v4_1(its))
 		goto out;
 
 	vconf_addr = virt_to_phys(page_address(desc->its_vmapp_cmd.vpe->its_vm->vprop_page));
+
+	alloc = !atomic_fetch_inc(&desc->its_vmapp_cmd.vpe->vmapp_count);
 
 	its_encode_alloc(cmd, alloc);
 
@@ -835,7 +829,7 @@ static struct its_vpe *its_build_vmapp_cmd(struct its_node *its,
 out:
 	its_fixup_cmd(cmd);
 
-	return vpe;
+	return valid_vpe(its, desc->its_vmapp_cmd.vpe);
 }
 
 static struct its_vpe *its_build_vmapti_cmd(struct its_node *its,
@@ -1580,106 +1574,15 @@ static void its_dec_lpi_count(struct irq_data *d, int cpu)
 		atomic_dec(&per_cpu_ptr(&cpu_lpi_count, cpu)->unmanaged);
 }
 
-static unsigned int cpumask_pick_least_loaded(struct irq_data *d,
-					      const struct cpumask *cpu_mask)
-{
-	unsigned int cpu = nr_cpu_ids, tmp;
-	int count = S32_MAX;
-
-	for_each_cpu(tmp, cpu_mask) {
-		int this_count = its_read_lpi_count(d, tmp);
-		if (this_count < count) {
-			cpu = tmp;
-		        count = this_count;
-		}
-	}
-
-	return cpu;
-}
-
-/*
- * As suggested by Thomas Gleixner in:
- * https://lore.kernel.org/r/87h80q2aoc.fsf@nanos.tec.linutronix.de
- */
-static int its_select_cpu(struct irq_data *d,
-			  const struct cpumask *aff_mask)
-{
-	struct its_device *its_dev = irq_data_get_irq_chip_data(d);
-	static DEFINE_RAW_SPINLOCK(tmpmask_lock);
-	static struct cpumask __tmpmask;
-	struct cpumask *tmpmask;
-	unsigned long flags;
-	int cpu, node;
-	node = its_dev->its->numa_node;
-	tmpmask = &__tmpmask;
-
-	raw_spin_lock_irqsave(&tmpmask_lock, flags);
-
-	if (!irqd_affinity_is_managed(d)) {
-		/* First try the NUMA node */
-		if (node != NUMA_NO_NODE) {
-			/*
-			 * Try the intersection of the affinity mask and the
-			 * node mask (and the online mask, just to be safe).
-			 */
-			cpumask_and(tmpmask, cpumask_of_node(node), aff_mask);
-			cpumask_and(tmpmask, tmpmask, cpu_online_mask);
-
-			/*
-			 * Ideally, we would check if the mask is empty, and
-			 * try again on the full node here.
-			 *
-			 * But it turns out that the way ACPI describes the
-			 * affinity for ITSs only deals about memory, and
-			 * not target CPUs, so it cannot describe a single
-			 * ITS placed next to two NUMA nodes.
-			 *
-			 * Instead, just fallback on the online mask. This
-			 * diverges from Thomas' suggestion above.
-			 */
-			cpu = cpumask_pick_least_loaded(d, tmpmask);
-			if (cpu < nr_cpu_ids)
-				goto out;
-
-			/* If we can't cross sockets, give up */
-			if ((its_dev->its->flags & ITS_FLAGS_WORKAROUND_CAVIUM_23144))
-				goto out;
-
-			/* If the above failed, expand the search */
-		}
-
-		/* Try the intersection of the affinity and online masks */
-		cpumask_and(tmpmask, aff_mask, cpu_online_mask);
-
-		/* If that doesn't fly, the online mask is the last resort */
-		if (cpumask_empty(tmpmask))
-			cpumask_copy(tmpmask, cpu_online_mask);
-
-		cpu = cpumask_pick_least_loaded(d, tmpmask);
-	} else {
-		cpumask_copy(tmpmask, aff_mask);
-
-		/* If we cannot cross sockets, limit the search to that node */
-		if ((its_dev->its->flags & ITS_FLAGS_WORKAROUND_CAVIUM_23144) &&
-		    node != NUMA_NO_NODE)
-			cpumask_and(tmpmask, tmpmask, cpumask_of_node(node));
-
-		cpu = cpumask_pick_least_loaded(d, tmpmask);
-	}
-out:
-	raw_spin_unlock_irqrestore(&tmpmask_lock, flags);
-
-	pr_debug("IRQ%d -> %*pbl CPU%d\n", d->irq, cpumask_pr_args(aff_mask), cpu);
-	return cpu;
-}
-
 static int its_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 			    bool force)
 {
+	unsigned int cpu;
+	const struct cpumask *cpu_mask = cpu_online_mask;
 	struct its_device *its_dev = irq_data_get_irq_chip_data(d);
 	struct its_collection *target_col;
 	u32 id = its_get_event_id(d);
-	int cpu, prev_cpu;
+	int prev_cpu;
 
 	/* A forwarded interrupt should use irq_set_vcpu_affinity */
 	if (irqd_is_forwarded_to_vcpu(d))
@@ -1688,12 +1591,18 @@ static int its_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 	prev_cpu = its_dev->event_map.col_map[id];
 	its_dec_lpi_count(d, prev_cpu);
 
-	if (!force)
-		cpu = its_select_cpu(d, mask_val);
-	else
-		cpu = cpumask_pick_least_loaded(d, mask_val);
+       /* lpi cannot be routed to a redistributor that is on a foreign node */
+	if (its_dev->its->flags & ITS_FLAGS_WORKAROUND_CAVIUM_23144) {
+		if (its_dev->its->numa_node >= 0) {
+			cpu_mask = cpumask_of_node(its_dev->its->numa_node);
+			if (!cpumask_intersects(mask_val, cpu_mask))
+				goto err;
+		}
+	}
 
-	if (cpu < 0 || cpu >= nr_cpu_ids)
+	cpu = cpumask_any_and(mask_val, cpu_mask);
+
+	if (cpu >= nr_cpu_ids)
 		goto err;
 
 	/* don't set the affinity when the target cpu is same as current one */
@@ -1843,22 +1752,28 @@ static int its_vlpi_map(struct irq_data *d, struct its_cmd_info *info)
 {
 	struct its_device *its_dev = irq_data_get_irq_chip_data(d);
 	u32 event = its_get_event_id(d);
+	int ret = 0;
 
 	if (!info->map)
 		return -EINVAL;
+
+	raw_spin_lock(&its_dev->event_map.vlpi_lock);
 
 	if (!its_dev->event_map.vm) {
 		struct its_vlpi_map *maps;
 
 		maps = kcalloc(its_dev->event_map.nr_lpis, sizeof(*maps),
 			       GFP_ATOMIC);
-		if (!maps)
-			return -ENOMEM;
+		if (!maps) {
+			ret = -ENOMEM;
+			goto out;
+		}
 
 		its_dev->event_map.vm = info->map->vm;
 		its_dev->event_map.vlpi_maps = maps;
 	} else if (its_dev->event_map.vm != info->map->vm) {
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out;
 	}
 
 	/* Get our private copy of the mapping information */
@@ -1890,32 +1805,46 @@ static int its_vlpi_map(struct irq_data *d, struct its_cmd_info *info)
 		its_dev->event_map.nr_vlpis++;
 	}
 
-	return 0;
+out:
+	raw_spin_unlock(&its_dev->event_map.vlpi_lock);
+	return ret;
 }
 
 static int its_vlpi_get(struct irq_data *d, struct its_cmd_info *info)
 {
 	struct its_device *its_dev = irq_data_get_irq_chip_data(d);
 	struct its_vlpi_map *map;
+	int ret = 0;
+
+	raw_spin_lock(&its_dev->event_map.vlpi_lock);
 
 	map = get_vlpi_map(d);
 
-	if (!its_dev->event_map.vm || !map)
-		return -EINVAL;
+	if (!its_dev->event_map.vm || !map) {
+		ret = -EINVAL;
+		goto out;
+	}
 
 	/* Copy our mapping information to the incoming request */
 	*info->map = *map;
 
-	return 0;
+out:
+	raw_spin_unlock(&its_dev->event_map.vlpi_lock);
+	return ret;
 }
 
 static int its_vlpi_unmap(struct irq_data *d)
 {
 	struct its_device *its_dev = irq_data_get_irq_chip_data(d);
 	u32 event = its_get_event_id(d);
+	int ret = 0;
 
-	if (!its_dev->event_map.vm || !irqd_is_forwarded_to_vcpu(d))
-		return -EINVAL;
+	raw_spin_lock(&its_dev->event_map.vlpi_lock);
+
+	if (!its_dev->event_map.vm || !irqd_is_forwarded_to_vcpu(d)) {
+		ret = -EINVAL;
+		goto out;
+	}
 
 	/* Drop the virtual mapping */
 	its_send_discard(its_dev, event);
@@ -1939,7 +1868,9 @@ static int its_vlpi_unmap(struct irq_data *d)
 		kfree(its_dev->event_map.vlpi_maps);
 	}
 
-	return 0;
+out:
+	raw_spin_unlock(&its_dev->event_map.vlpi_lock);
+	return ret;
 }
 
 static int its_vlpi_prop_update(struct irq_data *d, struct its_cmd_info *info)
@@ -1966,8 +1897,6 @@ static int its_irq_set_vcpu_affinity(struct irq_data *d, void *vcpu_info)
 	/* Need a v4 ITS */
 	if (!is_v4(its_dev->its))
 		return -EINVAL;
-
-	guard(raw_spinlock)(&its_dev->event_map.vlpi_lock);
 
 	/* Unmap request? */
 	if (!info)
@@ -3147,7 +3076,6 @@ static void its_cpu_init_lpis(void)
 	val |= GICR_CTLR_ENABLE_LPIS;
 	writel_relaxed(val, rbase + GICR_CTLR);
 
-out:
 	if (gic_rdists->has_vlpis && !gic_rdists->has_rvpeid) {
 		void __iomem *vlpi_base = gic_data_rdist_vlpi_base();
 
@@ -3183,6 +3111,7 @@ out:
 
 	/* Make sure the GIC has seen the above */
 	dsb(sy);
+out:
 	gic_data_rdist()->flags |= RD_LOCAL_LPI_ENABLED;
 	pr_info("GICv3: CPU%d: using %s LPI pending table @%pa\n",
 		smp_processor_id(),
@@ -3538,20 +3467,15 @@ static int its_irq_gic_domain_alloc(struct irq_domain *domain,
 {
 	struct irq_fwspec fwspec;
 
-	if (irq_domain_get_of_node(domain->parent)) {
-		fwspec.fwnode = domain->parent->fwnode;
-		fwspec.param_count = 3;
-		fwspec.param[0] = GIC_IRQ_TYPE_LPI;
-		fwspec.param[1] = hwirq;
-		fwspec.param[2] = IRQ_TYPE_EDGE_RISING;
-	} else if (is_fwnode_irqchip(domain->parent->fwnode)) {
-		fwspec.fwnode = domain->parent->fwnode;
-		fwspec.param_count = 2;
-		fwspec.param[0] = hwirq;
-		fwspec.param[1] = IRQ_TYPE_EDGE_RISING;
-	} else {
+	if (!irq_domain_get_of_node(domain->parent) &&
+	    !is_fwnode_irqchip(domain->parent->fwnode))
 		return -EINVAL;
-	}
+
+	fwspec.fwnode = domain->parent->fwnode;
+	fwspec.param_count = 3;
+	fwspec.param[0] = GIC_IRQ_TYPE_LPI;
+	fwspec.param[1] = hwirq;
+	fwspec.param[2] = IRQ_TYPE_EDGE_RISING;
 
 	return irq_domain_alloc_irqs_parent(domain, virq, 1, &fwspec);
 }
@@ -3598,11 +3522,21 @@ static int its_irq_domain_activate(struct irq_domain *domain,
 {
 	struct its_device *its_dev = irq_data_get_irq_chip_data(d);
 	u32 event = its_get_event_id(d);
+	const struct cpumask *cpu_mask = cpu_online_mask;
 	int cpu;
 
-	cpu = its_select_cpu(d, cpu_online_mask);
-	if (cpu < 0 || cpu >= nr_cpu_ids)
-		return -EINVAL;
+	/* get the cpu_mask of local node */
+	if (its_dev->its->numa_node >= 0)
+		cpu_mask = cpumask_of_node(its_dev->its->numa_node);
+
+	/* Bind the LPI to the first possible CPU */
+	cpu = cpumask_first_and(cpu_mask, cpu_online_mask);
+	if (cpu >= nr_cpu_ids) {
+		if (its_dev->its->flags & ITS_FLAGS_WORKAROUND_CAVIUM_23144)
+			return -EINVAL;
+
+		cpu = cpumask_first(cpu_online_mask);
+	}
 
 	its_inc_lpi_count(d, cpu);
 	its_dev->event_map.col_map[event] = cpu;
@@ -3791,16 +3725,8 @@ static int its_vpe_set_affinity(struct irq_data *d,
 				bool force)
 {
 	struct its_vpe *vpe = irq_data_get_irq_chip_data(d);
-	struct cpumask common, *table_mask;
+	int from, cpu = cpumask_first(mask_val);
 	unsigned long flags;
-	int from, cpu;
-
-	/*
-	 * Check if we're racing against a VPE being destroyed, for
-	 * which we don't want to allow a VMOVP.
-	 */
-	if (!atomic_read(&vpe->vmapp_count))
-		return -EINVAL;
 
 	/*
 	 * Changing affinity is mega expensive, so let's be as lazy as
@@ -3816,21 +3742,18 @@ static int its_vpe_set_affinity(struct irq_data *d,
 	 * taken on any vLPI handling path that evaluates vpe->col_idx.
 	 */
 	from = vpe_to_cpuid_lock(vpe, &flags);
-	table_mask = gic_data_rdist_cpu(from)->vpe_table_mask;
-
-	/*
-	 * If we are offered another CPU in the same GICv4.1 ITS
-	 * affinity, pick this one. Otherwise, any CPU will do.
-	 */
-	if (table_mask && cpumask_and(&common, mask_val, table_mask))
-		cpu = cpumask_test_cpu(from, &common) ? from : cpumask_first(&common);
-	else
-		cpu = cpumask_first(mask_val);
-
 	if (from == cpu)
 		goto out;
 
 	vpe->col_idx = cpu;
+
+	/*
+	 * GICv4.1 allows us to skip VMOVP if moving to a cpu whose RD
+	 * is sharing its VPE table with the current one.
+	 */
+	if (gic_data_rdist_cpu(cpu)->vpe_table_mask &&
+	    cpumask_test_cpu(from, gic_data_rdist_cpu(cpu)->vpe_table_mask))
+		goto out;
 
 	its_send_vmovp(vpe);
 	its_vpe_db_proxy_move(vpe, from, cpu);
@@ -4438,8 +4361,9 @@ static int its_vpe_init(struct its_vpe *vpe)
 	raw_spin_lock_init(&vpe->vpe_lock);
 	vpe->vpe_id = vpe_id;
 	vpe->vpt_page = vpt_page;
-	atomic_set(&vpe->vmapp_count, 0);
-	if (!gic_rdists->has_rvpeid)
+	if (gic_rdists->has_rvpeid)
+		atomic_set(&vpe->vmapp_count, 0);
+	else
 		vpe->vpe_proxy_event = -1;
 
 	return 0;
@@ -4488,6 +4412,8 @@ static int its_vpe_irq_domain_alloc(struct irq_domain *domain, unsigned int virq
 	struct page *vprop_page;
 	int base, nr_ids, i, err = 0;
 
+	BUG_ON(!vm);
+
 	bitmap = its_lpi_alloc(roundup_pow_of_two(nr_irqs), &base, &nr_ids);
 	if (!bitmap)
 		return -ENOMEM;
@@ -4525,8 +4451,13 @@ static int its_vpe_irq_domain_alloc(struct irq_domain *domain, unsigned int virq
 		set_bit(i, bitmap);
 	}
 
-	if (err)
-		its_vpe_irq_domain_free(domain, virq, i);
+	if (err) {
+		if (i > 0)
+			its_vpe_irq_domain_free(domain, virq, i);
+
+		its_lpi_free(bitmap, base, nr_ids);
+		its_free_prop_table(vprop_page);
+	}
 
 	return err;
 }
@@ -4716,6 +4647,17 @@ static bool __maybe_unused its_enable_quirk_hip07_161600802(void *data)
 	return true;
 }
 
+static bool __maybe_unused its_enable_quirk_mrvl_35443(void *data)
+{
+	struct its_node *its = data;
+
+	/* Erratum 35443:  20bits, alloc 8MB table size */
+	its->typer &= ~GITS_TYPER_DEVBITS;
+	its->typer |= FIELD_PREP(GITS_TYPER_DEVBITS, 20 - 1);
+
+	return true;
+}
+
 static const struct gic_quirk its_quirks[] = {
 #ifdef CONFIG_CAVIUM_ERRATUM_22375
 	{
@@ -4731,6 +4673,14 @@ static const struct gic_quirk its_quirks[] = {
 		.iidr	= 0xa100034c,	/* ThunderX pass 1.x */
 		.mask	= 0xffff0fff,
 		.init	= its_enable_quirk_cavium_23144,
+	},
+#endif
+#ifdef CONFIG_MRVL_ERRATUM_35443
+	{
+		.desc	= "ITS: Marvell errata 35443",
+		.iidr	= 0xb000034c,	/* 9xx silicons */
+		.mask	= 0xf8ff0fff,
+		.init	= its_enable_quirk_mrvl_35443,
 	},
 #endif
 #ifdef CONFIG_QCOM_QDF2400_ERRATUM_0065

@@ -36,6 +36,7 @@
 #include <linux/percpu.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
+#include <linux/isolation.h>
 #include <linux/irqchip.h>
 #include <linux/irqchip/chained_irq.h>
 #include <linux/irqchip/arm-gic.h>
@@ -63,7 +64,7 @@ static void gic_check_cpu_features(void)
 
 union gic_base {
 	void __iomem *common_base;
-	void __iomem * __percpu *percpu_base;
+	void __percpu * __iomem *percpu_base;
 };
 
 struct gic_chip_data {
@@ -338,6 +339,8 @@ static void __exception_irq_entry gic_handle_irq(struct pt_regs *regs)
 	u32 irqstat, irqnr;
 	struct gic_chip_data *gic = &gic_data[0];
 	void __iomem *cpu_base = gic_data_cpu_base(gic);
+
+	task_isolation_kernel_enter();
 
 	do {
 		irqstat = readl_relaxed(cpu_base + GIC_CPU_INTACK);
@@ -1097,7 +1100,9 @@ static int gic_irq_domain_translate(struct irq_domain *d,
 		return 0;
 	}
 
-	if (is_of_node(fwspec->fwnode)) {
+
+	if (is_of_node(fwspec->fwnode) ||
+	    is_fwnode_irqchip(fwspec->fwnode)) {
 		if (fwspec->param_count < 3)
 			return -EINVAL;
 
@@ -1108,6 +1113,17 @@ static int gic_irq_domain_translate(struct irq_domain *d,
 		case 1:			/* PPI */
 			*hwirq = fwspec->param[1] + 16;
 			break;
+#ifdef GIC_IRQ_TYPE_GSI
+		case GIC_IRQ_TYPE_GSI:	/* GSI */
+			if (fwspec->param[1] < 16) {
+				pr_err(FW_BUG "Illegal GSI%d translation request\n",
+				       fwspec->param[0]);
+				return -EINVAL;
+			}
+
+			*hwirq = fwspec->param[1];
+			break;
+#endif /* GIC_IRQ_TYPE_GSI */
 		default:
 			return -EINVAL;
 		}
@@ -1115,24 +1131,6 @@ static int gic_irq_domain_translate(struct irq_domain *d,
 		*type = fwspec->param[2] & IRQ_TYPE_SENSE_MASK;
 
 		/* Make it clear that broken DTs are... broken */
-		WARN(*type == IRQ_TYPE_NONE,
-		     "HW irq %ld has invalid type\n", *hwirq);
-		return 0;
-	}
-
-	if (is_fwnode_irqchip(fwspec->fwnode)) {
-		if(fwspec->param_count != 2)
-			return -EINVAL;
-
-		if (fwspec->param[0] < 16) {
-			pr_err(FW_BUG "Illegal GSI%d translation request\n",
-			       fwspec->param[0]);
-			return -EINVAL;
-		}
-
-		*hwirq = fwspec->param[0];
-		*type = fwspec->param[1];
-
 		WARN(*type == IRQ_TYPE_NONE,
 		     "HW irq %ld has invalid type\n", *hwirq);
 		return 0;

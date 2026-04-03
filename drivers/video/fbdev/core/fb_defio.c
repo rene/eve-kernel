@@ -132,7 +132,11 @@ int fb_deferred_io_fsync(struct file *file, loff_t start, loff_t end, int datasy
 		return 0;
 
 	inode_lock(inode);
-	flush_delayed_work(&info->deferred_work);
+	/* Kill off the delayed work */
+	cancel_delayed_work_sync(&info->deferred_work);
+
+	/* Run it immediately */
+	schedule_delayed_work(&info->deferred_work, 0);
 	inode_unlock(inode);
 
 	return 0;
@@ -200,7 +204,7 @@ err_mutex_unlock:
  */
 static vm_fault_t fb_deferred_io_page_mkwrite(struct fb_info *info, struct vm_fault *vmf)
 {
-	unsigned long offset = vmf->pgoff << PAGE_SHIFT;
+	unsigned long offset = vmf->address - vmf->vma->vm_start;
 	struct page *page = vmf->page;
 
 	file_update_time(vmf->vma->vm_file);
@@ -317,7 +321,7 @@ static void fb_deferred_io_lastclose(struct fb_info *info)
 	struct page *page;
 	int i;
 
-	flush_delayed_work(&info->deferred_work);
+	cancel_delayed_work_sync(&info->deferred_work);
 
 	/* clear out the mapping that we setup */
 	for (i = 0 ; i < info->fix.smem_len; i += PAGE_SIZE) {

@@ -1147,11 +1147,15 @@ static int genl_ctrl_event(int event, const struct genl_family *family,
 	if (IS_ERR(msg))
 		return PTR_ERR(msg);
 
-	if (!family->netnsok)
+	if (!family->netnsok) {
 		genlmsg_multicast_netns(&genl_ctrl, &init_net, msg, 0,
 					0, GFP_KERNEL);
-	else
-		genlmsg_multicast_allns(&genl_ctrl, msg, 0, 0);
+	} else {
+		rcu_read_lock();
+		genlmsg_multicast_allns(&genl_ctrl, msg, 0,
+					0, GFP_ATOMIC);
+		rcu_read_unlock();
+	}
 
 	return 0;
 }
@@ -1434,9 +1438,6 @@ static int genl_bind(struct net *net, int group)
 		if ((grp->flags & GENL_UNS_ADMIN_PERM) &&
 		    !ns_capable(net->user_ns, CAP_NET_ADMIN))
 			ret = -EPERM;
-		if (grp->cap_sys_admin &&
-		    !ns_capable(net->user_ns, CAP_SYS_ADMIN))
-			ret = -EPERM;
 
 		break;
 	}
@@ -1496,23 +1497,23 @@ problem:
 
 core_initcall(genl_init);
 
-static int genlmsg_mcast(struct sk_buff *skb, u32 portid, unsigned long group)
+static int genlmsg_mcast(struct sk_buff *skb, u32 portid, unsigned long group,
+			 gfp_t flags)
 {
 	struct sk_buff *tmp;
 	struct net *net, *prev = NULL;
 	bool delivered = false;
 	int err;
 
-	rcu_read_lock();
 	for_each_net_rcu(net) {
 		if (prev) {
-			tmp = skb_clone(skb, GFP_ATOMIC);
+			tmp = skb_clone(skb, flags);
 			if (!tmp) {
 				err = -ENOMEM;
 				goto error;
 			}
 			err = nlmsg_multicast(prev->genl_sock, tmp,
-					      portid, group, GFP_ATOMIC);
+					      portid, group, flags);
 			if (!err)
 				delivered = true;
 			else if (err != -ESRCH)
@@ -1521,31 +1522,27 @@ static int genlmsg_mcast(struct sk_buff *skb, u32 portid, unsigned long group)
 
 		prev = net;
 	}
-	err = nlmsg_multicast(prev->genl_sock, skb, portid, group, GFP_ATOMIC);
 
-	rcu_read_unlock();
-
+	err = nlmsg_multicast(prev->genl_sock, skb, portid, group, flags);
 	if (!err)
 		delivered = true;
 	else if (err != -ESRCH)
 		return err;
 	return delivered ? 0 : -ESRCH;
  error:
-	rcu_read_unlock();
-
 	kfree_skb(skb);
 	return err;
 }
 
 int genlmsg_multicast_allns(const struct genl_family *family,
 			    struct sk_buff *skb, u32 portid,
-			    unsigned int group)
+			    unsigned int group, gfp_t flags)
 {
 	if (WARN_ON_ONCE(group >= family->n_mcgrps))
 		return -EINVAL;
 
 	group = family->mcgrp_offset + group;
-	return genlmsg_mcast(skb, portid, group);
+	return genlmsg_mcast(skb, portid, group, flags);
 }
 EXPORT_SYMBOL(genlmsg_multicast_allns);
 

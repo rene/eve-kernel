@@ -454,13 +454,6 @@ config GPIO_MXC
 	select GPIO_GENERIC
 	select GENERIC_IRQ_CHIP
 
-config GPIO_ARCH_ADVANTECH
-	def_bool y
-	depends on ARCH_ADVANTECH
-	depends on GPIOLIB
-	help
-		Set GPIO direction.
-
 config GPIO_MXS
 	bool "Freescale MXS GPIO support" if COMPILE_TEST
 	depends on ARCH_MXS || COMPILE_TEST
@@ -686,8 +679,7 @@ config GPIO_UNIPHIER
 	  Say yes here to support UniPhier GPIOs.
 
 config GPIO_VF610
-	bool "VF610 GPIO support"
-	default y if SOC_VF610
+	def_bool y
 	depends on ARCH_MXC
 	select GPIOLIB_IRQCHIP
 	help
@@ -1423,7 +1415,7 @@ config GPIO_TPS68470
 	  are "output only" GPIOs.
 
 config GPIO_TQMX86
-	tristate "TQ-Systems TQMx86 GPIO"
+	tristate "TQ-Systems QTMX86 GPIO"
 	depends on MFD_TQMX86 || COMPILE_TEST
 	depends on HAS_IOPORT_MAP
 	select GPIOLIB_IRQCHIP

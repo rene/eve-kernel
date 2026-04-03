@@ -21,11 +21,13 @@
 #include <linux/sched/stat.h>
 #include <linux/sched/nohz.h>
 #include <linux/sched/loadavg.h>
+#include <linux/isolation.h>
 #include <linux/module.h>
 #include <linux/irq_work.h>
 #include <linux/posix-timers.h>
 #include <linux/context_tracking.h>
 #include <linux/mm.h>
+#include <linux/rcupdate.h>
 
 #include <asm/irq_regs.h>
 
@@ -350,7 +352,9 @@ static void tick_nohz_full_kick(void)
  */
 void tick_nohz_full_kick_cpu(int cpu)
 {
-	if (!tick_nohz_full_cpu(cpu))
+	/* Synchronize low-level isolation flags */
+	smp_rmb();
+	if (!tick_nohz_full_cpu(cpu) || task_isolation_on_cpu(cpu))
 		return;
 
 	irq_work_queue_on(&per_cpu(nohz_full_kick_work, cpu), cpu);
@@ -534,6 +538,20 @@ void __tick_nohz_task_switch(void)
 			tick_nohz_full_kick();
 	}
 }
+
+void __tick_nohz_user_enter_prepare(void)
+{
+	struct tick_sched *ts;
+
+	if (tick_nohz_full_cpu(smp_processor_id())) {
+		ts = this_cpu_ptr(&tick_cpu_sched);
+
+		if (ts->tick_stopped)
+			quiet_vmstat();
+		rcu_nocb_flush_deferred_wakeup();
+	}
+}
+EXPORT_SYMBOL_GPL(__tick_nohz_user_enter_prepare);
 
 /* Get the boot-time nohz CPU list from the kernel parameters. */
 void __init tick_nohz_full_setup(cpumask_var_t cpumask)
@@ -932,13 +950,14 @@ static void tick_nohz_stop_tick(struct tick_sched *ts, int cpu)
 	 */
 	if (!ts->tick_stopped) {
 		calc_load_nohz_start();
-		quiet_vmstat();
 
 		ts->last_tick = hrtimer_get_expires(&ts->sched_timer);
 		ts->tick_stopped = 1;
 		trace_tick_stop(1, TICK_DEP_MASK_NONE);
 	}
 
+	/* Attempt to fold when the idle tick is stopped or not */
+	quiet_vmstat();
 	ts->next_tick = tick;
 
 	/*
@@ -1059,6 +1078,24 @@ static bool report_idle_softirq(void)
 
 	return true;
 }
+
+#ifdef CONFIG_TASK_ISOLATION
+int try_stop_full_tick(void)
+{
+	int cpu = smp_processor_id();
+	struct tick_sched *ts = this_cpu_ptr(&tick_cpu_sched);
+
+	/* For an unstable clock, we should return a permanent error code. */
+	if (atomic_read(&tick_dep_mask) & TICK_DEP_MASK_CLOCK_UNSTABLE)
+		return -EINVAL;
+
+	if (!can_stop_full_tick(cpu, ts))
+		return -EAGAIN;
+
+	tick_nohz_stop_sched_tick(ts, cpu);
+	return 0;
+}
+#endif
 
 static bool can_stop_idle_tick(int cpu, struct tick_sched *ts)
 {
@@ -1556,23 +1593,13 @@ void tick_setup_sched_timer(void)
 void tick_cancel_sched_timer(int cpu)
 {
 	struct tick_sched *ts = &per_cpu(tick_cpu_sched, cpu);
-	ktime_t idle_sleeptime, iowait_sleeptime;
-	unsigned long idle_calls, idle_sleeps;
 
 # ifdef CONFIG_HIGH_RES_TIMERS
 	if (ts->sched_timer.base)
 		hrtimer_cancel(&ts->sched_timer);
 # endif
 
-	idle_sleeptime = ts->idle_sleeptime;
-	iowait_sleeptime = ts->iowait_sleeptime;
-	idle_calls = ts->idle_calls;
-	idle_sleeps = ts->idle_sleeps;
 	memset(ts, 0, sizeof(*ts));
-	ts->idle_sleeptime = idle_sleeptime;
-	ts->iowait_sleeptime = iowait_sleeptime;
-	ts->idle_calls = idle_calls;
-	ts->idle_sleeps = idle_sleeps;
 }
 #endif
 

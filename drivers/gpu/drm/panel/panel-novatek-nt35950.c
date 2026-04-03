@@ -573,13 +573,15 @@ static int nt35950_probe(struct mipi_dsi_device *dsi)
 		}
 		dsi_r_host = of_find_mipi_dsi_host_by_node(dsi_r);
 		of_node_put(dsi_r);
-		if (!dsi_r_host)
-			return dev_err_probe(dev, -EPROBE_DEFER, "Cannot get secondary DSI host\n");
+		if (!dsi_r_host) {
+			dev_err(dev, "Cannot get secondary DSI host\n");
+			return -EPROBE_DEFER;
+		}
 
 		nt->dsi[1] = mipi_dsi_device_register_full(dsi_r_host, info);
-		if (IS_ERR(nt->dsi[1])) {
+		if (!nt->dsi[1]) {
 			dev_err(dev, "Cannot get secondary DSI node\n");
-			return PTR_ERR(nt->dsi[1]);
+			return -ENODEV;
 		}
 		num_dsis++;
 	}
@@ -591,8 +593,12 @@ static int nt35950_probe(struct mipi_dsi_device *dsi)
 		       DRM_MODE_CONNECTOR_DSI);
 
 	ret = drm_panel_of_backlight(&nt->panel);
-	if (ret)
+	if (ret) {
+		if (num_dsis == 2)
+			mipi_dsi_device_unregister(nt->dsi[1]);
+
 		return dev_err_probe(dev, ret, "Failed to get backlight\n");
+	}
 
 	drm_panel_add(&nt->panel);
 
@@ -608,6 +614,10 @@ static int nt35950_probe(struct mipi_dsi_device *dsi)
 
 		ret = mipi_dsi_attach(nt->dsi[i]);
 		if (ret < 0) {
+			/* If we fail to attach to either host, we're done */
+			if (num_dsis == 2)
+				mipi_dsi_device_unregister(nt->dsi[1]);
+
 			return dev_err_probe(dev, ret,
 					     "Cannot attach to DSI%d host.\n", i);
 		}

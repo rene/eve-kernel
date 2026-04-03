@@ -806,9 +806,11 @@ static resource_size_t calculate_iosize(resource_size_t size,
 	size = (size & 0xff) + ((size & ~0xffUL) << 2);
 #endif
 	size = size + size1;
+	if (size < old_size)
+		size = old_size;
 
-	size = max(size, add_size) + children_add_size;
-	return ALIGN(max(size, old_size), align);
+	size = ALIGN(max(size, add_size) + children_add_size, align);
+	return size;
 }
 
 static resource_size_t calculate_memsize(resource_size_t size,
@@ -822,9 +824,11 @@ static resource_size_t calculate_memsize(resource_size_t size,
 		size = min_size;
 	if (old_size == 1)
 		old_size = 0;
+	if (size < old_size)
+		size = old_size;
 
-	size = max(size, add_size) + children_add_size;
-	return ALIGN(max(size, old_size), align);
+	size = ALIGN(max(size, add_size) + children_add_size, align);
+	return size;
 }
 
 resource_size_t __weak pcibios_window_alignment(struct pci_bus *bus,
@@ -2025,7 +2029,8 @@ pci_root_bus_distribute_available_resources(struct pci_bus *bus,
 		 * in case of root bus.
 		 */
 		if (bridge && pci_bridge_resources_not_assigned(dev))
-			pci_bridge_distribute_available_resources(dev, add_list);
+			pci_bridge_distribute_available_resources(bridge,
+								  add_list);
 		else
 			pci_root_bus_distribute_available_resources(b, add_list);
 	}

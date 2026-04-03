@@ -131,7 +131,7 @@ struct perf_dom_info {
 	u32 opp_count;
 	u32 sustained_freq_khz;
 	u32 sustained_perf_level;
-	unsigned long mult_factor;
+	u32 mult_factor;
 	char name[SCMI_MAX_STR_SIZE];
 	struct scmi_opp opp[MAX_OPPS];
 	struct scmi_fc_info *fc_info;
@@ -223,8 +223,8 @@ scmi_perf_domain_attributes_get(const struct scmi_protocol_handle *ph,
 			dom_info->mult_factor =	1000;
 		else
 			dom_info->mult_factor =
-					(dom_info->sustained_freq_khz * 1000UL)
-					/ dom_info->sustained_perf_level;
+					(dom_info->sustained_freq_khz * 1000) /
+					dom_info->sustained_perf_level;
 		strscpy(dom_info->name, attr->name, SCMI_SHORT_NAME_MAX_SIZE);
 	}
 
@@ -591,6 +591,23 @@ static int scmi_dev_domain_id(struct device *dev)
 	return clkspec.args[0];
 }
 
+static uint32_t roundoff_to_nearest_100(uint32_t freq)
+{
+	uint32_t quotient, remainder;
+	uint32_t freq_mhz;
+
+	freq_mhz = (freq / 1000000);
+	quotient = freq_mhz / 100;
+	remainder = freq_mhz % 100;
+
+	if (remainder >= 50)
+		freq_mhz = quotient * 100 + 100;
+	else
+		freq_mhz = quotient * 100;
+
+	return freq_mhz * 1000000;
+}
+
 static int scmi_dvfs_device_opps_add(const struct scmi_protocol_handle *ph,
 				     struct device *dev)
 {
@@ -609,6 +626,12 @@ static int scmi_dvfs_device_opps_add(const struct scmi_protocol_handle *ph,
 
 	for (opp = dom->opp, idx = 0; idx < dom->opp_count; idx++, opp++) {
 		freq = opp->perf * dom->mult_factor;
+
+		/*
+		 * marvell specific: need to round off to nearest hundered
+		 * if the calcuated frequency is not a multiple of 100 in MHz
+		 */
+		freq = roundoff_to_nearest_100(freq);
 
 		ret = dev_pm_opp_add(dev, freq, 0);
 		if (ret) {
@@ -667,7 +690,7 @@ static int scmi_dvfs_freq_get(const struct scmi_protocol_handle *ph, u32 domain,
 		struct perf_dom_info *dom = pi->dom_info + domain;
 
 		/* Note domain is validated implicitly by scmi_perf_level_get */
-		*freq = level * dom->mult_factor;
+		*freq = roundoff_to_nearest_100(level * dom->mult_factor);
 	}
 
 	return ret;

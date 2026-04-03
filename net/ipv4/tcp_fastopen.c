@@ -3,7 +3,6 @@
 #include <linux/tcp.h>
 #include <linux/rcupdate.h>
 #include <net/tcp.h>
-#include <net/busy_poll.h>
 
 void tcp_fastopen_init_key_once(struct net *net)
 {
@@ -50,7 +49,7 @@ void tcp_fastopen_ctx_destroy(struct net *net)
 {
 	struct tcp_fastopen_context *ctxt;
 
-	ctxt = unrcu_pointer(xchg(&net->ipv4.tcp_fastopen_ctx, NULL));
+	ctxt = xchg((__force struct tcp_fastopen_context **)&net->ipv4.tcp_fastopen_ctx, NULL);
 
 	if (ctxt)
 		call_rcu(&ctxt->rcu, tcp_fastopen_ctx_free);
@@ -81,10 +80,9 @@ int tcp_fastopen_reset_cipher(struct net *net, struct sock *sk,
 
 	if (sk) {
 		q = &inet_csk(sk)->icsk_accept_queue.fastopenq;
-		octx = unrcu_pointer(xchg(&q->ctx, RCU_INITIALIZER(ctx)));
+		octx = xchg((__force struct tcp_fastopen_context **)&q->ctx, ctx);
 	} else {
-		octx = unrcu_pointer(xchg(&net->ipv4.tcp_fastopen_ctx,
-					  RCU_INITIALIZER(ctx)));
+		octx = xchg((__force struct tcp_fastopen_context **)&net->ipv4.tcp_fastopen_ctx, ctx);
 	}
 
 	if (octx)
@@ -179,7 +177,7 @@ void tcp_fastopen_add_skb(struct sock *sk, struct sk_buff *skb)
 	if (!skb)
 		return;
 
-	tcp_cleanup_skb(skb);
+	skb_dst_drop(skb);
 	/* segs_in has been initialized to 1 in tcp_create_openreq_child().
 	 * Hence, reset segs_in to 0 before calling tcp_segs_in()
 	 * to avoid double counting.  Also, tcp_segs_in() expects
@@ -196,7 +194,7 @@ void tcp_fastopen_add_skb(struct sock *sk, struct sk_buff *skb)
 	TCP_SKB_CB(skb)->tcp_flags &= ~TCPHDR_SYN;
 
 	tp->rcv_nxt = TCP_SKB_CB(skb)->end_seq;
-	tcp_add_receive_queue(sk, skb);
+	__skb_queue_tail(&sk->sk_receive_queue, skb);
 	tp->syn_data_acked = 1;
 
 	/* u64_stats_update_begin(&tp->syncp) not needed here,
@@ -279,8 +277,6 @@ static struct sock *tcp_fastopen_create_child(struct sock *sk,
 				  req->timeout, TCP_RTO_MAX);
 
 	refcount_set(&req->rsk_refcnt, 2);
-
-	sk_mark_napi_id_set(child, skb);
 
 	/* Now finish processing the fastopen child socket. */
 	tcp_init_transfer(child, BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB, skb);

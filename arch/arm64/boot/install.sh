@@ -17,8 +17,7 @@
 #   $3 - kernel map file
 #   $4 - default install path (blank if root directory)
 
-if [ "$(basename $2)" = "Image.gz" ] || [ "$(basename $2)" = "vmlinuz.efi" ]
-then
+if [ "$(basename $2)" = "Image.gz" ]; then
 # Compressed install
   echo "Installing compressed kernel"
   base=vmlinuz

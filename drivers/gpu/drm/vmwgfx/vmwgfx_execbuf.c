@@ -447,7 +447,7 @@ static int vmw_resource_context_res_add(struct vmw_private *dev_priv,
 	    vmw_res_type(ctx) == vmw_res_dx_context) {
 		for (i = 0; i < cotable_max; ++i) {
 			res = vmw_context_cotable(ctx, i);
-			if (IS_ERR_OR_NULL(res))
+			if (IS_ERR(res))
 				continue;
 
 			ret = vmw_execbuf_res_val_add(sw_context, res,
@@ -1147,7 +1147,7 @@ static int vmw_translate_mob_ptr(struct vmw_private *dev_priv,
 				 SVGAMobId *id,
 				 struct vmw_buffer_object **vmw_bo_p)
 {
-	struct vmw_buffer_object *vmw_bo, *tmp_bo;
+	struct vmw_buffer_object *vmw_bo;
 	uint32_t handle = *id;
 	struct vmw_relocation *reloc;
 	int ret;
@@ -1159,8 +1159,8 @@ static int vmw_translate_mob_ptr(struct vmw_private *dev_priv,
 		return PTR_ERR(vmw_bo);
 	}
 	ret = vmw_validation_add_bo(sw_context->ctx, vmw_bo, true, false);
-	tmp_bo = vmw_bo;
-	vmw_user_bo_unref(&tmp_bo);
+	ttm_bo_put(&vmw_bo->base);
+	drm_gem_object_put(&vmw_bo->base.base);
 	if (unlikely(ret != 0))
 		return ret;
 
@@ -1202,7 +1202,7 @@ static int vmw_translate_guest_ptr(struct vmw_private *dev_priv,
 				   SVGAGuestPtr *ptr,
 				   struct vmw_buffer_object **vmw_bo_p)
 {
-	struct vmw_buffer_object *vmw_bo, *tmp_bo;
+	struct vmw_buffer_object *vmw_bo;
 	uint32_t handle = ptr->gmrId;
 	struct vmw_relocation *reloc;
 	int ret;
@@ -1214,8 +1214,8 @@ static int vmw_translate_guest_ptr(struct vmw_private *dev_priv,
 		return PTR_ERR(vmw_bo);
 	}
 	ret = vmw_validation_add_bo(sw_context->ctx, vmw_bo, false, false);
-	tmp_bo = vmw_bo;
-	vmw_user_bo_unref(&tmp_bo);
+	ttm_bo_put(&vmw_bo->base);
+	drm_gem_object_put(&vmw_bo->base.base);
 	if (unlikely(ret != 0))
 		return ret;
 
@@ -1259,8 +1259,6 @@ static int vmw_cmd_dx_define_query(struct vmw_private *dev_priv,
 		return -EINVAL;
 
 	cotable_res = vmw_context_cotable(ctx_node->ctx, SVGA_COTABLE_DXQUERY);
-	if (IS_ERR_OR_NULL(cotable_res))
-		return cotable_res ? PTR_ERR(cotable_res) : -EINVAL;
 	ret = vmw_cotable_notify(cotable_res, cmd->body.queryId);
 
 	return ret;
@@ -2479,8 +2477,6 @@ static int vmw_cmd_dx_view_define(struct vmw_private *dev_priv,
 		return ret;
 
 	res = vmw_context_cotable(ctx_node->ctx, vmw_view_cotables[view_type]);
-	if (IS_ERR_OR_NULL(res))
-		return res ? PTR_ERR(res) : -EINVAL;
 	ret = vmw_cotable_notify(res, cmd->defined_id);
 	if (unlikely(ret != 0))
 		return ret;
@@ -2566,8 +2562,8 @@ static int vmw_cmd_dx_so_define(struct vmw_private *dev_priv,
 
 	so_type = vmw_so_cmd_to_type(header->id);
 	res = vmw_context_cotable(ctx_node->ctx, vmw_so_cotables[so_type]);
-	if (IS_ERR_OR_NULL(res))
-		return res ? PTR_ERR(res) : -EINVAL;
+	if (IS_ERR(res))
+		return PTR_ERR(res);
 	cmd = container_of(header, typeof(*cmd), header);
 	ret = vmw_cotable_notify(res, cmd->defined_id);
 
@@ -2686,8 +2682,6 @@ static int vmw_cmd_dx_define_shader(struct vmw_private *dev_priv,
 		return -EINVAL;
 
 	res = vmw_context_cotable(ctx_node->ctx, SVGA_COTABLE_DXSHADER);
-	if (IS_ERR_OR_NULL(res))
-		return res ? PTR_ERR(res) : -EINVAL;
 	ret = vmw_cotable_notify(res, cmd->body.shaderId);
 	if (ret)
 		return ret;
@@ -3009,8 +3003,6 @@ static int vmw_cmd_dx_define_streamoutput(struct vmw_private *dev_priv,
 	}
 
 	res = vmw_context_cotable(ctx_node->ctx, SVGA_COTABLE_STREAMOUTPUT);
-	if (IS_ERR_OR_NULL(res))
-		return res ? PTR_ERR(res) : -EINVAL;
 	ret = vmw_cotable_notify(res, cmd->body.soid);
 	if (ret)
 		return ret;
@@ -4077,23 +4069,6 @@ static int vmw_execbuf_tie_context(struct vmw_private *dev_priv,
 	return 0;
 }
 
-/*
- * DMA fence callback to remove a seqno_waiter
- */
-struct seqno_waiter_rm_context {
-	struct dma_fence_cb base;
-	struct vmw_private *dev_priv;
-};
-
-static void seqno_waiter_rm_cb(struct dma_fence *f, struct dma_fence_cb *cb)
-{
-	struct seqno_waiter_rm_context *ctx =
-		container_of(cb, struct seqno_waiter_rm_context, base);
-
-	vmw_seqno_waiter_remove(ctx->dev_priv);
-	kfree(ctx);
-}
-
 int vmw_execbuf_process(struct drm_file *file_priv,
 			struct vmw_private *dev_priv,
 			void __user *user_commands, void *kernel_commands,
@@ -4274,15 +4249,6 @@ int vmw_execbuf_process(struct drm_file *file_priv,
 		} else {
 			/* Link the fence with the FD created earlier */
 			fd_install(out_fence_fd, sync_file->file);
-			struct seqno_waiter_rm_context *ctx =
-				kmalloc(sizeof(*ctx), GFP_KERNEL);
-			ctx->dev_priv = dev_priv;
-			vmw_seqno_waiter_add(dev_priv);
-			if (dma_fence_add_callback(&fence->base, &ctx->base,
-						   seqno_waiter_rm_cb) < 0) {
-				vmw_seqno_waiter_remove(dev_priv);
-				kfree(ctx);
-			}
 		}
 	}
 

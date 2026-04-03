@@ -29,6 +29,7 @@
 #include <linux/slab.h>
 #include <linux/syscore_ops.h>
 #include <linux/msi.h>
+#include <linux/isolation.h>
 #include <asm/mach/arch.h>
 #include <asm/exception.h>
 #include <asm/smp_plat.h>
@@ -567,10 +568,6 @@ static struct irq_chip armada_370_xp_irq_chip = {
 static int armada_370_xp_mpic_irq_map(struct irq_domain *h,
 				      unsigned int virq, irq_hw_number_t hw)
 {
-	/* IRQs 0 and 1 cannot be mapped, they are handled internally */
-	if (hw <= 1)
-		return -EINVAL;
-
 	armada_370_xp_irq_mask(irq_get_irq_data(virq));
 	if (!is_percpu_irq(hw))
 		writel(hw, per_cpu_int_base +
@@ -602,6 +599,7 @@ static const struct irq_domain_ops armada_370_xp_mpic_irq_ops = {
 static void armada_370_xp_handle_msi_irq(struct pt_regs *regs, bool is_chained)
 {
 	u32 msimask, msinr;
+	int isol_entered = 0;
 
 	msimask = readl_relaxed(per_cpu_int_base +
 				ARMADA_370_XP_IN_DRBEL_CAUSE_OFFS)
@@ -619,6 +617,10 @@ static void armada_370_xp_handle_msi_irq(struct pt_regs *regs, bool is_chained)
 
 		irq = msinr - PCI_MSI_DOORBELL_START;
 
+		if (!isol_entered) {
+			task_isolation_kernel_enter();
+			isol_entered = 1;
+		}
 		generic_handle_domain_irq(armada_370_xp_msi_inner_domain, irq);
 	}
 }

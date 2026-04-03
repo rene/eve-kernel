@@ -34,6 +34,7 @@
 #include <linux/ktime.h>
 #include <linux/regmap.h>
 #include <uapi/linux/ppp_defs.h>
+#include <net/dsa.h>
 #include <net/ip.h>
 #include <net/ipv6.h>
 #include <net/tso.h>
@@ -59,6 +60,10 @@ static struct {
  * will be removed once phylink is used for all modes (dt+ACPI).
  */
 static void mvpp2_acpi_start(struct mvpp2_port *port);
+
+static void mvpp2_port_enable_non_extended_dsa(struct mvpp2_port *port);
+static void mvpp2_port_enable_extended_dsa(struct mvpp2_port *port);
+static void mvpp2_port_disable_dsa(struct mvpp2_port *port);
 
 /* Queue modes */
 #define MVPP2_QDIST_SINGLE_MODE	0
@@ -614,37 +619,11 @@ static void mvpp23_bm_set_8pool_mode(struct mvpp2 *priv)
 	mvpp2_write(priv, MVPP22_BM_POOL_BASE_ADDR_HIGH_REG, val);
 }
 
-/* Cleanup pool before actual initialization in the OS */
-static void mvpp2_bm_pool_cleanup(struct mvpp2 *priv, int pool_id)
-{
-	unsigned int thread = mvpp2_cpu_to_thread(priv, get_cpu());
-	u32 val;
-	int i;
-
-	/* Drain the BM from all possible residues left by firmware */
-	for (i = 0; i < MVPP2_BM_POOL_SIZE_MAX; i++)
-		mvpp2_thread_read(priv, thread, MVPP2_BM_PHY_ALLOC_REG(pool_id));
-
-	put_cpu();
-
-	/* Stop the BM pool */
-	val = mvpp2_read(priv, MVPP2_BM_POOL_CTRL_REG(pool_id));
-	val |= MVPP2_BM_STOP_MASK;
-	mvpp2_write(priv, MVPP2_BM_POOL_CTRL_REG(pool_id), val);
-}
-
 static int mvpp2_bm_init(struct device *dev, struct mvpp2 *priv)
 {
 	enum dma_data_direction dma_dir = DMA_FROM_DEVICE;
 	int i, err, poolnum = MVPP2_BM_POOLS_NUM;
 	struct mvpp2_port *port;
-
-	if (priv->percpu_pools)
-		poolnum = mvpp2_get_nrxqs(priv) * 2;
-
-	/* Clean up the pool state in case it contains stale state */
-	for (i = 0; i < poolnum; i++)
-		mvpp2_bm_pool_cleanup(priv, i);
 
 	if (priv->percpu_pools) {
 		for (i = 0; i < priv->port_count; i++) {
@@ -655,6 +634,7 @@ static int mvpp2_bm_init(struct device *dev, struct mvpp2 *priv)
 			}
 		}
 
+		poolnum = mvpp2_get_nrxqs(priv) * 2;
 		for (i = 0; i < poolnum; i++) {
 			/* the pool in use */
 			int pn = i / (poolnum / 2);
@@ -953,13 +933,13 @@ static void mvpp2_bm_pool_update_fc(struct mvpp2_port *port,
 static void mvpp2_bm_pool_update_priv_fc(struct mvpp2 *priv, bool en)
 {
 	struct mvpp2_port *port;
-	int i, j;
+	int i;
 
 	for (i = 0; i < priv->port_count; i++) {
 		port = priv->port_list[i];
 		if (port->priv->percpu_pools) {
-			for (j = 0; j < port->nrxqs; j++)
-				mvpp2_bm_pool_update_fc(port, &port->priv->bm_pools[j],
+			for (i = 0; i < port->nrxqs; i++)
+				mvpp2_bm_pool_update_fc(port, &port->priv->bm_pools[i],
 							port->tx_fc & en);
 		} else {
 			mvpp2_bm_pool_update_fc(port, port->pool_long, port->tx_fc & en);
@@ -1454,6 +1434,9 @@ static void mvpp2_interrupts_unmask(void *arg)
 
 	/* If the thread isn't used, don't do anything */
 	if (cpu >= port->priv->nthreads)
+		return;
+
+	if (port->flags & MVPP22_F_IF_MUSDK)
 		return;
 
 	thread = mvpp2_cpu_to_thread(port->priv, cpu);
@@ -1963,6 +1946,21 @@ static const struct mvpp2_ethtool_counter mvpp2_ethtool_xdp[] = {
 	{ ETHTOOL_XDP_XMIT_ERR, "tx_xdp_xmit_errors", },
 };
 
+static const char mvpp22_priv_flags_strings[][ETH_GSTRING_LEN] = {
+	"musdk",
+	"dsa-tagged",
+	"extended-dsa-tagged",
+};
+
+#define MVPP22_F_IF_MUSDK_PRIV			BIT(0)
+#define MVPP22_F_IF_DSA_TAG_PRIV		BIT(1)
+#define MVPP22_F_IF_EXTENDED_DSA_TAG_PRIV	BIT(2)
+#define MVPP22_F_IF_EBRIDGE_DSA_TAG_PRIV	BIT(3)
+
+#define MVPP2_F_DSA_TAGS_PRIV_MASK	(MVPP22_F_IF_DSA_TAG_PRIV | \
+					 MVPP22_F_IF_EXTENDED_DSA_TAG_PRIV | \
+					 MVPP22_F_IF_EBRIDGE_DSA_TAG_PRIV)
+
 #define MVPP2_N_ETHTOOL_STATS(ntxqs, nrxqs)	(ARRAY_SIZE(mvpp2_ethtool_mib_regs) + \
 						 ARRAY_SIZE(mvpp2_ethtool_port_regs) + \
 						 (ARRAY_SIZE(mvpp2_ethtool_txq_regs) * (ntxqs)) + \
@@ -1974,6 +1972,11 @@ static void mvpp2_ethtool_get_strings(struct net_device *netdev, u32 sset,
 {
 	struct mvpp2_port *port = netdev_priv(netdev);
 	int i, q;
+
+	if (sset == ETH_SS_PRIV_FLAGS) {
+		memcpy(data, mvpp22_priv_flags_strings,
+		       ARRAY_SIZE(mvpp22_priv_flags_strings) * ETH_GSTRING_LEN);
+	}
 
 	if (sset != ETH_SS_STATS)
 		return;
@@ -2012,6 +2015,7 @@ static void mvpp2_ethtool_get_strings(struct net_device *netdev, u32 sset,
 			ETH_GSTRING_LEN);
 		data += ETH_GSTRING_LEN;
 	}
+
 }
 
 static void
@@ -2160,6 +2164,11 @@ static int mvpp2_ethtool_get_sset_count(struct net_device *dev, int sset)
 	if (sset == ETH_SS_STATS)
 		return MVPP2_N_ETHTOOL_STATS(port->ntxqs, port->nrxqs);
 
+	if (sset == ETH_SS_PRIV_FLAGS) {
+		return (port->priv->hw_version == MVPP21) ?
+			0 : ARRAY_SIZE(mvpp22_priv_flags_strings);
+	}
+
 	return -EOPNOTSUPP;
 }
 
@@ -2236,6 +2245,9 @@ static inline void mvpp2_gmac_max_rx_size_set(struct mvpp2_port *port)
 {
 	u32 val;
 
+	if (port->flags & MVPP22_F_IF_MUSDK)
+		return;
+
 	val = readl(port->base + MVPP2_GMAC_CTRL_0_REG);
 	val &= ~MVPP2_GMAC_MAX_RX_SIZE_MASK;
 	val |= (((port->pkt_size - MVPP2_MH_SIZE) / 2) <<
@@ -2247,6 +2259,9 @@ static inline void mvpp2_gmac_max_rx_size_set(struct mvpp2_port *port)
 static inline void mvpp2_xlg_max_rx_size_set(struct mvpp2_port *port)
 {
 	u32 val;
+
+	if (port->flags & MVPP22_F_IF_MUSDK)
+		return;
 
 	val =  readl(port->base + MVPP22_XLG_CTRL1_REG);
 	val &= ~MVPP22_XLG_CTRL1_FRAMESIZELIMIT_MASK;
@@ -2350,6 +2365,9 @@ static void mvpp2_egress_enable(struct mvpp2_port *port)
 	int queue;
 	int tx_port_num = mvpp2_egress_port(port);
 
+	if (port->flags & MVPP22_F_IF_MUSDK)
+		return;
+
 	/* Enable all initialized TXs. */
 	qmap = 0;
 	for (queue = 0; queue < port->ntxqs; queue++) {
@@ -2371,6 +2389,9 @@ static void mvpp2_egress_disable(struct mvpp2_port *port)
 	u32 reg_data;
 	int delay;
 	int tx_port_num = mvpp2_egress_port(port);
+
+	if (port->flags & MVPP22_F_IF_MUSDK)
+		return;
 
 	/* Issue stop command for active channels only */
 	mvpp2_write(port->priv, MVPP2_TXP_SCHED_PORT_INDEX_REG, tx_port_num);
@@ -3440,9 +3461,13 @@ static void mvpp2_isr_handle_link(struct mvpp2_port *port, bool link)
 		mvpp2_egress_enable(port);
 		mvpp2_ingress_enable(port);
 		netif_carrier_on(dev);
-		netif_tx_wake_all_queues(dev);
+
+		if (!(port->flags & MVPP22_F_IF_MUSDK))
+			netif_tx_wake_all_queues(dev);
 	} else {
-		netif_tx_stop_all_queues(dev);
+		if (!(port->flags & MVPP22_F_IF_MUSDK))
+			netif_tx_stop_all_queues(dev);
+
 		netif_carrier_off(dev);
 		mvpp2_ingress_disable(port);
 		mvpp2_egress_disable(port);
@@ -4361,7 +4386,21 @@ static netdev_tx_t mvpp2_tx(struct sk_buff *skb, struct net_device *dev)
 	int frags = 0;
 	u16 txq_id;
 	u32 tx_cmd;
+	int i;
+	unsigned int cpu = smp_processor_id();
 
+	for (i = 0; i < port->nqvecs; i++) {
+		struct mvpp2_queue_vector *qv = port->qvecs + i;
+		struct irq_desc *desc = irq_data_to_desc(irq_get_irq_data(qv->irq));
+
+		if (qv->type == MVPP2_QUEUE_VECTOR_PRIVATE && desc->affinity_hint) {
+			if ((cpumask_test_cpu(cpu, desc->affinity_hint) &&
+			     !(cpumask_test_cpu(cpu, desc->irq_common_data.affinity)))) {
+				irq_set_affinity_hint(qv->irq, desc->affinity_hint);
+				break;
+			}
+		}
+	}
 	thread = mvpp2_cpu_to_thread(port->priv, smp_processor_id());
 
 	txq_id = skb_get_queue_mapping(skb);
@@ -4617,9 +4656,11 @@ static void mvpp2_start_dev(struct mvpp2_port *port)
 		mvpp2_acpi_start(port);
 	}
 
-	netif_tx_start_all_queues(port->dev);
+	if (!(port->flags & MVPP22_F_IF_MUSDK))
+		netif_tx_start_all_queues(port->dev);
 
 	clear_bit(0, &port->state);
+
 }
 
 /* Set hw internals when stopping port */
@@ -4628,7 +4669,6 @@ static void mvpp2_stop_dev(struct mvpp2_port *port)
 	int i;
 
 	set_bit(0, &port->state);
-
 	/* Disable interrupts on all threads */
 	mvpp2_interrupts_disable(port);
 
@@ -4763,7 +4803,8 @@ static void mvpp2_irqs_deinit(struct mvpp2_port *port)
 static bool mvpp22_rss_is_supported(struct mvpp2_port *port)
 {
 	return (queue_mode == MVPP2_QDIST_MULTI_MODE) &&
-		!(port->flags & MVPP2_F_LOOPBACK);
+		!(port->flags & MVPP2_F_LOOPBACK) &&
+		!(port->flags & MVPP22_F_IF_MUSDK);
 }
 
 static int mvpp2_open(struct net_device *dev)
@@ -4785,17 +4826,23 @@ static int mvpp2_open(struct net_device *dev)
 		netdev_err(dev, "mvpp2_prs_mac_da_accept own addr failed\n");
 		return err;
 	}
-	err = mvpp2_prs_tag_mode_set(port->priv, port->id, MVPP2_TAG_TYPE_MH);
+
+	err = mvpp2_prs_tag_mode_set(port->priv, port->id, port->tag_type, port->edsa_len);
 	if (err) {
 		netdev_err(dev, "mvpp2_prs_tag_mode_set failed\n");
 		return err;
 	}
+
+	if (port->flags & MVPP22_F_IF_MUSDK)
+		goto skip_musdk_parser;
+
 	err = mvpp2_prs_def_flow(port);
 	if (err) {
 		netdev_err(dev, "mvpp2_prs_def_flow failed\n");
 		return err;
 	}
 
+skip_musdk_parser:
 	/* Allocate the Rx/Tx queues */
 	err = mvpp2_setup_rxqs(port);
 	if (err) {
@@ -5016,7 +5063,8 @@ static int mvpp2_bm_switch_buffers(struct mvpp2 *priv, bool percpu)
 		mvpp2_bm_pool_destroy(port->dev->dev.parent, priv, &priv->bm_pools[i]);
 
 	devm_kfree(port->dev->dev.parent, priv->bm_pools);
-	priv->percpu_pools = percpu;
+	/*TODO:handle or remove when merging porting changes*/
+	/* priv->percpu_pools = percpu; */
 	mvpp2_bm_init(port->dev->dev.parent, priv);
 
 	for (i = 0; i < priv->port_count; i++) {
@@ -5038,6 +5086,11 @@ static int mvpp2_change_mtu(struct net_device *dev, int mtu)
 	bool running = netif_running(dev);
 	struct mvpp2 *priv = port->priv;
 	int err;
+
+	if (port->flags & MVPP22_F_IF_MUSDK) {
+		netdev_err(dev, "MTU cannot be modified in MUSDK mode\n");
+		return -EPERM;
+	}
 
 	if (!IS_ALIGNED(MVPP2_RX_PKT_SIZE(mtu), 8)) {
 		netdev_info(dev, "illegal MTU value %d, round to %d\n", mtu,
@@ -5450,12 +5503,16 @@ mvpp2_ethtool_get_coalesce(struct net_device *dev,
 static void mvpp2_ethtool_get_drvinfo(struct net_device *dev,
 				      struct ethtool_drvinfo *drvinfo)
 {
+	struct mvpp2_port *port = netdev_priv(dev);
+
 	strscpy(drvinfo->driver, MVPP2_DRIVER_NAME,
 		sizeof(drvinfo->driver));
 	strscpy(drvinfo->version, MVPP2_DRIVER_VERSION,
 		sizeof(drvinfo->version));
 	strscpy(drvinfo->bus_info, dev_name(&dev->dev),
 		sizeof(drvinfo->bus_info));
+	drvinfo->n_priv_flags = (port->priv->hw_version == MVPP21) ?
+			0 : ARRAY_SIZE(mvpp22_priv_flags_strings);
 }
 
 static void
@@ -5738,6 +5795,188 @@ static int mvpp2_ethtool_set_rxfh_context(struct net_device *dev,
 
 	return mvpp22_port_rss_ctx_indir_set(port, *rss_context, indir);
 }
+
+static u32 mvpp22_get_priv_flags(struct net_device *dev)
+{
+	struct mvpp2_port *port = netdev_priv(dev);
+	u32 priv_flags = 0;
+
+	if (port->flags & MVPP22_F_IF_MUSDK)
+		priv_flags |= MVPP22_F_IF_MUSDK_PRIV;
+	switch (port->tag_type) {
+	case MVPP2_TAG_TYPE_DSA:
+		priv_flags |= MVPP22_F_IF_DSA_TAG_PRIV;
+		break;
+	case MVPP2_TAG_TYPE_EDSA:
+		if (port->edsa_len == MVPP2_EXTENDED_DSA_LEN)
+			priv_flags |= MVPP22_F_IF_EXTENDED_DSA_TAG_PRIV;
+		else
+			priv_flags |= MVPP22_F_IF_EBRIDGE_DSA_TAG_PRIV;
+		break;
+	default:
+		break;
+	}
+	return priv_flags;
+}
+
+static int mvpp2_port_musdk_cfg(struct net_device *dev, bool ena)
+{
+	struct mvpp2_port_us_cfg {
+		unsigned int nqvecs;
+		unsigned int nrxqs;
+		unsigned int ntxqs;
+		int mtu;
+		bool rxhash_en;
+		u8 rss_en;
+	} *us;
+
+	struct mvpp2_port *port = netdev_priv(dev);
+	int rxq;
+
+	if (ena) {
+		/* Disable Queues and IntVec allocations for MUSDK,
+		 * but save original values.
+		 */
+		us = kzalloc(sizeof(*us), GFP_KERNEL);
+		if (!us)
+			return -ENOMEM;
+		port->us_cfg = (void *)us;
+		us->nqvecs = port->nqvecs;
+		us->nrxqs  = port->nrxqs;
+		us->ntxqs = port->ntxqs;
+		us->mtu = dev->mtu;
+		us->rxhash_en = !!(dev->hw_features & NETIF_F_RXHASH);
+
+		port->nqvecs = 0;
+		port->nrxqs  = 0;
+		port->ntxqs  = 0;
+		if (us->rxhash_en) {
+			dev->hw_features &= ~NETIF_F_RXHASH;
+			netdev_update_features(dev);
+		}
+	} else {
+		/* Back to Kernel mode */
+		us = port->us_cfg;
+		port->nqvecs = us->nqvecs;
+		port->nrxqs  = us->nrxqs;
+		port->ntxqs  = us->ntxqs;
+		if (us->rxhash_en) {
+			dev->hw_features |= NETIF_F_RXHASH;
+			netdev_update_features(dev);
+		}
+		kfree(us);
+		port->us_cfg = NULL;
+
+		/* Restore RxQ/pool association */
+		for (rxq = 0; rxq < port->nrxqs; rxq++) {
+			if (port->pool_long && port->pool_short) {
+				mvpp2_rxq_long_pool_set(port, rxq, port->pool_long->id);
+				mvpp2_rxq_short_pool_set(port, rxq,
+							 port->pool_short->id);
+			}
+		}
+	}
+	return 0;
+}
+
+static int mvpp2_port_musdk_set(struct net_device *dev, bool ena)
+{
+	struct mvpp2_port *port = netdev_priv(dev);
+	bool running = netif_running(dev);
+	int err;
+
+	/* This procedure is called by ethtool change or by Module-remove.
+	 * For "remove" do anything only if we are in musdk-mode
+	 * and toggling back to Kernel-mode is really required.
+	 */
+	if (!ena && !port->us_cfg)
+		return 0;
+
+	if (running)
+		mvpp2_stop(dev);
+
+	if (ena) {
+		err = mvpp2_port_musdk_cfg(dev, ena);
+		port->flags |= MVPP22_F_IF_MUSDK;
+	} else {
+		err = mvpp2_port_musdk_cfg(dev, ena);
+		port->flags &= ~MVPP22_F_IF_MUSDK;
+	}
+
+	if (err) {
+		netdev_err(dev, "musdk set=%d: error=%d\n", ena, err);
+		if (err)
+			return err;
+		/* print Error message but continue */
+	}
+
+	if (running)
+		mvpp2_open(dev);
+
+	return 0;
+}
+
+static int mvpp22_set_priv_flags_dsa_tag(struct net_device *dev, u32 new_flags, u32 old_flags)
+{
+	struct mvpp2_port *port = netdev_priv(dev);
+	unsigned long mask = new_flags;
+	int err = 0;
+
+	if (bitmap_weight(&mask, 32) > 1) {
+		netdev_err(dev, "Only one DSA tag type can be set\n");
+		return -EINVAL;
+	}
+
+	if (!!(new_flags ^ old_flags)) {
+		if (new_flags & MVPP22_F_IF_DSA_TAG_PRIV) {
+			port->tag_type = MVPP2_TAG_TYPE_DSA;
+			port->edsa_len = 0;
+			mvpp2_port_enable_non_extended_dsa(port);
+		} else if (new_flags & MVPP22_F_IF_EXTENDED_DSA_TAG_PRIV) {
+			port->tag_type = MVPP2_TAG_TYPE_EDSA;
+			port->edsa_len = MVPP2_EXTENDED_DSA_LEN;
+			mvpp2_port_enable_extended_dsa(port);
+		} else if (new_flags & MVPP22_F_IF_EBRIDGE_DSA_TAG_PRIV) {
+			port->tag_type = MVPP2_TAG_TYPE_EDSA;
+			port->edsa_len = MVPP2_EBRIDGE_DSA_LEN;
+			/* Pre-classifier doesn't support eBridge DSA, just disable it */
+			mvpp2_port_disable_dsa(port);
+		} else {
+			port->tag_type = MVPP2_TAG_TYPE_NONE;
+			port->edsa_len = 0;
+			mvpp2_port_disable_dsa(port);
+		}
+
+		err = mvpp2_prs_tag_mode_set(port->priv, port->id, port->tag_type, port->edsa_len);
+	}
+
+	return err;
+}
+
+static int mvpp22_set_priv_flags(struct net_device *dev, u32 priv_flags)
+{
+	struct mvpp2_port *port = netdev_priv(dev);
+	bool f_old, f_new;
+	u32 dsa_old, dsa_new;
+	int err = 0;
+
+	f_old = port->flags & MVPP22_F_IF_MUSDK;
+	f_new = priv_flags & MVPP22_F_IF_MUSDK_PRIV;
+	if (f_old != f_new) {
+		err = mvpp2_port_musdk_set(dev, f_new);
+		if (err)
+			return err;
+	}
+
+	dsa_old = mvpp22_get_priv_flags(dev) & MVPP2_F_DSA_TAGS_PRIV_MASK;
+	dsa_new = priv_flags & MVPP2_F_DSA_TAGS_PRIV_MASK;
+	err = mvpp22_set_priv_flags_dsa_tag(dev, dsa_new, dsa_old);
+	if (err)
+		return err;
+
+	return err;
+}
+
 /* Device ops */
 
 static const struct net_device_ops mvpp2_netdev_ops = {
@@ -5781,6 +6020,8 @@ static const struct ethtool_ops mvpp2_eth_tool_ops = {
 	.set_rxfh		= mvpp2_ethtool_set_rxfh,
 	.get_rxfh_context	= mvpp2_ethtool_get_rxfh_context,
 	.set_rxfh_context	= mvpp2_ethtool_set_rxfh_context,
+	.get_priv_flags		= mvpp22_get_priv_flags,
+	.set_priv_flags		= mvpp22_set_priv_flags,
 };
 
 /* Used for PPv2.1, or PPv2.2 with the old Device Tree binding that
@@ -6602,7 +6843,9 @@ static void mvpp2_mac_link_up(struct phylink_config *config,
 
 	mvpp2_egress_enable(port);
 	mvpp2_ingress_enable(port);
-	netif_tx_wake_all_queues(port->dev);
+
+	if (!(port->flags & MVPP22_F_IF_MUSDK))
+		netif_tx_wake_all_queues(port->dev);
 }
 
 static void mvpp2_mac_link_down(struct phylink_config *config,
@@ -6625,7 +6868,8 @@ static void mvpp2_mac_link_down(struct phylink_config *config,
 		}
 	}
 
-	netif_tx_stop_all_queues(port->dev);
+	if (!(port->flags & MVPP22_F_IF_MUSDK))
+		netif_tx_stop_all_queues(port->dev);
 	mvpp2_egress_disable(port);
 	mvpp2_ingress_disable(port);
 
@@ -6679,6 +6923,79 @@ static bool mvpp2_use_acpi_compat_mode(struct fwnode_handle *port_fwnode)
 	return (!fwnode_property_present(port_fwnode, "phy-handle") &&
 		!fwnode_property_present(port_fwnode, "managed") &&
 		!fwnode_get_named_child_node(port_fwnode, "fixed-link"));
+}
+
+static void mvpp2_port_enable_non_extended_dsa(struct mvpp2_port *port)
+{
+	struct mvpp2 *priv = port->priv;
+	u32 reg;
+
+	/* For switch port enable non-extended DSA tags and
+	 * make sure the extended DSA tag and Marvell Header
+	 * are disabled as those three options cannot coexist.
+	 */
+	reg = mvpp2_read(priv, MVPP2_MH_REG(port->id));
+	reg &= ~MVPP2_MH;
+	reg &= ~MVPP2_DSA_EXTENDED;
+	reg |= MVPP2_DSA_NON_EXTENDED;
+	mvpp2_write(priv, MVPP2_MH_REG(port->id), reg);
+}
+
+static void mvpp2_port_enable_extended_dsa(struct mvpp2_port *port)
+{
+	struct mvpp2 *priv = port->priv;
+	u32 reg;
+
+	reg = mvpp2_read(priv, MVPP2_MH_REG(port->id));
+	reg &= ~MVPP2_MH;
+	reg &= ~MVPP2_DSA_NON_EXTENDED;
+	reg |= MVPP2_DSA_EXTENDED;
+	mvpp2_write(priv, MVPP2_MH_REG(port->id), reg);
+}
+
+static void mvpp2_port_disable_dsa(struct mvpp2_port *port)
+{
+	struct mvpp2 *priv = port->priv;
+	u32 reg;
+
+	reg = mvpp2_read(priv, MVPP2_MH_REG(port->id));
+	reg &= ~MVPP2_MH;
+	reg &= ~MVPP2_DSA_NON_EXTENDED;
+	reg &= ~MVPP2_DSA_EXTENDED;
+	mvpp2_write(priv, MVPP2_MH_REG(port->id), reg);
+}
+
+static int mvpp2_netdevice_event(struct notifier_block *nb,
+				 unsigned long event, void *ptr)
+{
+#if IS_REACHABLE(CONFIG_NET_DSA)
+	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
+	struct netdev_notifier_changeupper_info *info = ptr;
+	struct mvpp2_port *port;
+
+	port = container_of(nb, struct mvpp2_port, netdev_notifier);
+	if (port->dev != dev)
+		return NOTIFY_DONE;
+
+	switch (event) {
+	case NETDEV_CHANGEUPPER:
+		if (!dsa_slave_dev_check(info->upper_dev))
+			return NOTIFY_DONE;
+
+		if (info->linking) {
+			netdev_dbg(dev, "Registering DSA port %s\n",
+				   info->upper_dev->name);
+			port->tag_type = MVPP2_TAG_TYPE_DSA;
+			port->edsa_len = 0;
+			mvpp2_port_enable_non_extended_dsa(port);
+		}
+		break;
+	default:
+		/* We don't care about other events */
+		return NOTIFY_DONE;
+	}
+#endif
+	return NOTIFY_DONE;
 }
 
 /* Ports initialization */
@@ -6993,10 +7310,21 @@ static int mvpp2_port_probe(struct platform_device *pdev,
 			phy_power_off(port->comphy);
 	}
 
+	port->tag_type = MVPP2_TAG_TYPE_MH;
+	port->edsa_len = 0;
+
+	/* Register DSA notifier */
+	port->netdev_notifier.notifier_call = mvpp2_netdevice_event;
+	err = register_netdevice_notifier(&port->netdev_notifier);
+	if (err) {
+		dev_err(&pdev->dev, "failed to register DSA notifier\n");
+		goto err_phylink;
+	}
+
 	err = register_netdev(dev);
 	if (err < 0) {
 		dev_err(&pdev->dev, "failed to register netdev\n");
-		goto err_phylink;
+		goto err_dsa_notifier;
 	}
 	netdev_info(dev, "Using %s mac address %pM\n", mac_from, dev->dev_addr);
 
@@ -7004,6 +7332,8 @@ static int mvpp2_port_probe(struct platform_device *pdev,
 
 	return 0;
 
+err_dsa_notifier:
+	unregister_netdevice_notifier(&port->netdev_notifier);
 err_phylink:
 	if (port->phylink)
 		phylink_destroy(port->phylink);
@@ -7029,7 +7359,9 @@ static void mvpp2_port_remove(struct mvpp2_port *port)
 {
 	int i;
 
+	mvpp2_port_musdk_set(port->dev, false);
 	unregister_netdev(port->dev);
+	unregister_netdevice_notifier(&port->netdev_notifier);
 	if (port->phylink)
 		phylink_destroy(port->phylink);
 	free_percpu(port->pcpu);
@@ -7473,9 +7805,17 @@ static int mvpp2_probe(struct platform_device *pdev)
 			priv->sysctrl_base = NULL;
 	}
 
+	/*TODO handle or remove this when merging porting changes.
+	 * This changes were done with reference to sdk11 mvpp2 driver porting commit.
+	 * When percpu_pools is set 8 BM pools are configured which caused issue when running
+	 * DPDK application giving segmentation fault. Thus commenting this will configure
+	 * 3 BM pools which is according to sdk11 and DPDK requirement.
+	 */
+/*
 	if (priv->hw_version >= MVPP22 &&
 	    mvpp2_get_nrxqs(priv) * 2 <= MVPP2_BM_MAX_POOLS)
 		priv->percpu_pools = 1;
+*/
 
 	mvpp2_setup_bm_pool();
 
@@ -7583,9 +7923,8 @@ static int mvpp2_probe(struct platform_device *pdev)
 	if (mvpp2_read(priv, MVPP2_VER_ID_REG) == MVPP2_VER_PP23)
 		priv->hw_version = MVPP23;
 
-	/* Init locks for shared packet processor resources */
+	/* Init mss lock */
 	spin_lock_init(&priv->mss_spinlock);
-	spin_lock_init(&priv->prs_spinlock);
 
 	/* Initialize network controller */
 	err = mvpp2_init(pdev, priv);
