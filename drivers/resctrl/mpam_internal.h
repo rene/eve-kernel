@@ -45,12 +45,6 @@ DECLARE_STATIC_KEY_FALSE(mpam_enabled);
  */
 #define USE_PRE_ALLOCATED      (U16_MAX + 1)
 
-/*
- * Only these event configuration bits are supported. MPAM can't know if
- * data is being written back, these will show up as a write.
- */
-#define MPAM_RESTRL_EVT_CONFIG_VALID	(READS_TO_LOCAL_MEM | NON_TEMP_WRITE_TO_LOCAL_MEM)
-
 static inline bool mpam_is_enabled(void)
 {
 	return static_branch_likely(&mpam_enabled);
@@ -369,9 +363,6 @@ struct mpam_config {
 
 	bool	cmax_softlim;
 
-	bool	reset_cpbm;
-	bool	reset_mbw_pbm;
-
 	struct mpam_garbage	garbage;
 };
 
@@ -455,9 +446,7 @@ struct mpam_resctrl_dom {
 	struct mpam_component   *mon_comp[QOS_NUM_EVENTS];
 
 	struct rdt_ctrl_domain	resctrl_ctrl_dom;
-	struct rdt_mon_domain	resctrl_mon_dom;
-
-	u32			mbm_local_evt_cfg;
+	struct rdt_l3_mon_domain	resctrl_mon_dom;
 };
 
 struct mpam_resctrl_res {
@@ -541,7 +530,6 @@ int mpam_apply_config(struct mpam_component *comp, u16 partid,
 int mpam_msmon_read(struct mpam_component *comp, struct mon_cfg *ctx,
 		    enum mpam_device_features, u64 *val);
 void mpam_msmon_reset_mbwu(struct mpam_component *comp, struct mon_cfg *ctx);
-void mpam_msmon_reset_all_mbwu(struct mpam_component *comp);
 
 int mpam_get_cpumask_from_cache_id(unsigned long cache_id, u32 cache_level,
 				   cpumask_t *affinity);
@@ -554,13 +542,13 @@ void mpam_pcc_rx_callback(struct mbox_client *cl, void *msg);
 int mpam_resctrl_setup(void);
 void mpam_resctrl_exit(void);
 int mpam_resctrl_online_cpu(unsigned int cpu);
-int mpam_resctrl_offline_cpu(unsigned int cpu);
+void mpam_resctrl_offline_cpu(unsigned int cpu);
 void mpam_resctrl_teardown_class(struct mpam_class *class);
 #else
 static inline int mpam_resctrl_setup(void) { return 0; }
 static inline void mpam_resctrl_exit(void) { }
 static inline int mpam_resctrl_online_cpu(unsigned int cpu) { return 0; }
-static inline int mpam_resctrl_offline_cpu(unsigned int cpu) { return 0; }
+static inline void mpam_resctrl_offline_cpu(unsigned int cpu) { }
 static inline void mpam_resctrl_teardown_class(struct mpam_class *class) { }
 #endif /* CONFIG_RESCTRL_FS */
 

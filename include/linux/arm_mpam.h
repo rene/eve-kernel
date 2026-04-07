@@ -78,9 +78,6 @@ struct rdt_resource;
 void *resctrl_arch_mon_ctx_alloc(struct rdt_resource *r, enum resctrl_event_id evtid);
 void resctrl_arch_mon_ctx_free(struct rdt_resource *r, enum resctrl_event_id evtid, void *ctx);
 
-bool resctrl_arch_get_mb_uses_numa_nid(void);
-int resctrl_arch_set_mb_uses_numa_nid(bool enabled);
-
 /*
  * The CPU configuration for MPAM is cheap to write, and is only written if it
  * has changed. No need for fine grained enables.

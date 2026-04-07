@@ -723,6 +723,11 @@ static int mpam_ris_get_affinity(struct mpam_msc *msc, cpumask_t *affinity,
 	case MPAM_CLASS_MEMORY:
 		get_cpumask_from_node_id(comp->comp_id, affinity);
 		/* affinity may be empty for CPU-less memory nodes */
+		if (cpumask_empty(affinity)) {
+			dev_warn_once(&msc->pdev->dev, "CPU-less numa node");
+			cpumask_copy(affinity, cpu_possible_mask);
+		} else if (class->level > 3)
+			cpumask_copy(affinity, cpu_possible_mask);
 		break;
 	case MPAM_CLASS_UNKNOWN:
 		return 0;
@@ -1547,15 +1552,15 @@ int mpam_msmon_read(struct mpam_component *comp, struct mon_cfg *ctx,
 	if (!mpam_has_feature(type, cprops))
 		return -EOPNOTSUPP;
 
+	if (type == mpam_feat_msmon_mbwu)
+		type = mpam_msmon_choose_counter(class);
+
 	arg = (struct mon_read) {
 		.ctx = ctx,
 		.type = type,
 		.val = val,
 	};
 	*val = 0;
-
-	if (type == mpam_feat_msmon_mbwu)
-		type = mpam_msmon_choose_counter(class);
 
 	err = _msmon_read(comp, &arg);
 	if (err == -EBUSY && class->nrdy_usec)
@@ -1577,41 +1582,6 @@ int mpam_msmon_read(struct mpam_component *comp, struct mon_cfg *ctx,
 	}
 
 	return err;
-}
-
-void mpam_msmon_reset_all_mbwu(struct mpam_component *comp)
-{
-	int idx, i;
-	struct mpam_msc *msc;
-	struct mpam_vmsc *vmsc;
-	struct mpam_msc_ris *ris;
-
-	if (!mpam_is_enabled())
-		return;
-
-	idx = srcu_read_lock(&mpam_srcu);
-	list_for_each_entry_rcu(vmsc, &comp->vmsc, comp_list) {
-		if (!mpam_has_feature(mpam_feat_msmon_mbwu, &vmsc->props))
-			continue;
-
-		msc = vmsc->msc;
-		mpam_mon_sel_outer_lock(msc);
-		list_for_each_entry_rcu(ris, &msc->ris, vmsc_list) {
-			if (!mpam_has_feature(mpam_feat_msmon_mbwu, &ris->props))
-				continue;
-
-			if (WARN_ON_ONCE(!mpam_mon_sel_inner_lock(msc)))
-				continue;
-
-			for (i = 0; i < ris->props.num_mbwu_mon; i++) {
-				ris->mbwu_state[i].correction = 0;
-				ris->mbwu_state[i].reset_on_next_read = true;
-			}
-			mpam_mon_sel_inner_unlock(msc);
-		}
-		mpam_mon_sel_outer_unlock(msc);
-	}
-	srcu_read_unlock(&mpam_srcu, idx);
 }
 
 void mpam_msmon_reset_mbwu(struct mpam_component *comp, struct mon_cfg *ctx)
@@ -1645,34 +1615,6 @@ void mpam_msmon_reset_mbwu(struct mpam_component *comp, struct mon_cfg *ctx)
 		}
 		mpam_mon_sel_outer_unlock(msc);
 	}
-}
-
-static void mpam_reset_msc_bitmap(struct mpam_msc *msc, u16 reg, u16 wd)
-{
-	u32 num_words, msb;
-	u32 bm = ~0;
-	int i;
-
-	lockdep_assert_held(&msc->part_sel_lock);
-
-	if (wd == 0)
-		return;
-
-	/*
-	 * Write all ~0 to all but the last 32bit-word, which may
-	 * have fewer bits...
-	 */
-	num_words = DIV_ROUND_UP(wd, 32);
-	for (i = 0; i < num_words - 1; i++, reg += sizeof(bm))
-		__mpam_write_reg(msc, reg, bm);
-
-	/*
-	 * ....and then the last (maybe) partial 32bit word. When wd is a
-	 * multiple of 32, msb should be 31 to write a full 32bit word.
-	 */
-	msb = (wd - 1) % 32;
-	bm = GENMASK(msb, 0);
-	__mpam_write_reg(msc, reg, bm);
 }
 
 static void mpam_apply_t241_erratum(struct mpam_msc_ris *ris, u16 partid)
@@ -1713,12 +1655,42 @@ static void mpam_quirk_post_config_change(struct mpam_msc_ris *ris, u16 partid,
 		mpam_apply_t241_erratum(ris, partid);
 }
 
+static u16 mpam_wa_t241_force_mbw_min_to_one(struct mpam_props *props)
+{
+	u16 max_hw_value, min_hw_granule, res0_bits;
+
+	res0_bits = 16 - props->bwa_wd;
+	max_hw_value = ((1 << props->bwa_wd) - 1) << res0_bits;
+	min_hw_granule = ~max_hw_value;
+
+	return min_hw_granule + 1;
+}
+
+static u16 mpam_wa_t241_calc_min_from_max(struct mpam_props *props,
+					  struct mpam_config *cfg)
+{
+	u16 val = 0;
+	u16 max;
+	u16 delta = ((5 * MPAMCFG_MBW_MAX_MAX) / 100) - 1;
+
+	if (mpam_has_feature(mpam_feat_mbw_max, cfg)) {
+		max = cfg->mbw_max;
+	} else {
+		/* Resetting. Hence, use the ris specific default. */
+		max = GENMASK(15, 16 - props->bwa_wd);
+	}
+
+	if (max > delta)
+		val = max - delta;
+
+	return val;
+}
+
 /* Called via IPI. Call while holding an SRCU reference */
 static void mpam_reprogram_ris_partid(struct mpam_msc_ris *ris, u16 partid,
 				      struct mpam_config *cfg)
 {
 	u32 pri_val = 0;
-	u16 cmax = MPAMCFG_CMAX_CMAX;
 	struct mpam_msc *msc = ris->vmsc->msc;
 	struct mpam_props *rprops = &ris->props;
 	u16 dspri = GENMASK(rprops->dspri_wd, 0);
@@ -1740,26 +1712,25 @@ static void mpam_reprogram_ris_partid(struct mpam_msc_ris *ris, u16 partid,
 	}
 
 	if (mpam_has_feature(mpam_feat_cpor_part, rprops) &&
-	    mpam_has_feature(mpam_feat_cpor_part, cfg)) {
-		if (cfg->reset_cpbm)
-			mpam_reset_msc_bitmap(msc, MPAMCFG_CPBM,
-					      rprops->cpbm_wd);
-		else
-			mpam_write_partsel_reg(msc, CPBM, cfg->cpbm);
-	}
+	    mpam_has_feature(mpam_feat_cpor_part, cfg))
+		mpam_write_partsel_reg(msc, CPBM, cfg->cpbm);
 
 	if (mpam_has_feature(mpam_feat_mbw_part, rprops) &&
-	    mpam_has_feature(mpam_feat_mbw_part, cfg)) {
-		if (cfg->reset_mbw_pbm)
-			mpam_reset_msc_bitmap(msc, MPAMCFG_MBW_PBM,
-					      rprops->mbw_pbm_bits);
-		else
-			mpam_write_partsel_reg(msc, MBW_PBM, cfg->mbw_pbm);
-	}
+	    mpam_has_feature(mpam_feat_mbw_part, cfg))
+		mpam_write_partsel_reg(msc, MBW_PBM, cfg->mbw_pbm);
 
-	if (mpam_has_feature(mpam_feat_mbw_min, rprops) &&
-	    mpam_has_feature(mpam_feat_mbw_min, cfg))
-		mpam_write_partsel_reg(msc, MBW_MIN, cfg->mbw_min);
+	if (mpam_has_feature(mpam_feat_mbw_min, rprops)) {
+		u16 val = 0;
+
+		if (mpam_has_quirk(T241_FORCE_MBW_MIN_TO_ONE, msc)) {
+			u16 min = mpam_wa_t241_force_mbw_min_to_one(rprops);
+
+			val = mpam_wa_t241_calc_min_from_max(rprops, cfg);
+			val = max(val, min);
+		}
+
+		mpam_write_partsel_reg(msc, MBW_MIN, val);
+	}
 
 	if (mpam_has_feature(mpam_feat_mbw_max, rprops) &&
 	    mpam_has_feature(mpam_feat_mbw_max, cfg))
@@ -1769,25 +1740,18 @@ static void mpam_reprogram_ris_partid(struct mpam_msc_ris *ris, u16 partid,
 	    mpam_has_feature(mpam_feat_mbw_prop, cfg))
 		mpam_write_partsel_reg(msc, MBW_PROP, 0);
 
-	if (mpam_has_feature(mpam_feat_cmax_cmax, rprops)) {
-		if (mpam_has_feature(mpam_feat_cmax_cmax, cfg)) {
-			u32 cmax_val = cfg->cmax;
+	if (mpam_has_feature(mpam_feat_cmax_cmax, rprops) &&
+	    mpam_has_feature(mpam_feat_cmax_cmax, cfg)) {
+		u32 cmax = cfg->cmax;
 
-			if (cfg->cmax_softlim)
-				cmax_val |= MPAMCFG_CMAX_SOFTLIM;
-			mpam_write_partsel_reg(msc, CMAX, cmax_val);
-		} else {
-			mpam_write_partsel_reg(msc, CMAX, cmax);
-		}
+		if (cfg->cmax_softlim)
+			cmax |= MPAMCFG_CMAX_SOFTLIM;
+		mpam_write_partsel_reg(msc, CMAX, cmax);
 	}
 
-	if (mpam_has_feature(mpam_feat_cmax_cmin, rprops)) {
-		if (mpam_has_feature(mpam_feat_cmax_cmin, cfg)) {
-			mpam_write_partsel_reg(msc, CMIN, cfg->cmin);
-		} else {
-			mpam_write_partsel_reg(msc, CMIN, 0);
-		}
-	}
+	if (mpam_has_feature(mpam_feat_cmax_cmin, rprops) &&
+	    mpam_has_feature(mpam_feat_cmax_cmin, cfg))
+		mpam_write_partsel_reg(msc, CMIN, cfg->cmin);
 
 	if (mpam_has_feature(mpam_feat_cmax_cassoc, rprops))
 		mpam_write_partsel_reg(msc, CASSOC, MPAMCFG_CASSOC_CASSOC);
@@ -1910,33 +1874,32 @@ static int mpam_save_mbwu_state(void *arg)
 	return 0;
 }
 
-static void mpam_init_reset_cfg(struct mpam_config *reset_cfg)
+static void mpam_init_reset_cfg(struct mpam_config *reset_cfg,
+				const struct mpam_props *props)
 {
-	*reset_cfg = (struct mpam_config) {
-		.cpbm = ~0,
-		.mbw_pbm = ~0,
-		.mbw_max = MPAMCFG_MBW_MAX_MAX,
+	memset(reset_cfg, 0, sizeof(*reset_cfg));
 
-		.reset_cpbm = true,
-		.reset_mbw_pbm = true,
-	};
-	bitmap_fill(reset_cfg->features, MPAM_FEATURE_LAST);
-}
-
-/*
- * This is not part of mpam_init_reset_cfg() as high level callers have the
- * class, and low level callers a ris.
- */
-static void mpam_wa_t241_force_mbw_min_to_one(struct mpam_config *cfg,
-					      struct mpam_props *props)
-{
-	u16 max_hw_value, min_hw_granule, res0_bits;
-
-	res0_bits = 16 - props->bwa_wd;
-	max_hw_value = ((1 << props->bwa_wd) - 1) << res0_bits;
-	min_hw_granule = ~max_hw_value;
-
-	cfg->mbw_min = min_hw_granule + 1;
+	/* Set features and explicit default values for controls supported by this RIS. */
+	if (mpam_has_feature(mpam_feat_cpor_part, props)) {
+		mpam_set_feature(mpam_feat_cpor_part, reset_cfg);
+		reset_cfg->cpbm = GENMASK(props->cpbm_wd - 1, 0);
+	}
+	if (mpam_has_feature(mpam_feat_mbw_part, props)) {
+		mpam_set_feature(mpam_feat_mbw_part, reset_cfg);
+		reset_cfg->mbw_pbm = GENMASK(props->mbw_pbm_bits - 1, 0);
+	}
+	if (mpam_has_feature(mpam_feat_mbw_max, props)) {
+		mpam_set_feature(mpam_feat_mbw_max, reset_cfg);
+		reset_cfg->mbw_max = MPAMCFG_MBW_MAX_MAX;
+	}
+	if (mpam_has_feature(mpam_feat_cmax_cmax, props)) {
+		mpam_set_feature(mpam_feat_cmax_cmax, reset_cfg);
+		reset_cfg->cmax = MPAMCFG_CMAX_CMAX;
+	}
+	if (mpam_has_feature(mpam_feat_cmax_cmin, props)) {
+		mpam_set_feature(mpam_feat_cmax_cmin, reset_cfg);
+		reset_cfg->cmin = 0;
+	}
 }
 
 /*
@@ -1948,14 +1911,11 @@ static int mpam_reset_ris(void *arg)
 	struct mpam_config reset_cfg;
 	struct mpam_msc_ris *ris = arg;
 	struct reprogram_ris reprogram_arg;
-	struct mpam_msc *msc = ris->vmsc->msc;
 
 	if (ris->in_reset_state)
 		return 0;
 
-	mpam_init_reset_cfg(&reset_cfg);
-	if (mpam_has_quirk(T241_FORCE_MBW_MIN_TO_ONE, msc))
-		mpam_wa_t241_force_mbw_min_to_one(&reset_cfg, &ris->props);
+	mpam_init_reset_cfg(&reset_cfg, &ris->props);
 
 	reprogram_arg.ris = ris;
 	reprogram_arg.cfg = &reset_cfg;
@@ -2759,6 +2719,9 @@ static void mpam_enable_merge_class_features(struct mpam_component *comp)
 
 	list_for_each_entry(vmsc, &comp->vmsc, comp_list)
 		__class_props_mismatch(class, vmsc);
+
+	if (mpam_has_quirk(T241_FORCE_MBW_MIN_TO_ONE, class))
+		mpam_clear_feature(mpam_feat_mbw_min, &class->props);
 }
 
 /*
@@ -2854,6 +2817,12 @@ static irqreturn_t __mpam_irq_handler(int irq, struct mpam_msc *msc)
 	pr_err_ratelimited("error irq from msc:%u '%s', partid:%u, pmg: %u, ris: %u\n",
 			   msc->id, mpam_errcode_names[errcode], partid, pmg,
 			   ris);
+
+	/* No action is required for the MPAM programming errors */
+	if ((errcode != MPAM_ERRCODE_REQ_PARTID_RANGE) &&
+	    (errcode != MPAM_ERRCODE_REQ_PMG_RANGE)) {
+		return IRQ_HANDLED;
+	}
 
 	/* Disable this interrupt. */
 	mpam_disable_msc_ecr(msc);
@@ -2988,7 +2957,7 @@ static void __destroy_component_cfg(struct mpam_component *comp)
 static void mpam_reset_component_cfg(struct mpam_component *comp)
 {
 	int i;
-	struct mpam_class *class = comp->class;
+	struct mpam_props *cprops = &comp->class->props;
 
 	mpam_assert_partid_sizes_fixed();
 
@@ -2996,10 +2965,22 @@ static void mpam_reset_component_cfg(struct mpam_component *comp)
 		return;
 
 	for (i = 0; i < mpam_partid_max + 1; i++) {
-		mpam_init_reset_cfg(&comp->cfg[i]);
-		if (mpam_has_quirk(T241_FORCE_MBW_MIN_TO_ONE, class))
-			mpam_wa_t241_force_mbw_min_to_one(&comp->cfg[i],
-							  &class->props);
+		if (cprops->cpbm_wd) {
+			comp->cfg[i].cpbm = GENMASK(cprops->cpbm_wd - 1, 0);
+			mpam_set_feature(mpam_feat_cpor_part, &comp->cfg[i]);
+		}
+		if (cprops->mbw_pbm_bits) {
+			comp->cfg[i].mbw_pbm = GENMASK(cprops->mbw_pbm_bits - 1, 0);
+			mpam_set_feature(mpam_feat_mbw_part, &comp->cfg[i]);
+		}
+		if (cprops->bwa_wd) {
+			comp->cfg[i].mbw_max = MPAMCFG_MBW_MAX_MAX;
+			mpam_set_feature(mpam_feat_mbw_max, &comp->cfg[i]);
+		}
+		if (cprops->cmax_wd) {
+			comp->cfg[i].cmax = MPAMCFG_CMAX_CMAX;
+			mpam_set_feature(mpam_feat_cmax_cmax, &comp->cfg[i]);
+		}
 	}
 }
 
@@ -3434,18 +3415,6 @@ static void mpam_extend_config(struct mpam_class *class, struct mpam_config *cfg
 	u16 max_hw_value, res0_bits;
 
 	/*
-	 * Calculate the values the 'min' control can hold.
-	 * e.g. on a platform with bwa_wd = 8, min_hw_granule is 0x00ff because
-	 * those bits are RES0. Configurations of this value are effectively
-	 * zero. But configurations need to saturate at min_hw_granule on
-	 * systems with mismatched bwa_wd, where the 'less than 0' values are
-	 * implemented on some MSC, but not others.
-	 */
-	res0_bits = 16 - cprops->bwa_wd;
-	max_hw_value = ((1 << cprops->bwa_wd) - 1) << res0_bits;
-	min_hw_granule = ~max_hw_value;
-
-	/*
 	 * MAX and MIN should be set together. If only one is provided,
 	 * generate a configuration for the other. If only one control
 	 * type is supported, the other value will be ignored.
@@ -3454,6 +3423,19 @@ static void mpam_extend_config(struct mpam_class *class, struct mpam_config *cfg
 	 */
 	if (mpam_has_feature(mpam_feat_mbw_max, cfg) &&
 	    !mpam_has_feature(mpam_feat_mbw_min, cfg)) {
+		/*
+		 * Calculate the values the 'min' control can hold.
+		 * e.g. on a platform with bwa_wd = 8, min_hw_granule is 0x00ff
+		 * because those bits are RES0. Configurations of this value
+		 * are effectively zero. But configurations need to saturate
+		 * at min_hw_granule on systems with mismatched bwa_wd, where
+		 * the 'less than 0' values are implemented on some MSC, but
+		 * not others.
+		 */
+		res0_bits = 16 - cprops->bwa_wd;
+		max_hw_value = ((1 << cprops->bwa_wd) - 1) << res0_bits;
+		min_hw_granule = ~max_hw_value;
+
 		delta = ((5 * MPAMCFG_MBW_MAX_MAX) / 100) - 1;
 		if (cfg->mbw_max > delta)
 			min = cfg->mbw_max - delta;
@@ -3461,12 +3443,6 @@ static void mpam_extend_config(struct mpam_class *class, struct mpam_config *cfg
 			min = 0;
 
 		cfg->mbw_min = max(min, min_hw_granule);
-		mpam_set_feature(mpam_feat_mbw_min, cfg);
-	}
-
-	if (mpam_has_quirk(T241_FORCE_MBW_MIN_TO_ONE, class) &&
-	    cfg->mbw_min <= min_hw_granule) {
-		cfg->mbw_min = min_hw_granule + 1;
 		mpam_set_feature(mpam_feat_mbw_min, cfg);
 	}
 }
