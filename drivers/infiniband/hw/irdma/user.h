@@ -321,7 +321,6 @@ struct irdma_qp_uk {
 	__le64 *shadow_area;
 	struct irdma_ring sq_ring;
 	struct irdma_ring rq_ring;
-	struct irdma_ring initial_ring;
 	u32 qp_id;
 	u32 qp_caps;
 	u32 sq_size;

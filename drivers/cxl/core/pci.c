@@ -4,14 +4,20 @@
 #include <linux/io-64-nonatomic-lo-hi.h>
 #include <linux/device.h>
 #include <linux/delay.h>
+#include <linux/memory_hotplug.h>
+#include <linux/memregion.h>
 #include <linux/pci.h>
 #include <linux/pci-doe.h>
+#include <cxl/pci.h>
 #include <linux/aer.h>
 #include <cxlpci.h>
 #include <cxlmem.h>
 #include <cxl.h>
 #include "core.h"
 #include "trace.h"
+
+/* Initial sibling array capacity: covers max non-ARI functions per slot */
+#define CXL_RESET_SIBLINGS_INIT	8
 
 /**
  * DOC: cxl core pci
@@ -24,84 +30,52 @@ static unsigned short media_ready_timeout = 60;
 module_param(media_ready_timeout, ushort, 0644);
 MODULE_PARM_DESC(media_ready_timeout, "seconds to wait for media ready");
 
-struct cxl_walk_context {
-	struct pci_bus *bus;
-	struct cxl_port *port;
-	int type;
-	int error;
-	int count;
-};
-
-static int match_add_dports(struct pci_dev *pdev, void *data)
+static int pci_get_port_num(struct pci_dev *pdev)
 {
-	struct cxl_walk_context *ctx = data;
-	struct cxl_port *port = ctx->port;
-	int type = pci_pcie_type(pdev);
-	struct cxl_register_map map;
-	struct cxl_dport *dport;
-	u32 lnkcap, port_num;
-	int rc;
+	u32 lnkcap;
+	int type;
 
-	if (pdev->bus != ctx->bus)
-		return 0;
-	if (!pci_is_pcie(pdev))
-		return 0;
-	if (type != ctx->type)
-		return 0;
+	type = pci_pcie_type(pdev);
+	if (type != PCI_EXP_TYPE_DOWNSTREAM && type != PCI_EXP_TYPE_ROOT_PORT)
+		return -EINVAL;
+
 	if (pci_read_config_dword(pdev, pci_pcie_cap(pdev) + PCI_EXP_LNKCAP,
 				  &lnkcap))
-		return 0;
+		return -ENXIO;
 
-	rc = cxl_find_regblock(pdev, CXL_REGLOC_RBI_COMPONENT, &map);
-	if (rc)
-		dev_dbg(&port->dev, "failed to find component registers\n");
-
-	port_num = FIELD_GET(PCI_EXP_LNKCAP_PN, lnkcap);
-	dport = devm_cxl_add_dport(port, &pdev->dev, port_num, map.resource);
-	if (IS_ERR(dport)) {
-		ctx->error = PTR_ERR(dport);
-		return PTR_ERR(dport);
-	}
-	ctx->count++;
-
-	return 0;
+	return FIELD_GET(PCI_EXP_LNKCAP_PN, lnkcap);
 }
 
 /**
- * devm_cxl_port_enumerate_dports - enumerate downstream ports of the upstream port
- * @port: cxl_port whose ->uport_dev is the upstream of dports to be enumerated
+ * __devm_cxl_add_dport_by_dev - allocate a dport by dport device
+ * @port: cxl_port that hosts the dport
+ * @dport_dev: 'struct device' of the dport
  *
- * Returns a positive number of dports enumerated or a negative error
- * code.
+ * Returns the allocated dport on success or ERR_PTR() of -errno on error
  */
-int devm_cxl_port_enumerate_dports(struct cxl_port *port)
+struct cxl_dport *__devm_cxl_add_dport_by_dev(struct cxl_port *port,
+					      struct device *dport_dev)
 {
-	struct pci_bus *bus = cxl_port_to_pci_bus(port);
-	struct cxl_walk_context ctx;
-	int type;
+	struct cxl_register_map map;
+	struct pci_dev *pdev;
+	int port_num, rc;
 
-	if (!bus)
-		return -ENXIO;
+	if (!dev_is_pci(dport_dev))
+		return ERR_PTR(-EINVAL);
 
-	if (pci_is_root_bus(bus))
-		type = PCI_EXP_TYPE_ROOT_PORT;
-	else
-		type = PCI_EXP_TYPE_DOWNSTREAM;
+	pdev = to_pci_dev(dport_dev);
+	port_num = pci_get_port_num(pdev);
+	if (port_num < 0)
+		return ERR_PTR(port_num);
 
-	ctx = (struct cxl_walk_context) {
-		.port = port,
-		.bus = bus,
-		.type = type,
-	};
-	pci_walk_bus(bus, match_add_dports, &ctx);
+	rc = cxl_find_regblock(pdev, CXL_REGLOC_RBI_COMPONENT, &map);
+	if (rc)
+		return ERR_PTR(rc);
 
-	if (ctx.count == 0)
-		return -ENODEV;
-	if (ctx.error)
-		return ctx.error;
-	return ctx.count;
+	device_lock_assert(&port->dev);
+	return devm_cxl_add_dport(port, dport_dev, port_num, map.resource);
 }
-EXPORT_SYMBOL_NS_GPL(devm_cxl_port_enumerate_dports, "CXL");
+EXPORT_SYMBOL_NS_GPL(__devm_cxl_add_dport_by_dev, "CXL");
 
 static int cxl_dvsec_mem_range_valid(struct cxl_dev_state *cxlds, int id)
 {
@@ -118,12 +92,12 @@ static int cxl_dvsec_mem_range_valid(struct cxl_dev_state *cxlds, int id)
 	i = 1;
 	do {
 		rc = pci_read_config_dword(pdev,
-					   d + CXL_DVSEC_RANGE_SIZE_LOW(id),
+					   d + PCI_DVSEC_CXL_RANGE_SIZE_LOW(id),
 					   &temp);
 		if (rc)
 			return rc;
 
-		valid = FIELD_GET(CXL_DVSEC_MEM_INFO_VALID, temp);
+		valid = FIELD_GET(PCI_DVSEC_CXL_MEM_INFO_VALID, temp);
 		if (valid)
 			break;
 		msleep(1000);
@@ -153,11 +127,11 @@ static int cxl_dvsec_mem_range_active(struct cxl_dev_state *cxlds, int id)
 	/* Check MEM ACTIVE bit, up to 60s timeout by default */
 	for (i = media_ready_timeout; i; i--) {
 		rc = pci_read_config_dword(
-			pdev, d + CXL_DVSEC_RANGE_SIZE_LOW(id), &temp);
+			pdev, d + PCI_DVSEC_CXL_RANGE_SIZE_LOW(id), &temp);
 		if (rc)
 			return rc;
 
-		active = FIELD_GET(CXL_DVSEC_MEM_ACTIVE, temp);
+		active = FIELD_GET(PCI_DVSEC_CXL_MEM_ACTIVE, temp);
 		if (active)
 			break;
 		msleep(1000);
@@ -186,11 +160,11 @@ int cxl_await_media_ready(struct cxl_dev_state *cxlds)
 	u16 cap;
 
 	rc = pci_read_config_word(pdev,
-				  d + CXL_DVSEC_CAP_OFFSET, &cap);
+				  d + PCI_DVSEC_CXL_CAP, &cap);
 	if (rc)
 		return rc;
 
-	hdm_count = FIELD_GET(CXL_DVSEC_HDM_COUNT_MASK, cap);
+	hdm_count = FIELD_GET(PCI_DVSEC_CXL_HDM_COUNT, cap);
 	for (i = 0; i < hdm_count; i++) {
 		rc = cxl_dvsec_mem_range_valid(cxlds, i);
 		if (rc)
@@ -218,16 +192,16 @@ static int cxl_set_mem_enable(struct cxl_dev_state *cxlds, u16 val)
 	u16 ctrl;
 	int rc;
 
-	rc = pci_read_config_word(pdev, d + CXL_DVSEC_CTRL_OFFSET, &ctrl);
+	rc = pci_read_config_word(pdev, d + PCI_DVSEC_CXL_CTRL, &ctrl);
 	if (rc < 0)
 		return rc;
 
-	if ((ctrl & CXL_DVSEC_MEM_ENABLE) == val)
+	if ((ctrl & PCI_DVSEC_CXL_MEM_ENABLE) == val)
 		return 1;
-	ctrl &= ~CXL_DVSEC_MEM_ENABLE;
+	ctrl &= ~PCI_DVSEC_CXL_MEM_ENABLE;
 	ctrl |= val;
 
-	rc = pci_write_config_word(pdev, d + CXL_DVSEC_CTRL_OFFSET, ctrl);
+	rc = pci_write_config_word(pdev, d + PCI_DVSEC_CXL_CTRL, ctrl);
 	if (rc < 0)
 		return rc;
 
@@ -243,7 +217,7 @@ static int devm_cxl_enable_mem(struct device *host, struct cxl_dev_state *cxlds)
 {
 	int rc;
 
-	rc = cxl_set_mem_enable(cxlds, CXL_DVSEC_MEM_ENABLE);
+	rc = cxl_set_mem_enable(cxlds, PCI_DVSEC_CXL_MEM_ENABLE);
 	if (rc < 0)
 		return rc;
 	if (rc > 0)
@@ -305,11 +279,11 @@ int cxl_dvsec_rr_decode(struct cxl_dev_state *cxlds,
 		return -ENXIO;
 	}
 
-	rc = pci_read_config_word(pdev, d + CXL_DVSEC_CAP_OFFSET, &cap);
+	rc = pci_read_config_word(pdev, d + PCI_DVSEC_CXL_CAP, &cap);
 	if (rc)
 		return rc;
 
-	if (!(cap & CXL_DVSEC_MEM_CAPABLE)) {
+	if (!(cap & PCI_DVSEC_CXL_MEM_CAPABLE)) {
 		dev_dbg(dev, "Not MEM Capable\n");
 		return -ENXIO;
 	}
@@ -320,7 +294,7 @@ int cxl_dvsec_rr_decode(struct cxl_dev_state *cxlds,
 	 * driver is for a spec defined class code which must be CXL.mem
 	 * capable, there is no point in continuing to enable CXL.mem.
 	 */
-	hdm_count = FIELD_GET(CXL_DVSEC_HDM_COUNT_MASK, cap);
+	hdm_count = FIELD_GET(PCI_DVSEC_CXL_HDM_COUNT, cap);
 	if (!hdm_count || hdm_count > 2)
 		return -EINVAL;
 
@@ -329,11 +303,11 @@ int cxl_dvsec_rr_decode(struct cxl_dev_state *cxlds,
 	 * disabled, and they will remain moot after the HDM Decoder
 	 * capability is enabled.
 	 */
-	rc = pci_read_config_word(pdev, d + CXL_DVSEC_CTRL_OFFSET, &ctrl);
+	rc = pci_read_config_word(pdev, d + PCI_DVSEC_CXL_CTRL, &ctrl);
 	if (rc)
 		return rc;
 
-	info->mem_enabled = FIELD_GET(CXL_DVSEC_MEM_ENABLE, ctrl);
+	info->mem_enabled = FIELD_GET(PCI_DVSEC_CXL_MEM_ENABLE, ctrl);
 	if (!info->mem_enabled)
 		return 0;
 
@@ -346,35 +320,35 @@ int cxl_dvsec_rr_decode(struct cxl_dev_state *cxlds,
 			return rc;
 
 		rc = pci_read_config_dword(
-			pdev, d + CXL_DVSEC_RANGE_SIZE_HIGH(i), &temp);
+			pdev, d + PCI_DVSEC_CXL_RANGE_SIZE_HIGH(i), &temp);
 		if (rc)
 			return rc;
 
 		size = (u64)temp << 32;
 
 		rc = pci_read_config_dword(
-			pdev, d + CXL_DVSEC_RANGE_SIZE_LOW(i), &temp);
+			pdev, d + PCI_DVSEC_CXL_RANGE_SIZE_LOW(i), &temp);
 		if (rc)
 			return rc;
 
-		size |= temp & CXL_DVSEC_MEM_SIZE_LOW_MASK;
+		size |= temp & PCI_DVSEC_CXL_MEM_SIZE_LOW;
 		if (!size) {
 			continue;
 		}
 
 		rc = pci_read_config_dword(
-			pdev, d + CXL_DVSEC_RANGE_BASE_HIGH(i), &temp);
+			pdev, d + PCI_DVSEC_CXL_RANGE_BASE_HIGH(i), &temp);
 		if (rc)
 			return rc;
 
 		base = (u64)temp << 32;
 
 		rc = pci_read_config_dword(
-			pdev, d + CXL_DVSEC_RANGE_BASE_LOW(i), &temp);
+			pdev, d + PCI_DVSEC_CXL_RANGE_BASE_LOW(i), &temp);
 		if (rc)
 			return rc;
 
-		base |= temp & CXL_DVSEC_MEM_BASE_LOW_MASK;
+		base |= temp & PCI_DVSEC_CXL_MEM_BASE_LOW;
 
 		info->dvsec_range[ranges++] = (struct range) {
 			.start = base,
@@ -664,324 +638,6 @@ err:
 }
 EXPORT_SYMBOL_NS_GPL(read_cdat_data, "CXL");
 
-static void __cxl_handle_cor_ras(struct cxl_dev_state *cxlds,
-				 void __iomem *ras_base)
-{
-	void __iomem *addr;
-	u32 status;
-
-	if (!ras_base)
-		return;
-
-	addr = ras_base + CXL_RAS_CORRECTABLE_STATUS_OFFSET;
-	status = readl(addr);
-	if (status & CXL_RAS_CORRECTABLE_STATUS_MASK) {
-		writel(status & CXL_RAS_CORRECTABLE_STATUS_MASK, addr);
-		trace_cxl_aer_correctable_error(cxlds->cxlmd, status);
-	}
-}
-
-static void cxl_handle_endpoint_cor_ras(struct cxl_dev_state *cxlds)
-{
-	return __cxl_handle_cor_ras(cxlds, cxlds->regs.ras);
-}
-
-/* CXL spec rev3.0 8.2.4.16.1 */
-static void header_log_copy(void __iomem *ras_base, u32 *log)
-{
-	void __iomem *addr;
-	u32 *log_addr;
-	int i, log_u32_size = CXL_HEADERLOG_SIZE / sizeof(u32);
-
-	addr = ras_base + CXL_RAS_HEADER_LOG_OFFSET;
-	log_addr = log;
-
-	for (i = 0; i < log_u32_size; i++) {
-		*log_addr = readl(addr);
-		log_addr++;
-		addr += sizeof(u32);
-	}
-}
-
-/*
- * Log the state of the RAS status registers and prepare them to log the
- * next error status. Return 1 if reset needed.
- */
-static bool __cxl_handle_ras(struct cxl_dev_state *cxlds,
-				  void __iomem *ras_base)
-{
-	u32 hl[CXL_HEADERLOG_SIZE_U32];
-	void __iomem *addr;
-	u32 status;
-	u32 fe;
-
-	if (!ras_base)
-		return false;
-
-	addr = ras_base + CXL_RAS_UNCORRECTABLE_STATUS_OFFSET;
-	status = readl(addr);
-	if (!(status & CXL_RAS_UNCORRECTABLE_STATUS_MASK))
-		return false;
-
-	/* If multiple errors, log header points to first error from ctrl reg */
-	if (hweight32(status) > 1) {
-		void __iomem *rcc_addr =
-			ras_base + CXL_RAS_CAP_CONTROL_OFFSET;
-
-		fe = BIT(FIELD_GET(CXL_RAS_CAP_CONTROL_FE_MASK,
-				   readl(rcc_addr)));
-	} else {
-		fe = status;
-	}
-
-	header_log_copy(ras_base, hl);
-	trace_cxl_aer_uncorrectable_error(cxlds->cxlmd, status, fe, hl);
-	writel(status & CXL_RAS_UNCORRECTABLE_STATUS_MASK, addr);
-
-	return true;
-}
-
-static bool cxl_handle_endpoint_ras(struct cxl_dev_state *cxlds)
-{
-	return __cxl_handle_ras(cxlds, cxlds->regs.ras);
-}
-
-#ifdef CONFIG_PCIEAER_CXL
-
-static void cxl_dport_map_rch_aer(struct cxl_dport *dport)
-{
-	resource_size_t aer_phys;
-	struct device *host;
-	u16 aer_cap;
-
-	aer_cap = cxl_rcrb_to_aer(dport->dport_dev, dport->rcrb.base);
-	if (aer_cap) {
-		host = dport->reg_map.host;
-		aer_phys = aer_cap + dport->rcrb.base;
-		dport->regs.dport_aer = devm_cxl_iomap_block(host, aer_phys,
-						sizeof(struct aer_capability_regs));
-	}
-}
-
-static void cxl_dport_map_ras(struct cxl_dport *dport)
-{
-	struct cxl_register_map *map = &dport->reg_map;
-	struct device *dev = dport->dport_dev;
-
-	if (!map->component_map.ras.valid)
-		dev_dbg(dev, "RAS registers not found\n");
-	else if (cxl_map_component_regs(map, &dport->regs.component,
-					BIT(CXL_CM_CAP_CAP_ID_RAS)))
-		dev_dbg(dev, "Failed to map RAS capability.\n");
-}
-
-static void cxl_disable_rch_root_ints(struct cxl_dport *dport)
-{
-	void __iomem *aer_base = dport->regs.dport_aer;
-	u32 aer_cmd_mask, aer_cmd;
-
-	if (!aer_base)
-		return;
-
-	/*
-	 * Disable RCH root port command interrupts.
-	 * CXL 3.0 12.2.1.1 - RCH Downstream Port-detected Errors
-	 *
-	 * This sequence may not be necessary. CXL spec states disabling
-	 * the root cmd register's interrupts is required. But, PCI spec
-	 * shows these are disabled by default on reset.
-	 */
-	aer_cmd_mask = (PCI_ERR_ROOT_CMD_COR_EN |
-			PCI_ERR_ROOT_CMD_NONFATAL_EN |
-			PCI_ERR_ROOT_CMD_FATAL_EN);
-	aer_cmd = readl(aer_base + PCI_ERR_ROOT_COMMAND);
-	aer_cmd &= ~aer_cmd_mask;
-	writel(aer_cmd, aer_base + PCI_ERR_ROOT_COMMAND);
-}
-
-/**
- * cxl_dport_init_ras_reporting - Setup CXL RAS report on this dport
- * @dport: the cxl_dport that needs to be initialized
- * @host: host device for devm operations
- */
-void cxl_dport_init_ras_reporting(struct cxl_dport *dport, struct device *host)
-{
-	dport->reg_map.host = host;
-	cxl_dport_map_ras(dport);
-
-	if (dport->rch) {
-		struct pci_host_bridge *host_bridge = to_pci_host_bridge(dport->dport_dev);
-
-		if (!host_bridge->native_aer)
-			return;
-
-		cxl_dport_map_rch_aer(dport);
-		cxl_disable_rch_root_ints(dport);
-	}
-}
-EXPORT_SYMBOL_NS_GPL(cxl_dport_init_ras_reporting, "CXL");
-
-static void cxl_handle_rdport_cor_ras(struct cxl_dev_state *cxlds,
-					  struct cxl_dport *dport)
-{
-	return __cxl_handle_cor_ras(cxlds, dport->regs.ras);
-}
-
-static bool cxl_handle_rdport_ras(struct cxl_dev_state *cxlds,
-				       struct cxl_dport *dport)
-{
-	return __cxl_handle_ras(cxlds, dport->regs.ras);
-}
-
-/*
- * Copy the AER capability registers using 32 bit read accesses.
- * This is necessary because RCRB AER capability is MMIO mapped. Clear the
- * status after copying.
- *
- * @aer_base: base address of AER capability block in RCRB
- * @aer_regs: destination for copying AER capability
- */
-static bool cxl_rch_get_aer_info(void __iomem *aer_base,
-				 struct aer_capability_regs *aer_regs)
-{
-	int read_cnt = sizeof(struct aer_capability_regs) / sizeof(u32);
-	u32 *aer_regs_buf = (u32 *)aer_regs;
-	int n;
-
-	if (!aer_base)
-		return false;
-
-	/* Use readl() to guarantee 32-bit accesses */
-	for (n = 0; n < read_cnt; n++)
-		aer_regs_buf[n] = readl(aer_base + n * sizeof(u32));
-
-	writel(aer_regs->uncor_status, aer_base + PCI_ERR_UNCOR_STATUS);
-	writel(aer_regs->cor_status, aer_base + PCI_ERR_COR_STATUS);
-
-	return true;
-}
-
-/* Get AER severity. Return false if there is no error. */
-static bool cxl_rch_get_aer_severity(struct aer_capability_regs *aer_regs,
-				     int *severity)
-{
-	if (aer_regs->uncor_status & ~aer_regs->uncor_mask) {
-		if (aer_regs->uncor_status & PCI_ERR_ROOT_FATAL_RCV)
-			*severity = AER_FATAL;
-		else
-			*severity = AER_NONFATAL;
-		return true;
-	}
-
-	if (aer_regs->cor_status & ~aer_regs->cor_mask) {
-		*severity = AER_CORRECTABLE;
-		return true;
-	}
-
-	return false;
-}
-
-static void cxl_handle_rdport_errors(struct cxl_dev_state *cxlds)
-{
-	struct pci_dev *pdev = to_pci_dev(cxlds->dev);
-	struct aer_capability_regs aer_regs;
-	struct cxl_dport *dport;
-	int severity;
-
-	struct cxl_port *port __free(put_cxl_port) =
-		cxl_pci_find_port(pdev, &dport);
-	if (!port)
-		return;
-
-	if (!cxl_rch_get_aer_info(dport->regs.dport_aer, &aer_regs))
-		return;
-
-	if (!cxl_rch_get_aer_severity(&aer_regs, &severity))
-		return;
-
-	pci_print_aer(pdev, severity, &aer_regs);
-
-	if (severity == AER_CORRECTABLE)
-		cxl_handle_rdport_cor_ras(cxlds, dport);
-	else
-		cxl_handle_rdport_ras(cxlds, dport);
-}
-
-#else
-static void cxl_handle_rdport_errors(struct cxl_dev_state *cxlds) { }
-#endif
-
-void cxl_cor_error_detected(struct pci_dev *pdev)
-{
-	struct cxl_dev_state *cxlds = pci_get_drvdata(pdev);
-	struct device *dev = &cxlds->cxlmd->dev;
-
-	scoped_guard(device, dev) {
-		if (!dev->driver) {
-			dev_warn(&pdev->dev,
-				 "%s: memdev disabled, abort error handling\n",
-				 dev_name(dev));
-			return;
-		}
-
-		if (cxlds->rcd)
-			cxl_handle_rdport_errors(cxlds);
-
-		cxl_handle_endpoint_cor_ras(cxlds);
-	}
-}
-EXPORT_SYMBOL_NS_GPL(cxl_cor_error_detected, "CXL");
-
-pci_ers_result_t cxl_error_detected(struct pci_dev *pdev,
-				    pci_channel_state_t state)
-{
-	struct cxl_dev_state *cxlds = pci_get_drvdata(pdev);
-	struct cxl_memdev *cxlmd = cxlds->cxlmd;
-	struct device *dev = &cxlmd->dev;
-	bool ue;
-
-	scoped_guard(device, dev) {
-		if (!dev->driver) {
-			dev_warn(&pdev->dev,
-				 "%s: memdev disabled, abort error handling\n",
-				 dev_name(dev));
-			return PCI_ERS_RESULT_DISCONNECT;
-		}
-
-		if (cxlds->rcd)
-			cxl_handle_rdport_errors(cxlds);
-		/*
-		 * A frozen channel indicates an impending reset which is fatal to
-		 * CXL.mem operation, and will likely crash the system. On the off
-		 * chance the situation is recoverable dump the status of the RAS
-		 * capability registers and bounce the active state of the memdev.
-		 */
-		ue = cxl_handle_endpoint_ras(cxlds);
-	}
-
-
-	switch (state) {
-	case pci_channel_io_normal:
-		if (ue) {
-			device_release_driver(dev);
-			return PCI_ERS_RESULT_NEED_RESET;
-		}
-		return PCI_ERS_RESULT_CAN_RECOVER;
-	case pci_channel_io_frozen:
-		dev_warn(&pdev->dev,
-			 "%s: frozen state error detected, disable CXL.mem\n",
-			 dev_name(dev));
-		device_release_driver(dev);
-		return PCI_ERS_RESULT_NEED_RESET;
-	case pci_channel_io_perm_failure:
-		dev_warn(&pdev->dev,
-			 "failure state error detected, request disconnect\n");
-		return PCI_ERS_RESULT_DISCONNECT;
-	}
-	return PCI_ERS_RESULT_NEED_RESET;
-}
-EXPORT_SYMBOL_NS_GPL(cxl_error_detected, "CXL");
-
 static int cxl_flit_size(struct pci_dev *pdev)
 {
 	if (cxl_pci_flit_256(pdev))
@@ -1046,6 +702,68 @@ bool cxl_endpoint_decoder_reset_detected(struct cxl_port *port)
 }
 EXPORT_SYMBOL_NS_GPL(cxl_endpoint_decoder_reset_detected, "CXL");
 
+static int cxl_rcrb_get_comp_regs(struct pci_dev *pdev,
+				  struct cxl_register_map *map,
+				  struct cxl_dport *dport)
+{
+	resource_size_t component_reg_phys;
+
+	*map = (struct cxl_register_map) {
+		.host = &pdev->dev,
+		.resource = CXL_RESOURCE_NONE,
+	};
+
+	struct cxl_port *port __free(put_cxl_port) =
+		cxl_pci_find_port(pdev, &dport);
+	if (!port)
+		return -EPROBE_DEFER;
+
+	component_reg_phys = cxl_rcd_component_reg_phys(&pdev->dev, dport);
+	if (component_reg_phys == CXL_RESOURCE_NONE)
+		return -ENXIO;
+
+	map->resource = component_reg_phys;
+	map->reg_type = CXL_REGLOC_RBI_COMPONENT;
+	map->max_size = CXL_COMPONENT_REG_BLOCK_SIZE;
+
+	return 0;
+}
+
+int cxl_pci_setup_regs(struct pci_dev *pdev, enum cxl_regloc_type type,
+			struct cxl_register_map *map)
+{
+	int rc;
+
+	rc = cxl_find_regblock(pdev, type, map);
+
+	/*
+	 * If the Register Locator DVSEC does not exist, check if it
+	 * is an RCH and try to extract the Component Registers from
+	 * an RCRB.
+	 */
+	if (rc && type == CXL_REGLOC_RBI_COMPONENT && is_cxl_restricted(pdev)) {
+		struct cxl_dport *dport;
+		struct cxl_port *port __free(put_cxl_port) =
+			cxl_pci_find_port(pdev, &dport);
+		if (!port)
+			return -EPROBE_DEFER;
+
+		rc = cxl_rcrb_get_comp_regs(pdev, map, dport);
+		if (rc)
+			return rc;
+
+		rc = cxl_dport_map_rcd_linkcap(pdev, dport);
+		if (rc)
+			return rc;
+
+	} else if (rc) {
+		return rc;
+	}
+
+	return cxl_setup_regs(map);
+}
+EXPORT_SYMBOL_NS_GPL(cxl_pci_setup_regs, "CXL");
+
 int cxl_pci_get_bandwidth(struct pci_dev *pdev, struct access_coordinate *c)
 {
 	int speed, bw;
@@ -1100,7 +818,7 @@ u16 cxl_gpf_get_dvsec(struct device *dev)
 		is_port = false;
 
 	dvsec = pci_find_dvsec_capability(pdev, PCI_VENDOR_ID_CXL,
-			is_port ? CXL_DVSEC_PORT_GPF : CXL_DVSEC_DEVICE_GPF);
+			is_port ? PCI_DVSEC_CXL_PORT_GPF : PCI_DVSEC_CXL_DEVICE_GPF);
 	if (!dvsec)
 		dev_warn(dev, "%s GPF DVSEC not present\n",
 			 is_port ? "Port" : "Device");
@@ -1116,14 +834,14 @@ static int update_gpf_port_dvsec(struct pci_dev *pdev, int dvsec, int phase)
 
 	switch (phase) {
 	case 1:
-		offset = CXL_DVSEC_PORT_GPF_PHASE_1_CONTROL_OFFSET;
-		base = CXL_DVSEC_PORT_GPF_PHASE_1_TMO_BASE_MASK;
-		scale = CXL_DVSEC_PORT_GPF_PHASE_1_TMO_SCALE_MASK;
+		offset = PCI_DVSEC_CXL_PORT_GPF_PHASE_1_CONTROL;
+		base = PCI_DVSEC_CXL_PORT_GPF_PHASE_1_TMO_BASE;
+		scale = PCI_DVSEC_CXL_PORT_GPF_PHASE_1_TMO_SCALE;
 		break;
 	case 2:
-		offset = CXL_DVSEC_PORT_GPF_PHASE_2_CONTROL_OFFSET;
-		base = CXL_DVSEC_PORT_GPF_PHASE_2_TMO_BASE_MASK;
-		scale = CXL_DVSEC_PORT_GPF_PHASE_2_TMO_SCALE_MASK;
+		offset = PCI_DVSEC_CXL_PORT_GPF_PHASE_2_CONTROL;
+		base = PCI_DVSEC_CXL_PORT_GPF_PHASE_2_TMO_BASE;
+		scale = PCI_DVSEC_CXL_PORT_GPF_PHASE_2_TMO_SCALE;
 		break;
 	default:
 		return -EINVAL;
@@ -1168,4 +886,586 @@ int cxl_gpf_port_setup(struct cxl_dport *dport)
 	}
 
 	return 0;
+}
+
+struct cxl_walk_context {
+	struct pci_bus *bus;
+	struct cxl_port *port;
+	int type;
+	int error;
+	int count;
+};
+
+static int count_dports(struct pci_dev *pdev, void *data)
+{
+	struct cxl_walk_context *ctx = data;
+	int type = pci_pcie_type(pdev);
+
+	if (pdev->bus != ctx->bus)
+		return 0;
+	if (!pci_is_pcie(pdev))
+		return 0;
+	if (type != ctx->type)
+		return 0;
+
+	ctx->count++;
+	return 0;
+}
+
+int cxl_port_get_possible_dports(struct cxl_port *port)
+{
+	struct pci_bus *bus = cxl_port_to_pci_bus(port);
+	struct cxl_walk_context ctx;
+	int type;
+
+	if (!bus) {
+		dev_err(&port->dev, "No PCI bus found for port %s\n",
+			dev_name(&port->dev));
+		return -ENXIO;
+	}
+
+	if (pci_is_root_bus(bus))
+		type = PCI_EXP_TYPE_ROOT_PORT;
+	else
+		type = PCI_EXP_TYPE_DOWNSTREAM;
+
+	ctx = (struct cxl_walk_context) {
+		.bus = bus,
+		.type = type,
+	};
+	pci_walk_bus(bus, count_dports, &ctx);
+
+	return ctx.count;
+}
+
+/*
+ * CXL Reset support - core-provided reset logic for CXL devices.
+ *
+ * These functions implement the CXL reset sequence.
+ */
+
+/*
+ * If CXL memory backed by this decoder is online as System RAM, offline
+ * and remove it per CXL spec requirements before issuing CXL Reset.
+ * Returns 0 if memory was not online or was successfully offlined.
+ */
+static int __maybe_unused cxl_offline_memory(struct device *dev, void *data)
+{
+	struct cxl_endpoint_decoder *cxled;
+	struct cxl_region *cxlr;
+	struct cxl_region_params *p;
+	int rc;
+
+	if (!is_endpoint_decoder(dev))
+		return 0;
+
+	cxled = to_cxl_endpoint_decoder(dev);
+	cxlr = cxled->cxld.region;
+	if (!cxlr)
+		return 0;
+
+	p = &cxlr->params;
+	if (!p->res)
+		return 0;
+
+	if (walk_iomem_res_desc(IORES_DESC_NONE,
+				IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY,
+				p->res->start, p->res->end, NULL, NULL) <= 0)
+		return 0;
+
+	dev_info(dev, "Offlining CXL memory [%pr] for reset\n", p->res);
+
+#ifdef CONFIG_MEMORY_HOTREMOVE
+	rc = offline_and_remove_memory(p->res->start, resource_size(p->res));
+	if (rc) {
+		dev_err(dev,
+			"Failed to offline CXL memory [%pr]: %d\n",
+			p->res, rc);
+		return rc;
+	}
+#else
+	dev_err(dev, "Memory hotremove not supported, cannot offline CXL memory\n");
+	rc = -EOPNOTSUPP;
+	return rc;
+#endif
+
+	return 0;
+}
+
+static int __maybe_unused cxl_reset_prepare_memdev(struct cxl_memdev *cxlmd)
+{
+	struct cxl_port *endpoint;
+	struct device *dev;
+
+	if (!cxlmd || !cxlmd->cxlds)
+		return -ENODEV;
+
+	dev = cxlmd->cxlds->dev;
+	endpoint = cxlmd->endpoint;
+	if (!endpoint)
+		return 0;
+
+	return device_for_each_child(&endpoint->dev, NULL,
+				      cxl_offline_memory);
+}
+
+static int __maybe_unused cxl_decoder_flush_cache(struct device *dev, void *data)
+{
+	struct cxl_endpoint_decoder *cxled;
+	struct cxl_region *cxlr;
+	struct resource *res;
+
+	if (!is_endpoint_decoder(dev))
+		return 0;
+
+	cxled = to_cxl_endpoint_decoder(dev);
+	cxlr = cxled->cxld.region;
+	if (!cxlr || !cxlr->params.res)
+		return 0;
+
+	res = cxlr->params.res;
+	cpu_cache_invalidate_memregion(res->start, resource_size(res));
+	return 0;
+}
+
+static int __maybe_unused cxl_reset_flush_cpu_caches(struct cxl_memdev *cxlmd)
+{
+	struct cxl_port *endpoint;
+
+	if (!cxlmd)
+		return 0;
+
+	endpoint = cxlmd->endpoint;
+	if (!endpoint || IS_ERR(endpoint))
+		return 0;
+
+	if (!cpu_cache_has_invalidate_memregion())
+		return 0;
+
+	device_for_each_child(&endpoint->dev, NULL, cxl_decoder_flush_cache);
+	return 0;
+}
+
+/*
+ * Serialize all CXL reset operations globally.
+ */
+static DEFINE_MUTEX(cxl_reset_mutex);
+
+struct cxl_reset_context {
+	struct pci_dev *target;
+	struct pci_dev **pci_functions;
+	int pci_func_count;
+	int pci_func_cap;
+};
+
+/*
+ * Check if a sibling function is non-CXL using the Non-CXL Function Map
+ * DVSEC. Returns true if fn is listed as non-CXL, false otherwise (including
+ * on any read failure).
+ */
+static bool cxl_is_non_cxl_function(struct pci_dev *pdev,
+				     u16 func_map_dvsec, int fn)
+{
+	int reg, bit;
+	u32 map;
+
+	if (pci_ari_enabled(pdev->bus)) {
+		reg = fn / 32;
+		bit = fn % 32;
+	} else {
+		reg = fn;
+		bit = PCI_SLOT(pdev->devfn);
+	}
+
+	if (pci_read_config_dword(pdev,
+				   func_map_dvsec + PCI_DVSEC_CXL_FUNCTION_MAP_REG + (reg * 4),
+				   &map))
+		return false;
+
+	return map & BIT(bit);
+}
+
+struct cxl_reset_walk_ctx {
+	struct cxl_reset_context *ctx;
+	u16 func_map_dvsec;
+	bool ari;
+};
+
+static int cxl_reset_collect_sibling(struct pci_dev *func, void *data)
+{
+	struct cxl_reset_walk_ctx *wctx = data;
+	struct cxl_reset_context *ctx = wctx->ctx;
+	struct pci_dev *pdev = ctx->target;
+	u16 dvsec, cap;
+	int fn;
+
+	if (func == pdev)
+		return 0;
+
+	if (!wctx->ari &&
+	    PCI_SLOT(func->devfn) != PCI_SLOT(pdev->devfn))
+		return 0;
+
+	fn = wctx->ari ? func->devfn : PCI_FUNC(func->devfn);
+	if (wctx->func_map_dvsec &&
+	    cxl_is_non_cxl_function(pdev, wctx->func_map_dvsec, fn))
+		return 0;
+
+	/* Only coordinate with siblings that have CXL.cachemem */
+	dvsec = pci_find_dvsec_capability(func, PCI_VENDOR_ID_CXL,
+					  PCI_DVSEC_CXL_DEVICE);
+	if (!dvsec)
+		return 0;
+	if (pci_read_config_word(func, dvsec + PCI_DVSEC_CXL_CAP, &cap))
+		return 0;
+	if (!(cap & (PCI_DVSEC_CXL_CACHE_CAPABLE |
+		     PCI_DVSEC_CXL_MEM_CAPABLE)))
+		return 0;
+
+	/* Grow sibling array; double capacity for ARI devices when running out of space */
+	if (ctx->pci_func_count >= ctx->pci_func_cap) {
+		struct pci_dev **new;
+		int new_cap = ctx->pci_func_cap ? ctx->pci_func_cap * 2
+						: CXL_RESET_SIBLINGS_INIT;
+
+		new = krealloc(ctx->pci_functions,
+			       new_cap * sizeof(*new), GFP_KERNEL);
+		if (!new)
+			return 1;
+		ctx->pci_functions = new;
+		ctx->pci_func_cap = new_cap;
+	}
+
+	pci_dev_get(func);
+	ctx->pci_functions[ctx->pci_func_count++] = func;
+	return 0;
+}
+
+static void cxl_pci_functions_reset_prepare(struct cxl_reset_context *ctx)
+{
+	struct pci_dev *pdev = ctx->target;
+	struct cxl_reset_walk_ctx wctx;
+	int i;
+
+	ctx->pci_func_count = 0;
+	ctx->pci_functions = NULL;
+	ctx->pci_func_cap = 0;
+
+	wctx.ctx = ctx;
+	wctx.ari = pci_ari_enabled(pdev->bus);
+	wctx.func_map_dvsec = pci_find_dvsec_capability(pdev,
+			PCI_VENDOR_ID_CXL, PCI_DVSEC_CXL_FUNCTION_MAP);
+
+	/* Collect CXL.cachemem siblings under pci_bus_sem */
+	pci_walk_bus(pdev->bus, cxl_reset_collect_sibling, &wctx);
+
+	/* Lock and save/disable siblings outside pci_bus_sem */
+	for (i = 0; i < ctx->pci_func_count; i++) {
+		pci_dev_lock(ctx->pci_functions[i]);
+		pci_dev_save_and_disable(ctx->pci_functions[i]);
+	}
+}
+
+static void cxl_pci_functions_reset_done(struct cxl_reset_context *ctx)
+{
+	int i;
+
+	for (i = 0; i < ctx->pci_func_count; i++) {
+		pci_dev_restore(ctx->pci_functions[i]);
+		pci_dev_unlock(ctx->pci_functions[i]);
+		pci_dev_put(ctx->pci_functions[i]);
+	}
+	kfree(ctx->pci_functions);
+	ctx->pci_functions = NULL;
+	ctx->pci_func_count = 0;
+}
+
+/*
+ * CXL device reset execution
+ */
+static int cxl_dev_reset(struct pci_dev *pdev, int dvsec)
+{
+	static const u32 reset_timeout_ms[] = { 10, 100, 1000, 10000, 100000 };
+	u16 cap, ctrl2, status2;
+	u32 timeout_ms;
+	int rc, idx;
+
+	if (!pci_wait_for_pending_transaction(pdev))
+		pci_err(pdev, "timed out waiting for pending transactions\n");
+
+	rc = pci_read_config_word(pdev, dvsec + PCI_DVSEC_CXL_CAP, &cap);
+	if (rc)
+		return rc;
+
+	rc = pci_read_config_word(pdev, dvsec + PCI_DVSEC_CXL_CTRL2, &ctrl2);
+	if (rc)
+		return rc;
+
+	/*
+	 * Disable caching and initiate cache writeback+invalidation if the
+	 * device supports it. Poll for completion.
+	 * Per CXL r3.2 section 9.6, software may use the cache size from
+	 * DVSEC CXL Capability2 to compute a suitable timeout; we use a
+	 * default of 10ms.
+	 */
+	if (cap & PCI_DVSEC_CXL_CACHE_WBI_CAPABLE) {
+		u32 wbi_poll_us = 100;
+		s32 wbi_remaining_us = 10000;
+
+		ctrl2 |= PCI_DVSEC_CXL_DISABLE_CACHING;
+		rc = pci_write_config_word(pdev, dvsec + PCI_DVSEC_CXL_CTRL2,
+					   ctrl2);
+		if (rc)
+			return rc;
+
+		ctrl2 |= PCI_DVSEC_CXL_INIT_CACHE_WBI;
+		rc = pci_write_config_word(pdev, dvsec + PCI_DVSEC_CXL_CTRL2,
+					   ctrl2);
+		if (rc)
+			return rc;
+
+		do {
+			usleep_range(wbi_poll_us, wbi_poll_us + 1);
+			wbi_remaining_us -= wbi_poll_us;
+			rc = pci_read_config_word(pdev,
+						  dvsec + PCI_DVSEC_CXL_STATUS2,
+						  &status2);
+			if (rc)
+				return rc;
+		} while (!(status2 & PCI_DVSEC_CXL_CACHE_INV) &&
+			 wbi_remaining_us > 0);
+
+		if (!(status2 & PCI_DVSEC_CXL_CACHE_INV)) {
+			pci_err(pdev, "CXL cache WB+I timed out\n");
+			return -ETIMEDOUT;
+		}
+	} else if (cap & PCI_DVSEC_CXL_CACHE_CAPABLE) {
+		ctrl2 |= PCI_DVSEC_CXL_DISABLE_CACHING;
+		rc = pci_write_config_word(pdev, dvsec + PCI_DVSEC_CXL_CTRL2,
+					   ctrl2);
+		if (rc)
+			return rc;
+	}
+
+	if (cap & PCI_DVSEC_CXL_RST_MEM_CLR_CAPABLE) {
+		rc = pci_read_config_word(pdev, dvsec + PCI_DVSEC_CXL_CTRL2,
+					  &ctrl2);
+		if (rc)
+			return rc;
+
+		ctrl2 |= PCI_DVSEC_CXL_RST_MEM_CLR_EN;
+		rc = pci_write_config_word(pdev, dvsec + PCI_DVSEC_CXL_CTRL2,
+					   ctrl2);
+		if (rc)
+			return rc;
+	}
+
+	idx = FIELD_GET(PCI_DVSEC_CXL_RST_TIMEOUT, cap);
+	if (idx >= ARRAY_SIZE(reset_timeout_ms))
+		idx = ARRAY_SIZE(reset_timeout_ms) - 1;
+	timeout_ms = reset_timeout_ms[idx];
+
+	rc = pci_read_config_word(pdev, dvsec + PCI_DVSEC_CXL_CTRL2, &ctrl2);
+	if (rc)
+		return rc;
+
+	ctrl2 |= PCI_DVSEC_CXL_INIT_CXL_RST;
+	rc = pci_write_config_word(pdev, dvsec + PCI_DVSEC_CXL_CTRL2, ctrl2);
+	if (rc)
+		return rc;
+
+	msleep(timeout_ms);
+
+	rc = pci_read_config_word(pdev, dvsec + PCI_DVSEC_CXL_STATUS2,
+				  &status2);
+	if (rc)
+		return rc;
+
+	if (status2 & PCI_DVSEC_CXL_RST_ERR) {
+		pci_err(pdev, "CXL reset error\n");
+		return -EIO;
+	}
+
+	if (!(status2 & PCI_DVSEC_CXL_RST_DONE)) {
+		pci_err(pdev, "CXL reset timeout\n");
+		return -ETIMEDOUT;
+	}
+
+	rc = pci_read_config_word(pdev, dvsec + PCI_DVSEC_CXL_CTRL2, &ctrl2);
+	if (rc)
+		return rc;
+
+	ctrl2 &= ~PCI_DVSEC_CXL_DISABLE_CACHING;
+	rc = pci_write_config_word(pdev, dvsec + PCI_DVSEC_CXL_CTRL2, ctrl2);
+	if (rc)
+		return rc;
+
+	return 0;
+}
+
+static int match_memdev_by_parent(struct device *dev, const void *parent)
+{
+	return is_cxl_memdev(dev) && dev->parent == parent;
+}
+
+static int cxl_do_reset(struct pci_dev *pdev)
+{
+	struct cxl_reset_context ctx = { .target = pdev };
+	struct cxl_memdev *cxlmd = NULL;
+	struct device *memdev = NULL;
+	int dvsec, rc;
+
+	dvsec = pci_find_dvsec_capability(pdev, PCI_VENDOR_ID_CXL,
+					  PCI_DVSEC_CXL_DEVICE);
+	if (!dvsec)
+		return -ENODEV;
+
+	memdev = bus_find_device(&cxl_bus_type, NULL, &pdev->dev,
+				 match_memdev_by_parent);
+	if (memdev) {
+		cxlmd = to_cxl_memdev(memdev);
+		guard(device)(&cxlmd->dev);
+	}
+
+	mutex_lock(&cxl_reset_mutex);
+	pci_dev_lock(pdev);
+
+	if (cxlmd) {
+		rc = cxl_reset_prepare_memdev(cxlmd);
+		if (rc)
+			goto out_unlock;
+
+		cxl_reset_flush_cpu_caches(cxlmd);
+	}
+
+	pci_dev_save_and_disable(pdev);
+	cxl_pci_functions_reset_prepare(&ctx);
+
+	rc = cxl_dev_reset(pdev, dvsec);
+
+	cxl_pci_functions_reset_done(&ctx);
+
+	pci_dev_restore(pdev);
+
+out_unlock:
+	pci_dev_unlock(pdev);
+	mutex_unlock(&cxl_reset_mutex);
+
+	if (memdev)
+		put_device(memdev);
+
+	return rc;
+}
+
+/*
+ * CXL reset sysfs attribute management.
+ *
+ * The cxl_reset attribute is added to PCI devices that advertise CXL Reset
+ * capability. Managed entirely by the CXL module via subsys_interface on
+ * pci_bus_type, avoiding cross-module symbol dependencies between the PCI
+ * core (built-in) and CXL (potentially modular).
+ *
+ * subsys_interface handles existing devices at register time and hot-plug
+ * add/remove automatically. On unregister, remove_dev runs for all tracked
+ * devices under bus core serialization.
+ */
+
+static bool pci_cxl_reset_capable(struct pci_dev *pdev)
+{
+	int dvsec;
+	u16 cap;
+
+	dvsec = pci_find_dvsec_capability(pdev, PCI_VENDOR_ID_CXL,
+					  PCI_DVSEC_CXL_DEVICE);
+	if (!dvsec)
+		return false;
+
+	if (pci_read_config_word(pdev, dvsec + PCI_DVSEC_CXL_CAP, &cap))
+		return false;
+
+	if (!(cap & PCI_DVSEC_CXL_CACHE_CAPABLE) ||
+	    !(cap & PCI_DVSEC_CXL_MEM_CAPABLE))
+		return false;
+
+	return !!(cap & PCI_DVSEC_CXL_RST_CAPABLE);
+}
+
+static ssize_t cxl_reset_store(struct device *dev,
+			       struct device_attribute *attr,
+			       const char *buf, size_t count)
+{
+	struct pci_dev *pdev = to_pci_dev(dev);
+	int rc;
+
+	if (!sysfs_streq(buf, "1"))
+		return -EINVAL;
+
+	rc = cxl_do_reset(pdev);
+	return rc ? rc : count;
+}
+static DEVICE_ATTR_WO(cxl_reset);
+
+static umode_t cxl_reset_attr_is_visible(struct kobject *kobj,
+					  struct attribute *a, int n)
+{
+	struct pci_dev *pdev = to_pci_dev(kobj_to_dev(kobj));
+
+	if (!pci_cxl_reset_capable(pdev))
+		return 0;
+
+	return a->mode;
+}
+
+static struct attribute *cxl_reset_attrs[] = {
+	&dev_attr_cxl_reset.attr,
+	NULL,
+};
+
+static const struct attribute_group cxl_reset_attr_group = {
+	.attrs = cxl_reset_attrs,
+	.is_visible = cxl_reset_attr_is_visible,
+};
+
+static int cxl_reset_add_dev(struct device *dev,
+			     struct subsys_interface *sif)
+{
+	struct pci_dev *pdev = to_pci_dev(dev);
+
+	if (!pci_cxl_reset_capable(pdev))
+		return 0;
+
+	return sysfs_create_group(&dev->kobj, &cxl_reset_attr_group);
+}
+
+static void cxl_reset_remove_dev(struct device *dev,
+				 struct subsys_interface *sif)
+{
+	struct pci_dev *pdev = to_pci_dev(dev);
+
+	if (!pci_cxl_reset_capable(pdev))
+		return;
+
+	sysfs_remove_group(&dev->kobj, &cxl_reset_attr_group);
+}
+
+static struct subsys_interface cxl_reset_interface = {
+	.name		= "cxl_reset",
+	.subsys		= &pci_bus_type,
+	.add_dev	= cxl_reset_add_dev,
+	.remove_dev	= cxl_reset_remove_dev,
+};
+
+void cxl_reset_sysfs_init(void)
+{
+	int rc;
+
+	rc = subsys_interface_register(&cxl_reset_interface);
+	if (rc)
+		pr_warn("CXL: failed to register cxl_reset interface (%d)\n",
+			rc);
+}
+
+void cxl_reset_sysfs_exit(void)
+{
+	subsys_interface_unregister(&cxl_reset_interface);
 }
