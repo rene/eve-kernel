@@ -658,6 +658,7 @@ MODULE_DEVICE_TABLE(of, mtk8250_of_match);
 
 static const struct acpi_device_id mtk8250_acpi_match[] = {
 	{ "MTKI0511" },
+	{ "NVDA0240" },
 	{}
 };
 MODULE_DEVICE_TABLE(acpi, mtk8250_acpi_match);
