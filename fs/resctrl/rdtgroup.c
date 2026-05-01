@@ -1276,6 +1276,17 @@ static int rdt_delay_linear_show(struct kernfs_open_file *of,
 	return 0;
 }
 
+static int rdt_mb_max_lim_show(struct kernfs_open_file *of,
+			       struct seq_file *seq, void *v)
+{
+	struct resctrl_schema *s = rdt_kn_parent_priv(of->kn);
+	struct rdt_resource *r = s->res;
+
+	seq_printf(seq, "%d\n", r->membw.mb_max_lim);
+
+	return 0;
+}
+
 static int max_threshold_occ_show(struct kernfs_open_file *of,
 				  struct seq_file *seq, void *v)
 {
@@ -1487,7 +1498,8 @@ static bool rdtgroup_mode_test_exclusive(struct rdtgroup *rdtgrp)
 
 	list_for_each_entry(s, &resctrl_schema_all, list) {
 		r = s->res;
-		if (r->rid == RDT_RESOURCE_MBA || r->rid == RDT_RESOURCE_SMBA)
+		if (r->rid == RDT_RESOURCE_MBA || r->rid == RDT_RESOURCE_SMBA ||
+		    r->rid == RDT_RESOURCE_MB_HLIM)
 			continue;
 		has_cache = true;
 		list_for_each_entry(d, &r->ctrl_domains, hdr.list) {
@@ -1781,6 +1793,9 @@ static int resctrl_schema_format_show(struct kernfs_open_file *of,
 	/* The way these schema behave isn't discoverable from resctrl */
 	case RESCTRL_SCHEMA__AMD_MBA:
 		seq_puts(seq, "platform\n");
+		break;
+	case RESCTRL_SCHEMA_MB_HLIM:
+		seq_puts(seq, "0/1\n");
 		break;
 	}
 
@@ -2086,6 +2101,12 @@ static struct rftype res_common_files[] = {
 		.seq_show	= rdt_delay_linear_show,
 		.fflags		= RFTYPE_CTRL_INFO | RFTYPE_RES_MB,
 	},
+	{
+		.name		= "max_lim",
+		.mode		= 0444,
+		.kf_ops		= &rdtgroup_kf_single_ops,
+		.seq_show	= rdt_mb_max_lim_show,
+	},
 	/*
 	 * Platform specific which (if any) capabilities are provided by
 	 * thread_throttle_mode. Defer "fflags" initialization to platform
@@ -2303,6 +2324,17 @@ static void thread_throttle_mode_init(void)
 				 RFTYPE_CTRL_INFO | RFTYPE_RES_MB);
 }
 
+/* The resctrl file "max_lim" is added using MB resource if visible. */
+static void mb_max_lim_init(void)
+{
+	struct rdt_resource *r = resctrl_arch_get_resource(RDT_RESOURCE_MBA);
+
+	if (!r->membw.arch_has_mb_max_lim)
+		return;
+
+	resctrl_file_fflags_init("max_lim", RFTYPE_CTRL_INFO | RFTYPE_RES_MB);
+}
+
 void resctrl_file_fflags_init(const char *config, unsigned long fflags)
 {
 	struct rftype *rft;
@@ -2497,6 +2529,8 @@ static unsigned long fflags_from_resource(struct rdt_resource *r)
 		return RFTYPE_RES_MB;
 	case RDT_RESOURCE_PERF_PKG:
 		return RFTYPE_RES_PERF_PKG;
+	case RDT_RESOURCE_MB_HLIM:
+		return 0;
 	}
 
 	return 0;
@@ -2523,6 +2557,7 @@ static u32 fflags_from_schema(struct resctrl_schema *s)
 		fflags |= RFTYPE_SCHEMA_MBPS;
 		break;
 	case RESCTRL_SCHEMA__AMD_MBA:
+	case RESCTRL_SCHEMA_MB_HLIM:
 		/* No standard files are exposed */
 		break;
 	}
@@ -2876,6 +2911,7 @@ static int schemata_list_add(struct rdt_resource *r, enum resctrl_conf_type type
 	case RESCTRL_SCHEMA_PERCENT:
 	case RESCTRL_SCHEMA_MBPS:
 	case RESCTRL_SCHEMA__AMD_MBA:
+	case RESCTRL_SCHEMA_MB_HLIM:
 		s->fmt_str = "%d=%u";
 		break;
 	}
@@ -3830,6 +3866,19 @@ static void rdtgroup_init_mba(struct rdt_resource *r, u32 closid)
 	}
 }
 
+/* Initialize MB_HLIM resource with default hardlim off (0). */
+static void rdtgroup_init_mb_hlim(struct resctrl_schema *s)
+{
+	struct resctrl_staged_config *cfg;
+	struct rdt_ctrl_domain *d;
+
+	list_for_each_entry(d, &s->res->ctrl_domains, hdr.list) {
+		cfg = &d->staged_config[s->conf_type];
+		cfg->new_ctrl = 0;
+		cfg->have_new_ctrl = true;
+	}
+}
+
 /* Initialize the RDT group's allocations. */
 static int rdtgroup_init_alloc(struct rdtgroup *rdtgrp)
 {
@@ -3846,6 +3895,8 @@ static int rdtgroup_init_alloc(struct rdtgroup *rdtgrp)
 			rdtgroup_init_mba(r, rdtgrp->closid);
 			if (is_mba_sc(r))
 				continue;
+		} else if (r->rid == RDT_RESOURCE_MB_HLIM) {
+			rdtgroup_init_mb_hlim(s);
 		} else {
 			ret = rdtgroup_init_cat(s, rdtgrp->closid);
 			if (ret < 0)
@@ -4746,6 +4797,8 @@ int resctrl_init(void)
 	rdtgroup_setup_default();
 
 	thread_throttle_mode_init();
+
+	mb_max_lim_init();
 
 	ret = resctrl_mon_init();
 	if (ret)

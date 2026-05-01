@@ -954,6 +954,19 @@ static bool _mpam_ris_hw_probe_hw_nrdy(struct mpam_msc_ris *ris, u32 mon_reg)
 #define mpam_ris_hw_probe_hw_nrdy(_ris, _mon_reg)			\
 	_mpam_ris_hw_probe_hw_nrdy(_ris, MSMON_##_mon_reg)
 
+/* Align mpam_feat_mbw_max_hardlim_rw with MPAMF_MBW_IDR.MAX_LIM and mbw_max. */
+static void mpam_props_sync_mbw_max_hardlim_rw(struct mpam_props *props)
+{
+	if (!mpam_has_feature(mpam_feat_mbw_max, props)) {
+		mpam_clear_feature(mpam_feat_mbw_max_hardlim_rw, props);
+		return;
+	}
+	if (props->mbw_max_lim == 0)
+		mpam_set_feature(mpam_feat_mbw_max_hardlim_rw, props);
+	else
+		mpam_clear_feature(mpam_feat_mbw_max_hardlim_rw, props);
+}
+
 static void mpam_ris_hw_probe(struct mpam_msc_ris *ris)
 {
 	int err;
@@ -1001,6 +1014,8 @@ static void mpam_ris_hw_probe(struct mpam_msc_ris *ris)
 	if (FIELD_GET(MPAMF_IDR_HAS_MBW_PART, ris->idr)) {
 		u32 mbw_features = mpam_read_partsel_reg(msc, MBW_IDR);
 
+		props->mbw_max_lim = 0;
+
 		/* portion bitmap resolution */
 		props->mbw_pbm_bits = FIELD_GET(MPAMF_MBW_IDR_BWPBM_WD, mbw_features);
 		if (props->mbw_pbm_bits &&
@@ -1015,14 +1030,18 @@ static void mpam_ris_hw_probe(struct mpam_msc_ris *ris)
 		 */
 		props->bwa_wd = min(props->bwa_wd, 16);
 
-		if (props->bwa_wd && FIELD_GET(MPAMF_MBW_IDR_HAS_MAX, mbw_features))
+		if (props->bwa_wd && FIELD_GET(MPAMF_MBW_IDR_HAS_MAX, mbw_features)) {
 			mpam_set_feature(mpam_feat_mbw_max, props);
+			props->mbw_max_lim = FIELD_GET(MPAMF_MBW_IDR_MAX_LIM, mbw_features);
+		}
 
 		if (props->bwa_wd && FIELD_GET(MPAMF_MBW_IDR_HAS_MIN, mbw_features))
 			mpam_set_feature(mpam_feat_mbw_min, props);
 
 		if (props->bwa_wd && FIELD_GET(MPAMF_MBW_IDR_HAS_PROP, mbw_features))
 			mpam_set_feature(mpam_feat_mbw_prop, props);
+
+		mpam_props_sync_mbw_max_hardlim_rw(props);
 	}
 
 	/* Priority partitioning */
@@ -1732,9 +1751,19 @@ static void mpam_reprogram_ris_partid(struct mpam_msc_ris *ris, u16 partid,
 		mpam_write_partsel_reg(msc, MBW_MIN, val);
 	}
 
-	if (mpam_has_feature(mpam_feat_mbw_max, rprops) &&
-	    mpam_has_feature(mpam_feat_mbw_max, cfg))
-		mpam_write_partsel_reg(msc, MBW_MAX, cfg->mbw_max);
+	if (mpam_has_feature(mpam_feat_mbw_max, rprops)) {
+		if (mpam_has_feature(mpam_feat_mbw_max, cfg) ||
+		    mpam_has_feature(mpam_feat_mbw_max_hardlim_rw, cfg)) {
+			u32 mbw_val = cfg->mbw_max;
+
+			if (mpam_has_feature(mpam_feat_mbw_max_hardlim_rw, cfg) &&
+			    cfg->mbw_max_hardlim)
+				mbw_val |= MPAMCFG_MBW_MAX_HARDLIM;
+			mpam_write_partsel_reg(msc, MBW_MAX, mbw_val);
+		} else {
+			mpam_write_partsel_reg(msc, MBW_MAX, MPAMCFG_MBW_MAX_MAX);
+		}
+	}
 
 	if (mpam_has_feature(mpam_feat_mbw_prop, rprops) &&
 	    mpam_has_feature(mpam_feat_mbw_prop, cfg))
@@ -2545,10 +2574,29 @@ static void __props_mismatch(struct mpam_props *parent,
 	if (alias && !mpam_has_bwa_wd_feature(parent) &&
 	    mpam_has_bwa_wd_feature(child)) {
 		parent->bwa_wd = child->bwa_wd;
+		parent->mbw_max_lim = child->mbw_max_lim;
+		if (mpam_has_feature(mpam_feat_mbw_max_hardlim_rw, child))
+			mpam_set_feature(mpam_feat_mbw_max_hardlim_rw, parent);
+		else
+			mpam_clear_feature(mpam_feat_mbw_max_hardlim_rw, parent);
 	} else if (MISMATCHED_HELPER(parent, child, mpam_has_bwa_wd_feature,
 				     bwa_wd, alias)) {
 		pr_debug("took the min bwa_wd\n");
 		parent->bwa_wd = min(parent->bwa_wd, child->bwa_wd);
+	}
+
+	if (CAN_MERGE_FEAT(parent, child, mpam_feat_mbw_max, alias)) {
+		parent->mbw_max_lim = child->mbw_max_lim;
+		if (mpam_has_feature(mpam_feat_mbw_max_hardlim_rw, child))
+			mpam_set_feature(mpam_feat_mbw_max_hardlim_rw, parent);
+		else
+			mpam_clear_feature(mpam_feat_mbw_max_hardlim_rw, parent);
+	} else if (MISMATCHED_FEAT(parent, child, mpam_feat_mbw_max,
+				   mbw_max_lim, alias)) {
+		pr_debug("%s mbw_max_lim mismatch, clearing mbw_max\n", __func__);
+		mpam_clear_feature(mpam_feat_mbw_max, parent);
+		parent->mbw_max_lim = 0;
+		mpam_props_sync_mbw_max_hardlim_rw(parent);
 	}
 
 	if (alias && !mpam_has_cmax_wd_feature(parent) && mpam_has_cmax_wd_feature(child)) {
@@ -3404,6 +3452,8 @@ static bool mpam_update_config(struct mpam_config *cfg,
 	maybe_update_config(cfg, mpam_feat_mbw_part, newcfg, mbw_pbm, has_changes);
 	maybe_update_config(cfg, mpam_feat_mbw_max, newcfg, mbw_max, has_changes);
 	maybe_update_config(cfg, mpam_feat_mbw_min, newcfg, mbw_min, has_changes);
+	maybe_update_config(cfg, mpam_feat_mbw_max_hardlim_rw, newcfg,
+			    mbw_max_hardlim, has_changes);
 
 	return has_changes;
 }
