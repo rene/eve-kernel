@@ -3,7 +3,6 @@
 #define _RESCTRL_H
 
 #include <linux/cacheinfo.h>
-#include <linux/iommu.h>
 #include <linux/kernel.h>
 #include <linux/list.h>
 #include <linux/pid.h>
@@ -55,8 +54,6 @@ enum resctrl_res_level {
 	RDT_RESOURCE_MBA,
 	RDT_RESOURCE_SMBA,
 	RDT_RESOURCE_PERF_PKG,
-	RDT_RESOURCE_L3_MAX,
-	RDT_RESOURCE_L2_MAX,
 
 	/* Must be the last */
 	RDT_NUM_RESOURCES,
@@ -140,7 +137,7 @@ enum resctrl_domain_type {
  */
 struct rdt_domain_hdr {
 	struct list_head		list;
-	u32				id;
+	int				id;
 	enum resctrl_domain_type	type;
 	enum resctrl_res_level		rid;
 	struct cpumask			cpu_mask;
@@ -250,28 +247,22 @@ enum membw_throttle_mode {
  * @min_bw:		Minimum memory bandwidth percentage user can request
  * @max_bw:		Maximum memory bandwidth value, used as the reset value
  * @bw_gran:		Granularity at which the memory bandwidth is allocated
+ * @delay_linear:	True if memory B/W delay is in linear scale
+ * @arch_needs_linear:	True if we can't configure non-linear resources
+ * @throttle_mode:	Bandwidth throttling mode when threads request
+ *			different memory bandwidths
+ * @mba_sc:		True if MBA software controller(mba_sc) is enabled
+ * @mb_map:		Mapping of memory B/W percentage to memory B/W delay
  */
 struct resctrl_membw {
 	u32				min_bw;
 	u32				max_bw;
 	u32				bw_gran;
-};
-
-/**
- * struct resctrl_mba - Resource properties that are specific to the MBA resource
- * @mba_sc:		True if MBA software controller(mba_sc) is enabled
- * @mb_map:		Mapping of memory B/W percentage to memory B/W delay
- * @delay_linear:	True if control is in linear scale
- * @arch_needs_linear:	True if we can't configure non-linear resources
- * @throttle_mode:	Mode when threads request different control values
- */
-struct resctrl_mba {
-	bool				mba_sc;
-	u32				*mb_map;
-	bool				delay_linear;
+	u32				delay_linear;
 	bool				arch_needs_linear;
 	enum membw_throttle_mode	throttle_mode;
-
+	bool				mba_sc;
+	u32				*mb_map;
 };
 
 struct resctrl_schema;
@@ -286,15 +277,11 @@ enum resctrl_scope {
 /**
  * enum resctrl_schema_fmt - The format user-space provides for a schema.
  * @RESCTRL_SCHEMA_BITMAP:	The schema is a bitmap in hex.
- * @RESCTRL_SCHEMA_PERCENT:	The schema is a percentage.
- * @RESCTRL_SCHEMA_MBPS:	The schema ia a MBps value.
- * @RESCTRL_SCHEMA__AMD_MBA:	The schema value is MBA for AMD platforms.
+ * @RESCTRL_SCHEMA_RANGE:	The schema is a decimal number.
  */
 enum resctrl_schema_fmt {
 	RESCTRL_SCHEMA_BITMAP,
-	RESCTRL_SCHEMA_PERCENT,
-	RESCTRL_SCHEMA_MBPS,
-	RESCTRL_SCHEMA__AMD_MBA,
+	RESCTRL_SCHEMA_RANGE,
 };
 
 /**
@@ -327,12 +314,8 @@ struct resctrl_mon {
  * @mon:		Monitoring related data.
  * @ctrl_domains:	RCU list of all control domains for this resource
  * @mon_domains:	RCU list of all monitor domains for this resource
- * @mba:		Properties of the MBA resource
  * @name:		Name to use in "schemata" file.
- * @schema_fmt:		Which format control parameters should be in for this resource.
- * @evt_list:		List of monitoring events
- * @mbm_cfg_mask:	Bandwidth sources that can be tracked when bandwidth
- *			monitoring events can be configured.
+ * @schema_fmt:		Which format string and parser is used for this schema.
  * @cdp_capable:	Is the CDP feature available on this resource
  */
 struct rdt_resource {
@@ -344,7 +327,6 @@ struct rdt_resource {
 	struct resctrl_cache	cache;
 	struct resctrl_membw	membw;
 	struct resctrl_mon	mon;
-	struct resctrl_mba	mba;
 	struct list_head	ctrl_domains;
 	struct list_head	mon_domains;
 	char			*name;
@@ -365,12 +347,9 @@ struct rdt_resource *resctrl_arch_get_resource(enum resctrl_res_level l);
  * @list:	Member of resctrl_schema_all.
  * @name:	The name to use in the "schemata" file.
  * @fmt_str:	Format string to show domain value.
- * @schema_fmt:	Which format string and parser is used for this schema.
  * @conf_type:	Whether this schema is specific to code/data.
  * @res:	The resource structure exported by the architecture to describe
  *		the hardware that is configured by this schema.
- * @membw	The properties of the schema which may be different to the format
- *		that was specified by the resource,
  * @num_closid:	The number of closid that can be used with this schema. When
  *		features like CDP are enabled, this will be lower than the
  *		hardware supports for the resource.
@@ -379,10 +358,8 @@ struct resctrl_schema {
 	struct list_head		list;
 	char				name[8];
 	const char			*fmt_str;
-	enum resctrl_schema_fmt		schema_fmt;
 	enum resctrl_conf_type		conf_type;
 	struct rdt_resource		*res;
-	struct resctrl_membw		membw;
 	u32				num_closid;
 };
 
@@ -416,38 +393,17 @@ struct resctrl_mon_config_info {
 void resctrl_arch_sync_cpu_closid_rmid(void *info);
 
 /**
- * resctrl_get_resource_default_ctrl() - Return the default control value for
- *                                       this resource.
- * @r:		The resource whose default control value is queried.
+ * resctrl_get_default_ctrl() - Return the default control value for this
+ *                              resource.
+ * @r:		The resource whose default control type is queried.
  */
-static inline u32 resctrl_get_resource_default_ctrl(struct rdt_resource *r)
+static inline u32 resctrl_get_default_ctrl(struct rdt_resource *r)
 {
 	switch (r->schema_fmt) {
 	case RESCTRL_SCHEMA_BITMAP:
 		return BIT_MASK(r->cache.cbm_len) - 1;
-	case RESCTRL_SCHEMA_PERCENT:
-	case RESCTRL_SCHEMA_MBPS:
-	case RESCTRL_SCHEMA__AMD_MBA:
+	case RESCTRL_SCHEMA_RANGE:
 		return r->membw.max_bw;
-	}
-
-	return WARN_ON_ONCE(1);
-}
-
-/**
- * resctrl_get_schema_default_ctrl() - Return the default control value for
- *                                     this schema.
- * @s:		The schema whose default control value is queried.
- */
-static inline u32 resctrl_get_schema_default_ctrl(struct resctrl_schema *s)
-{
-	switch (s->schema_fmt) {
-	case RESCTRL_SCHEMA_BITMAP:
-		return resctrl_get_resource_default_ctrl(s->res);
-	case RESCTRL_SCHEMA_PERCENT:
-	case RESCTRL_SCHEMA_MBPS:
-	case RESCTRL_SCHEMA__AMD_MBA:
-		return s->membw.max_bw;
 	}
 
 	return WARN_ON_ONCE(1);
@@ -543,8 +499,6 @@ bool resctrl_arch_mbm_cntr_assign_enabled(struct rdt_resource *r);
  * 0 on success, < 0 on error.
  */
 int resctrl_arch_mbm_cntr_assign_set(struct rdt_resource *r, bool enable);
-
-u32 resctrl_arch_round_bw(u32 val, const struct resctrl_schema *s);
 
 /*
  * Update the ctrl_val and apply this config right now.
@@ -751,7 +705,6 @@ extern unsigned int resctrl_rmid_realloc_limit;
 int resctrl_init(void);
 void resctrl_exit(void);
 
-
 #ifdef CONFIG_RESCTRL_FS_PSEUDO_LOCK
 u64 resctrl_arch_get_prefetch_disable_bits(void);
 int resctrl_arch_pseudo_lock_fn(void *_plr);
@@ -765,30 +718,4 @@ static inline int resctrl_arch_measure_cycles_lat_fn(void *_plr) { return 0; }
 static inline int resctrl_arch_measure_l2_residency(void *_plr) { return 0; }
 static inline int resctrl_arch_measure_l3_residency(void *_plr) { return 0; }
 #endif /* CONFIG_RESCTRL_FS_PSEUDO_LOCK */
-
-/* When supported, the architecture must implement these */
-#ifdef CONFIG_RESCTRL_IOMMU
-int resctrl_arch_set_iommu_closid_rmid(struct iommu_group *group, u32 closid,
-				       u32 rmid);
-bool resctrl_arch_match_iommu_closid(struct iommu_group *group, u32 closid);
-bool resctrl_arch_match_iommu_closid_rmid(struct iommu_group *group, u32 closid,
-					  u32 rmid);
-#else
-static inline int resctrl_arch_set_iommu_closid_rmid(struct iommu_group *group,
-						     u32 closid, u32 rmid)
-{
-	return -EOPNOTSUPP;
-}
-static inline bool resctrl_arch_match_iommu_closid(struct iommu_group *group,
-						   u32 closid)
-{
-	return false;
-}
-static inline bool
-resctrl_arch_match_iommu_closid_rmid(struct iommu_group *group,
-				     u32 closid, u32 rmid)
-{
-	return false;
-}
-#endif /* CONFIG_RESCTRL_IOMMU */
 #endif /* _RESCTRL_H */

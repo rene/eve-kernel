@@ -191,22 +191,8 @@ static inline void resctrl_arch_mon_ctx_free(struct rdt_resource *r,
 					     enum resctrl_event_id evtid,
 					     void *ctx) { }
 
-static inline bool resctrl_arch_mon_can_overflow(void)
-{
-	return true;
-}
-
 void resctrl_cpu_detect(struct cpuinfo_x86 *c);
 
-static inline bool resctrl_arch_get_mb_uses_numa_nid(void)
-{
-	return false;
-}
-
-static inline int resctrl_arch_set_mb_uses_numa_nid(bool enabled)
-{
-	return -EOPNOTSUPP;
-}
 #else
 
 static inline void resctrl_arch_sched_in(struct task_struct *tsk) {}

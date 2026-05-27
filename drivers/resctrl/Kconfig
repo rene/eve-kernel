@@ -1,7 +1,6 @@
 menuconfig ARM64_MPAM_DRIVER
 	bool "MPAM driver"
-	depends on ARM64 && ARM64_MPAM
-	select ACPI_MPAM if ACPI
+	depends on ARM64 && ARM64_MPAM && EXPERT
 	help
 	  Memory System Resource Partitioning and Monitoring (MPAM) driver for
 	  System IP, e.g. caches and memory controllers.
@@ -23,10 +22,3 @@ config MPAM_KUNIT_TEST
 	  If unsure, say N.
 
 endif
-
-config ARM64_MPAM_RESCTRL_FS
-	bool
-	default y if ARM64_MPAM_DRIVER && RESCTRL_FS
-	select RESCTRL_RMID_DEPENDS_ON_CLOSID
-	select RESCTRL_ASSIGN_FIXED
-	select RESCTRL_IOMMU if ARM_SMMU_V3

@@ -12,19 +12,17 @@ static void test__props_mismatch(struct kunit *test)
 {
 	struct mpam_props parent = { 0 };
 	struct mpam_props child;
-	size_t props_bytes = offsetof(struct mpam_props, num_mbwu_mon) +
-			    sizeof(parent.num_mbwu_mon);
 
 	memset(&child, 0xff, sizeof(child));
 	__props_mismatch(&parent, &child, false);
 
 	memset(&child, 0, sizeof(child));
-	KUNIT_EXPECT_EQ(test, memcmp(&parent, &child, props_bytes), 0);
+	KUNIT_EXPECT_EQ(test, memcmp(&parent, &child, sizeof(child)), 0);
 
 	memset(&child, 0xff, sizeof(child));
 	__props_mismatch(&parent, &child, true);
 
-	KUNIT_EXPECT_EQ(test, memcmp(&parent, &child, props_bytes), 0);
+	KUNIT_EXPECT_EQ(test, memcmp(&parent, &child, sizeof(child)), 0);
 }
 
 static struct list_head fake_classes_list;
@@ -324,71 +322,6 @@ static void test_mpam_enable_merge_features(struct kunit *test)
 	mutex_unlock(&mpam_list_lock);
 }
 
-static void test_mpam_extend_config(struct kunit *test)
-{
-	struct mpam_config fake_cfg = { 0 };
-	struct mpam_class fake_class = { 0 };
-
-	/* Configurations with both are not modified */
-	fake_class.props.bwa_wd = 16;
-	fake_cfg.mbw_max = 0xfeef;
-	fake_cfg.mbw_min = 0xfeef;
-	bitmap_zero(fake_cfg.features, MPAM_FEATURE_LAST);
-	mpam_set_feature(mpam_feat_mbw_max, &fake_cfg);
-	mpam_set_feature(mpam_feat_mbw_min, &fake_cfg);
-	mpam_extend_config(&fake_class, &fake_cfg);
-	KUNIT_EXPECT_TRUE(test, mpam_has_feature(mpam_feat_mbw_max, &fake_cfg));
-	KUNIT_EXPECT_TRUE(test, mpam_has_feature(mpam_feat_mbw_min, &fake_cfg));
-	KUNIT_EXPECT_EQ(test, fake_cfg.mbw_max, 0xfeef);
-	KUNIT_EXPECT_EQ(test, fake_cfg.mbw_min, 0xfeef);
-
-	/* When a min is missing, it is generated */
-	fake_class.props.bwa_wd = 16;
-	fake_cfg.mbw_max = 0xfeef;
-	fake_cfg.mbw_min = 0;
-	bitmap_zero(fake_cfg.features, MPAM_FEATURE_LAST);
-	mpam_set_feature(mpam_feat_mbw_max, &fake_cfg);
-	mpam_extend_config(&fake_class, &fake_cfg);
-	KUNIT_EXPECT_TRUE(test, mpam_has_feature(mpam_feat_mbw_max, &fake_cfg));
-	KUNIT_EXPECT_TRUE(test, mpam_has_feature(mpam_feat_mbw_min, &fake_cfg));
-	KUNIT_EXPECT_EQ(test, fake_cfg.mbw_max, 0xfeef);
-	KUNIT_EXPECT_EQ(test, fake_cfg.mbw_min, 0xf224);
-
-	fake_class.props.bwa_wd = 8;
-	fake_cfg.mbw_max = 0xfeef;
-	fake_cfg.mbw_min = 0;
-	bitmap_zero(fake_cfg.features, MPAM_FEATURE_LAST);
-	mpam_set_feature(mpam_feat_mbw_max, &fake_cfg);
-	mpam_extend_config(&fake_class, &fake_cfg);
-	KUNIT_EXPECT_TRUE(test, mpam_has_feature(mpam_feat_mbw_max, &fake_cfg));
-	KUNIT_EXPECT_TRUE(test, mpam_has_feature(mpam_feat_mbw_min, &fake_cfg));
-	KUNIT_EXPECT_EQ(test, fake_cfg.mbw_max, 0xfeef);
-	KUNIT_EXPECT_EQ(test, fake_cfg.mbw_min, 0xf224);
-
-	/* 5% below the minimum granule, is still the minimum granule */
-	fake_class.props.bwa_wd = 12;
-	fake_cfg.mbw_max = 0xf;
-	fake_cfg.mbw_min = 0;
-	bitmap_zero(fake_cfg.features, MPAM_FEATURE_LAST);
-	mpam_set_feature(mpam_feat_mbw_max, &fake_cfg);
-	mpam_extend_config(&fake_class, &fake_cfg);
-	KUNIT_EXPECT_TRUE(test, mpam_has_feature(mpam_feat_mbw_max, &fake_cfg));
-	KUNIT_EXPECT_TRUE(test, mpam_has_feature(mpam_feat_mbw_min, &fake_cfg));
-	KUNIT_EXPECT_EQ(test, fake_cfg.mbw_max, 0xf);
-	KUNIT_EXPECT_EQ(test, fake_cfg.mbw_min, 0xf);
-
-	fake_class.props.bwa_wd = 16;
-	fake_cfg.mbw_max = 0x4;
-	fake_cfg.mbw_min = 0;
-	bitmap_zero(fake_cfg.features, MPAM_FEATURE_LAST);
-	mpam_set_feature(mpam_feat_mbw_max, &fake_cfg);
-	mpam_extend_config(&fake_class, &fake_cfg);
-	KUNIT_EXPECT_TRUE(test, mpam_has_feature(mpam_feat_mbw_max, &fake_cfg));
-	KUNIT_EXPECT_TRUE(test, mpam_has_feature(mpam_feat_mbw_min, &fake_cfg));
-	KUNIT_EXPECT_EQ(test, fake_cfg.mbw_max, 0x4);
-	KUNIT_EXPECT_EQ(test, fake_cfg.mbw_min, 0x0);
-}
-
 static void __test_mpam_reset_msc_bitmap(struct mpam_msc *msc, u16 reg, u16 wd)
 {
 	/* Avoid warnings when running with CONFIG_DEBUG_PREEMPT */
@@ -453,7 +386,6 @@ static struct kunit_case mpam_devices_test_cases[] = {
 	KUNIT_CASE(test_mpam_reset_msc_bitmap),
 	KUNIT_CASE(test_mpam_enable_merge_features),
 	KUNIT_CASE(test__props_mismatch),
-	KUNIT_CASE(test_mpam_extend_config),
 	{}
 };
 

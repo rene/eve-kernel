@@ -210,7 +210,8 @@ static bool match_cache_node(struct device_node *cpu,
 #define arch_compact_of_hwid(_x)	(_x)
 #endif
 
-u32 cache_of_calculate_id(struct device_node *cache_node)
+static void cache_of_set_id(struct cacheinfo *this_leaf,
+			    struct device_node *cache_node)
 {
 	struct device_node *cpu;
 	u32 min_id = ~0;
@@ -221,23 +222,15 @@ u32 cache_of_calculate_id(struct device_node *cache_node)
 		id = arch_compact_of_hwid(id);
 		if (FIELD_GET(GENMASK_ULL(63, 32), id)) {
 			of_node_put(cpu);
-			return ~0;
+			return;
 		}
 
 		if (match_cache_node(cpu, cache_node))
 			min_id = min(min_id, id);
 	}
 
-	return min_id;
-}
-
-static void cache_of_set_id(struct cacheinfo *this_leaf,
-			    struct device_node *cache_node)
-{
-	u32 id = cache_of_calculate_id(cache_node);
-
-	if (id != ~0) {
-		this_leaf->id = id;
+	if (min_id != ~0) {
+		this_leaf->id = min_id;
 		this_leaf->attributes |= CACHE_ID;
 	}
 }
