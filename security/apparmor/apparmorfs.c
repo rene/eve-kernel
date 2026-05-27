@@ -744,7 +744,7 @@ static long notify_set_filter(struct aa_listener *listener,
 
 	if (copy_from_user(&size, buf, sizeof(size)))
 		return -EFAULT;
-	if (size < sizeof(unotif))
+	if (size < sizeof(*unotif))
 		return -EINVAL;
 	/* size is capped at U16_MAX by data type */
 	unotif = kzalloc(size, GFP_KERNEL);
@@ -779,7 +779,7 @@ static long notify_set_filter(struct aa_listener *listener,
 			ret = -EINVAL;
 			goto out;
 		}
-		dfa = aa_dfa_unpack(pos, size - ((void *) unotif - pos),
+		dfa = aa_dfa_unpack(pos, size - unotif->filter,
 				    DFA_FLAG_VERIFY_STATES |
 				    TO_ACCEPT1_FLAG(YYTD_DATA32));
 		if (IS_ERR(dfa)) {
@@ -825,6 +825,7 @@ static long notify_user_response(struct aa_listener *listener,
 {
 	union apparmor_notif_resp uresp = {};
 	union apparmor_notif_resp *big_resp = NULL;
+	union apparmor_notif_resp *p_uresp = NULL;
 	long error;
 	u16 size;
 	void __user *buf = (void __user *)arg;
@@ -836,27 +837,27 @@ static long notify_user_response(struct aa_listener *listener,
 	if (size > sizeof(uresp)) {
 		/* TODO: put max size on message */
 		big_resp = (union apparmor_notif_resp *) aa_get_buffer(false);
-		if (big_resp)
+		if (!big_resp)
 			return -ENOMEM;
-		if (copy_from_user(big_resp, buf, size)) {
-			kfree(big_resp);
-			return -EFAULT;
-		}
+		p_uresp = big_resp;
 	} else {
 		size = min_t(size_t, size, sizeof(uresp));
-		if (copy_from_user(&uresp, buf, size))
-			return -EFAULT;
+		p_uresp = &uresp;
 	}
 
-	if (!notif_supported_version((struct apparmor_notif_common *)&uresp)) {
-		AA_DEBUG(DEBUG_UPCALL, "Failed response listener using unsupported protocol version %d", uresp.base.base.version);
+	if (copy_from_user(p_uresp, buf, size)) {
+		error = -EFAULT;
+		goto out;
+	}
+
+	if (!notif_supported_version((struct apparmor_notif_common *)p_uresp)) {
+		AA_DEBUG(DEBUG_UPCALL, "Failed response listener using unsupported protocol version %d", p_uresp->base.base.version);
 		error = -EPROTONOSUPPORT;
 		goto out;
 	}
-	error = aa_listener_unotif_response(listener, &uresp, size);
+	error = aa_listener_unotif_response(listener, p_uresp, size);
 out:
 	aa_put_buffer((char *) big_resp);
-
 	return error;
 }
 

@@ -67,7 +67,7 @@ Vcs-Git: git://git.launchpad.net/~canonical-kernel/ubuntu/+source/linux-nvidia/+
 XS-Testsuite: autopkgtest
 #XS-Testsuite-Depends: gcc-4.7 binutils
 
-Package: linux-nvidia-6.17-headers-6.17.0-1018
+Package: linux-nvidia-6.17-headers-6.17.0-1021
 Build-Profiles: <!stage1>
 Architecture: all
 Multi-Arch: foreign
@@ -77,42 +77,42 @@ Depends: ${misc:Depends}, coreutils
 Description: Header files related to Linux kernel version 6.17.0
  This package provides kernel header files for version 6.17.0, for sites
  that want the latest kernel headers. Please read
- /usr/share/doc/linux-nvidia-6.17-headers-6.17.0-1018/debian.README.gz for details
+ /usr/share/doc/linux-nvidia-6.17-headers-6.17.0-1021/debian.README.gz for details
 
-Package: linux-nvidia-6.17-tools-6.17.0-1018
+Package: linux-nvidia-6.17-tools-6.17.0-1021
 Build-Profiles: <!stage1>
 Architecture: amd64 arm64
 Section: devel
 Priority: optional
 Depends: ${misc:Depends}, ${shlibs:Depends}, linux-tools-common
-Description: Linux kernel version specific tools for version 6.17.0-1018
+Description: Linux kernel version specific tools for version 6.17.0-1021
  This package provides the architecture dependant parts for kernel
  version locked tools (such as perf and x86_energy_perf_policy) for
- version 6.17.0-1018.
- You probably want to install linux-tools-6.17.0-1018-<flavour>.
+ version 6.17.0-1021.
+ You probably want to install linux-tools-6.17.0-1021-<flavour>.
 
-Package: linux-nvidia-6.17-cloud-tools-6.17.0-1018
+Package: linux-nvidia-6.17-cloud-tools-6.17.0-1021
 Build-Profiles: <!stage1>
 Architecture: amd64
 Section: devel
 Priority: optional
 Depends: ${misc:Depends}, ${shlibs:Depends}, linux-cloud-tools-common
-Description: Linux kernel version specific cloud tools for version 6.17.0-1018
+Description: Linux kernel version specific cloud tools for version 6.17.0-1021
  This package provides the architecture dependant parts for kernel
- version locked tools for cloud tools for version 6.17.0-1018.
- You probably want to install linux-cloud-tools-6.17.0-1018-<flavour>.
+ version locked tools for cloud tools for version 6.17.0-1021.
+ You probably want to install linux-cloud-tools-6.17.0-1021-<flavour>.
 
-Package: linux-image-unsigned-6.17.0-1018-nvidia
+Package: linux-image-unsigned-6.17.0-1021-nvidia
 Build-Profiles: <!stage1>
 Architecture: amd64 arm64
 Section: kernel
 Priority: optional
 Provides: linux-image, fuse-module, kvm-api-4, redhat-cluster-modules, ivtv-modules, virtualbox-guest-modules [amd64], ${linux:rprovides}
-Depends: ${misc:Depends}, ${shlibs:Depends}, kmod, linux-base (>= 4.5ubuntu1~16.04.1), linux-modules-6.17.0-1018-nvidia
+Depends: ${misc:Depends}, ${shlibs:Depends}, kmod, linux-base (>= 4.5ubuntu1~16.04.1), linux-modules-6.17.0-1021-nvidia
 Recommends: grub-pc [amd64] | grub-efi-amd64 [amd64] | grub-efi-ia32 [amd64] | grub [amd64] | lilo [amd64] | flash-kernel [arm64] | grub-efi-arm64 [arm64], initramfs-tools | linux-initramfs-tool
 Breaks: flash-kernel (<< 3.90ubuntu2) [arm64 armhf], s390-tools (<< 2.3.0-0ubuntu3) [s390x]
-Conflicts: linux-image-6.17.0-1018-nvidia
-Suggests: bpftool, linux-perf, linux-nvidia-6.17-tools, linux-headers-6.17.0-1018-nvidia
+Conflicts: linux-image-6.17.0-1021-nvidia
+Suggests: bpftool, linux-perf, linux-nvidia-6.17-tools, linux-headers-6.17.0-1021-nvidia
 Description: Linux kernel image for version 6.17.0
  This package contains the unsigned Linux kernel image for version 6.17.0.
  .
@@ -124,7 +124,7 @@ Description: Linux kernel image for version 6.17.0
  the linux-nvidia meta-package, which will ensure that upgrades work
  correctly, and that supporting packages are also installed.
 
-Package: linux-image-unsigned-6.17.0-1018-nvidia-dbgsym
+Package: linux-image-unsigned-6.17.0-1021-nvidia-dbgsym
 Build-Profiles: <!stage1>
 Architecture: amd64 arm64
 Section: devel
@@ -141,7 +141,7 @@ Description: Linux kernel debug image for version 6.17.0
  unstripped modules.
 
 
-Package: linux-modules-6.17.0-1018-nvidia
+Package: linux-modules-6.17.0-1021-nvidia
 Build-Profiles: <!stage1>
 Architecture: amd64 arm64
 Section: kernel
@@ -161,20 +161,20 @@ Description: Linux kernel modules for version 6.17.0
  the linux-nvidia meta-package, which will ensure that upgrades work
  correctly, and that supporting packages are also installed.
 
-Package: linux-headers-6.17.0-1018-nvidia
+Package: linux-headers-6.17.0-1021-nvidia
 Build-Profiles: <!stage1>
 Architecture: amd64 arm64
 Section: devel
 Priority: optional
-Depends: ${misc:Depends}, linux-nvidia-6.17-headers-6.17.0-1018, ${shlibs:Depends}
+Depends: ${misc:Depends}, linux-nvidia-6.17-headers-6.17.0-1021, ${shlibs:Depends}
 Provides: linux-headers, linux-headers-3.0
 Description: Linux kernel headers for version 6.17.0
  This package provides kernel header files for version 6.17.0.
  .
  This is for sites that want the latest kernel headers.  Please read
- /usr/share/doc/linux-headers-6.17.0-1018/debian.README.gz for details.
+ /usr/share/doc/linux-headers-6.17.0-1021/debian.README.gz for details.
 
-Package: linux-lib-rust-6.17.0-1018-nvidia
+Package: linux-lib-rust-6.17.0-1021-nvidia
 Build-Profiles: <!stage1>
 Architecture: amd64
 Multi-Arch: foreign
@@ -185,29 +185,29 @@ Description: Rust library files related to Linux kernel version 6.17.0
  This package provides kernel library files for version 6.17.0, that allow to
  compile out-of-tree kernel modules written in Rust.
 
-Package: linux-tools-6.17.0-1018-nvidia
+Package: linux-tools-6.17.0-1021-nvidia
 Build-Profiles: <!stage1>
 Architecture: amd64 arm64
 Section: devel
 Priority: optional
-Depends: ${misc:Depends}, linux-nvidia-6.17-tools-6.17.0-1018
-Description: Linux kernel version specific tools for version 6.17.0-1018
+Depends: ${misc:Depends}, linux-nvidia-6.17-tools-6.17.0-1021
+Description: Linux kernel version specific tools for version 6.17.0-1021
  This package provides the architecture dependant parts for kernel
  version locked tools (such as x86_energy_perf_policy) for
- version 6.17.0-1018.
+ version 6.17.0-1021.
 
-Package: linux-cloud-tools-6.17.0-1018-nvidia
+Package: linux-cloud-tools-6.17.0-1021-nvidia
 Build-Profiles: <!stage1>
 Architecture: amd64 arm64
 Section: devel
 Priority: optional
-Depends: ${misc:Depends}, linux-nvidia-6.17-cloud-tools-6.17.0-1018
-Description: Linux kernel version specific cloud tools for version 6.17.0-1018
+Depends: ${misc:Depends}, linux-nvidia-6.17-cloud-tools-6.17.0-1021
+Description: Linux kernel version specific cloud tools for version 6.17.0-1021
  This package provides the architecture dependant parts for kernel
- version locked tools for cloud for version 6.17.0-1018.
+ version locked tools for cloud for version 6.17.0-1021.
 
 
-Package: linux-buildinfo-6.17.0-1018-nvidia
+Package: linux-buildinfo-6.17.0-1021-nvidia
 Build-Profiles: <!stage1>
 Architecture: amd64 arm64
 Section: kernel
@@ -220,7 +220,7 @@ Description: Linux kernel buildinfo for version 6.17.0
  You likely do not want to install this package.
 
 
-Package: linux-modules-nvidia-fs-6.17.0-1018-nvidia
+Package: linux-modules-nvidia-fs-6.17.0-1021-nvidia
 Build-Profiles: <!stage1>
 Architecture: amd64 arm64
 Section: kernel
@@ -228,28 +228,28 @@ Priority: optional
 Provides: ${nvidia-fs:rprovides}
 Depends:
  ${misc:Depends},
- linux-image-6.17.0-1018-nvidia | linux-image-unsigned-6.17.0-1018-nvidia,
+ linux-image-6.17.0-1021-nvidia | linux-image-unsigned-6.17.0-1021-nvidia,
 Built-Using: ${linux:BuiltUsing}
-Description: Linux kernel nvidia-fs modules for version 6.17.0-1018
+Description: Linux kernel nvidia-fs modules for version 6.17.0-1021
  This package provides the Linux kernel nvidia-fs modules for version
- 6.17.0-1018.
+ 6.17.0-1021.
  .
  You likely do not want to install this package directly. Instead, install the
  one of the linux-modules-nvidia-fs-nvidia* meta-packages,
  which will ensure that upgrades work correctly, and that supporting packages are
  also installed.
 
-Package: linux-image-unsigned-6.17.0-1018-nvidia-64k
+Package: linux-image-unsigned-6.17.0-1021-nvidia-64k
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: kernel
 Priority: optional
 Provides: linux-image, fuse-module, kvm-api-4, redhat-cluster-modules, ivtv-modules, ${linux:rprovides}
-Depends: ${misc:Depends}, ${shlibs:Depends}, kmod, linux-base (>= 4.5ubuntu1~16.04.1), linux-modules-6.17.0-1018-nvidia-64k
+Depends: ${misc:Depends}, ${shlibs:Depends}, kmod, linux-base (>= 4.5ubuntu1~16.04.1), linux-modules-6.17.0-1021-nvidia-64k
 Recommends: grub-efi-arm64 [arm64] | flash-kernel [arm64], initramfs-tools | linux-initramfs-tool
 Breaks: flash-kernel (<< 3.90ubuntu2) [arm64 armhf], s390-tools (<< 2.3.0-0ubuntu3) [s390x]
-Conflicts: linux-image-6.17.0-1018-nvidia-64k
-Suggests: bpftool, linux-perf, linux-nvidia-6.17-tools, linux-headers-6.17.0-1018-nvidia-64k
+Conflicts: linux-image-6.17.0-1021-nvidia-64k
+Suggests: bpftool, linux-perf, linux-nvidia-6.17-tools, linux-headers-6.17.0-1021-nvidia-64k
 Description: Linux kernel image for version 6.17.0
  This package contains the unsigned Linux kernel image for version 6.17.0.
  .
@@ -261,7 +261,7 @@ Description: Linux kernel image for version 6.17.0
  the linux-nvidia-64k meta-package, which will ensure that upgrades work
  correctly, and that supporting packages are also installed.
 
-Package: linux-image-unsigned-6.17.0-1018-nvidia-64k-dbgsym
+Package: linux-image-unsigned-6.17.0-1021-nvidia-64k-dbgsym
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: devel
@@ -278,7 +278,7 @@ Description: Linux kernel debug image for version 6.17.0
  unstripped modules.
 
 
-Package: linux-modules-6.17.0-1018-nvidia-64k
+Package: linux-modules-6.17.0-1021-nvidia-64k
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: kernel
@@ -298,20 +298,20 @@ Description: Linux kernel modules for version 6.17.0
  the linux-nvidia-64k meta-package, which will ensure that upgrades work
  correctly, and that supporting packages are also installed.
 
-Package: linux-headers-6.17.0-1018-nvidia-64k
+Package: linux-headers-6.17.0-1021-nvidia-64k
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: devel
 Priority: optional
-Depends: ${misc:Depends}, linux-nvidia-6.17-headers-6.17.0-1018, ${shlibs:Depends}
+Depends: ${misc:Depends}, linux-nvidia-6.17-headers-6.17.0-1021, ${shlibs:Depends}
 Provides: linux-headers, linux-headers-3.0
 Description: Linux kernel headers for version 6.17.0
  This package provides kernel header files for version 6.17.0.
  .
  This is for sites that want the latest kernel headers.  Please read
- /usr/share/doc/linux-headers-6.17.0-1018/debian.README.gz for details.
+ /usr/share/doc/linux-headers-6.17.0-1021/debian.README.gz for details.
 
-Package: linux-lib-rust-6.17.0-1018-nvidia-64k
+Package: linux-lib-rust-6.17.0-1021-nvidia-64k
 Build-Profiles: <!stage1>
 Architecture: amd64
 Multi-Arch: foreign
@@ -322,29 +322,29 @@ Description: Rust library files related to Linux kernel version 6.17.0
  This package provides kernel library files for version 6.17.0, that allow to
  compile out-of-tree kernel modules written in Rust.
 
-Package: linux-tools-6.17.0-1018-nvidia-64k
+Package: linux-tools-6.17.0-1021-nvidia-64k
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: devel
 Priority: optional
-Depends: ${misc:Depends}, linux-nvidia-6.17-tools-6.17.0-1018
-Description: Linux kernel version specific tools for version 6.17.0-1018
+Depends: ${misc:Depends}, linux-nvidia-6.17-tools-6.17.0-1021
+Description: Linux kernel version specific tools for version 6.17.0-1021
  This package provides the architecture dependant parts for kernel
  version locked tools (such as x86_energy_perf_policy) for
- version 6.17.0-1018.
+ version 6.17.0-1021.
 
-Package: linux-cloud-tools-6.17.0-1018-nvidia-64k
+Package: linux-cloud-tools-6.17.0-1021-nvidia-64k
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: devel
 Priority: optional
-Depends: ${misc:Depends}, linux-nvidia-6.17-cloud-tools-6.17.0-1018
-Description: Linux kernel version specific cloud tools for version 6.17.0-1018
+Depends: ${misc:Depends}, linux-nvidia-6.17-cloud-tools-6.17.0-1021
+Description: Linux kernel version specific cloud tools for version 6.17.0-1021
  This package provides the architecture dependant parts for kernel
- version locked tools for cloud for version 6.17.0-1018.
+ version locked tools for cloud for version 6.17.0-1021.
 
 
-Package: linux-buildinfo-6.17.0-1018-nvidia-64k
+Package: linux-buildinfo-6.17.0-1021-nvidia-64k
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: kernel
@@ -357,7 +357,7 @@ Description: Linux kernel buildinfo for version 6.17.0
  You likely do not want to install this package.
 
 
-Package: linux-modules-nvidia-fs-6.17.0-1018-nvidia-64k
+Package: linux-modules-nvidia-fs-6.17.0-1021-nvidia-64k
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: kernel
@@ -365,11 +365,11 @@ Priority: optional
 Provides: ${nvidia-fs:rprovides}
 Depends:
  ${misc:Depends},
- linux-image-6.17.0-1018-nvidia-64k | linux-image-unsigned-6.17.0-1018-nvidia-64k,
+ linux-image-6.17.0-1021-nvidia-64k | linux-image-unsigned-6.17.0-1021-nvidia-64k,
 Built-Using: ${linux:BuiltUsing}
-Description: Linux kernel nvidia-fs modules for version 6.17.0-1018
+Description: Linux kernel nvidia-fs modules for version 6.17.0-1021
  This package provides the Linux kernel nvidia-fs modules for version
- 6.17.0-1018.
+ 6.17.0-1021.
  .
  You likely do not want to install this package directly. Instead, install the
  one of the linux-modules-nvidia-fs-nvidia-64k* meta-packages,
