@@ -228,11 +228,12 @@ with respect to allocation:
 		user can request.
 
 "bandwidth_gran":
-		The approximate granularity in which the memory bandwidth
+		The granularity in which the memory bandwidth
 		percentage is allocated. The allocated
 		b/w percentage is rounded off to the next
-		control step available on the hardware. The available
-		steps are at least as small as this value.
+		control step available on the hardware. The
+		available bandwidth control steps are:
+		min_bandwidth + N * bandwidth_gran.
 
 "delay_linear":
 		Indicates if the delay scale is linear or

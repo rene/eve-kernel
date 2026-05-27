@@ -88,6 +88,7 @@ struct rdt_hw_resource rdt_resources_all[RDT_NUM_RESOURCES] = {
 			.name			= "MB",
 			.ctrl_scope		= RESCTRL_L3_CACHE,
 			.ctrl_domains		= ctrl_domain_init(RDT_RESOURCE_MBA),
+			.schema_fmt		= RESCTRL_SCHEMA_RANGE,
 		},
 	},
 	[RDT_RESOURCE_SMBA] =
@@ -96,6 +97,7 @@ struct rdt_hw_resource rdt_resources_all[RDT_NUM_RESOURCES] = {
 			.name			= "SMBA",
 			.ctrl_scope		= RESCTRL_L3_CACHE,
 			.ctrl_domains		= ctrl_domain_init(RDT_RESOURCE_SMBA),
+			.schema_fmt		= RESCTRL_SCHEMA_RANGE,
 		},
 	},
 	[RDT_RESOURCE_PERF_PKG] =
@@ -209,23 +211,22 @@ static __init bool __get_mem_config_intel(struct rdt_resource *r)
 	cpuid_count(0x00000010, 3, &eax.full, &ebx, &ecx, &edx.full);
 	hw_res->num_closid = edx.split.cos_max + 1;
 	max_delay = eax.split.max_delay + 1;
-	r->schema_fmt = RESCTRL_SCHEMA_PERCENT;
 	r->membw.max_bw = MAX_MBA_BW;
-	r->mba.arch_needs_linear = true;
+	r->membw.arch_needs_linear = true;
 	if (ecx & MBA_IS_LINEAR) {
-		r->mba.delay_linear = true;
+		r->membw.delay_linear = true;
 		r->membw.min_bw = MAX_MBA_BW - max_delay;
 		r->membw.bw_gran = MAX_MBA_BW - max_delay;
 	} else {
 		if (!rdt_get_mb_table(r))
 			return false;
-		r->mba.arch_needs_linear = false;
+		r->membw.arch_needs_linear = false;
 	}
 
 	if (boot_cpu_has(X86_FEATURE_PER_THREAD_MBA))
-		r->mba.throttle_mode = THREAD_THROTTLE_PER_THREAD;
+		r->membw.throttle_mode = THREAD_THROTTLE_PER_THREAD;
 	else
-		r->mba.throttle_mode = THREAD_THROTTLE_MAX;
+		r->membw.throttle_mode = THREAD_THROTTLE_MAX;
 
 	r->alloc_capable = true;
 
@@ -245,18 +246,17 @@ static __init bool __rdt_get_mem_config_amd(struct rdt_resource *r)
 
 	cpuid_count(0x80000020, subleaf, &eax, &ebx, &ecx, &edx);
 	hw_res->num_closid = edx + 1;
-	r->schema_fmt = RESCTRL_SCHEMA__AMD_MBA;
 	r->membw.max_bw = 1 << eax;
 
 	/* AMD does not use delay */
-	r->mba.delay_linear = false;
-	r->mba.arch_needs_linear = false;
+	r->membw.delay_linear = false;
+	r->membw.arch_needs_linear = false;
 
 	/*
 	 * AMD does not use memory delay throttle model to control
 	 * the allocation like Intel does.
 	 */
-	r->mba.throttle_mode = THREAD_THROTTLE_UNDEFINED;
+	r->membw.throttle_mode = THREAD_THROTTLE_UNDEFINED;
 	r->membw.min_bw = 0;
 	r->membw.bw_gran = 1;
 
@@ -325,7 +325,7 @@ static void mba_wrmsr_amd(struct msr_param *m)
  */
 static u32 delay_bw_map(unsigned long bw, struct rdt_resource *r)
 {
-	if (r->mba.delay_linear)
+	if (r->membw.delay_linear)
 		return MAX_MBA_BW - bw;
 
 	pr_warn_once("Non Linear delay-bw map not supported but queried\n");
@@ -378,7 +378,7 @@ static void setup_default_ctrlval(struct rdt_resource *r, u32 *dc)
 	 * For Memory Allocation: Set b/w requested to 100%
 	 */
 	for (i = 0; i < hw_res->num_closid; i++, dc++)
-		*dc = resctrl_get_resource_default_ctrl(r);
+		*dc = resctrl_get_default_ctrl(r);
 }
 
 static void ctrl_domain_free(struct rdt_hw_ctrl_domain *hw_dom)
