@@ -2991,7 +2991,13 @@ retry:
 		if (r == -EAGAIN)
 			goto retry;
 		if (r < 0)
-			pfn = KVM_PFN_ERR_FAULT;
+			/*
+			 * The mapping's fault handler declined to install a PTE
+			 * (e.g. a passed-through PCI BAR with device memory
+			 * disabled). Flag it distinctly so the fault handler can
+			 * treat the access as MMIO instead of a fatal -EFAULT.
+			 */
+			pfn = KVM_PFN_ERR_PFNMAP;
 	} else {
 		if (async && vma_is_valid(vma, write_fault))
 			*async = true;
