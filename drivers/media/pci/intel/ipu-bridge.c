@@ -37,6 +37,14 @@
 #define IVSC_DEV_NAME "intel_vsc"
 
 /*
+ * 822ace8f-2814-4174-a56b-5f029fe079ee
+ * This _DSM GUID returns a string from the sensor device, which acts as a
+ * module identifier.
+ */
+static const guid_t sensor_module_guid =
+	GUID_INIT(0x822ace8f, 0x2814, 0x4174,
+		  0xa5, 0x6b, 0x5f, 0x02, 0x9f, 0xe0, 0x79, 0xee);
+/*
  * Extend this array with ACPI Hardware IDs of devices known to be working
  * plus the number of link-frequencies expected by their drivers, along with
  * the frequency values in hertz. This is somewhat opportunistic way of adding
@@ -61,6 +69,8 @@ static const struct ipu_sensor_config ipu_supported_sensors[] = {
 	IPU_SENSOR_CONFIG("INT33BE", 1, 419200000),
 	/* Onsemi MT9M114 */
 	IPU_SENSOR_CONFIG("INT33F0", 1, 384000000),
+	/* Samsung S5K3J1 */
+	IPU_SENSOR_CONFIG("INT346D", 1, 848000000),
 	/* Omnivision OV2740 */
 	IPU_SENSOR_CONFIG("INT3474", 1, 180000000),
 	/* Omnivision OV5670 */
@@ -81,7 +91,7 @@ static const struct ipu_sensor_config ipu_supported_sensors[] = {
 	/* Omnivision OV02E10 */
 	IPU_SENSOR_CONFIG("OVTI02E1", 1, 360000000),
 	/* Omnivision ov05c10 */
-	IPU_SENSOR_CONFIG("OVTI05C1", 1, 480000000),
+	IPU_SENSOR_CONFIG("OVTI05C1", 2, 480000000, 900000000),
 	/* Omnivision OV08A10 */
 	IPU_SENSOR_CONFIG("OVTI08A1", 1, 500000000),
 	/* Omnivision OV08x40 */
@@ -120,6 +130,27 @@ static const struct dmi_system_id upside_down_sensor_dmi_ids[] = {
 			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "XPS 16 9640"),
 		},
 		.driver_data = "OVTI02C1",
+	},
+	{
+		.matches = {
+			DMI_EXACT_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "XPS 14 DA14260"),
+		},
+		.driver_data = "OVTI08F4",
+	},
+	{
+		.matches = {
+			DMI_EXACT_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "Dell Pro 14 Premium PA14260"),
+		},
+		.driver_data = "CJFOE90_B",
+	},
+	{
+		.matches = {
+			DMI_EXACT_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "Dell Pro 14 Premium PA14260"),
+		},
+		.driver_data = "BBG809N3A_B",
 	},
 	{} /* Terminating entry */
 };
@@ -275,10 +306,22 @@ static u32 ipu_bridge_parse_rotation(struct acpi_device *adev,
 				     struct ipu_sensor_ssdb *ssdb)
 {
 	const struct dmi_system_id *dmi_id;
+	union acpi_object *obj;
 
 	dmi_id = dmi_first_match(upside_down_sensor_dmi_ids);
 	if (dmi_id && acpi_dev_hid_match(adev, dmi_id->driver_data))
 		return 180;
+
+	obj = acpi_evaluate_dsm_typed(adev->handle,
+				      &sensor_module_guid, 0x00,
+				      0x01, NULL, ACPI_TYPE_STRING);
+
+	if (dmi_id && (!strcmp(dmi_id->driver_data, obj->string.pointer))) {
+		ACPI_FREE(obj);
+		return 180;
+	}
+
+	ACPI_FREE(obj);
 
 	switch (ssdb->degree) {
 	case IPU_SENSOR_ROTATION_NORMAL:
