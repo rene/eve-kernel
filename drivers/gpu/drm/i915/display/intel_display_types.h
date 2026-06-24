@@ -549,6 +549,16 @@ struct intel_connector {
 
 		u8 dsc_hblank_expansion_quirk:1;
 		u8 dsc_decompression_enabled:1;
+
+		struct {
+			u16 su_w_granularity;
+			u16 su_y_granularity;
+		} panel_replay_caps;
+
+		struct {
+			u16 su_w_granularity;
+			u16 su_y_granularity;
+		} psr_caps;
 	} dp;
 
 	struct {
