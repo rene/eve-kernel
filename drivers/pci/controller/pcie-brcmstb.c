@@ -2003,12 +2003,34 @@ static int brcm_pcie_probe(struct platform_device *pdev)
 		u64 msi_phys_addr;
 
 		if (of_property_read_u64(msi_np, "brcm,msi-pci-addr", &msi_pci_addr)) {
-			dev_err(pcie->dev, "Unable to find MSI PCI address\n");
-			ret = -EINVAL;
-			goto fail;
-		}
+			/*
+			 * Newer firmware device trees use the upstream
+			 * "brcm,bcm2712-mip" binding, which has no
+			 * brcm,msi-pci-addr property: the MSI doorbell PCI
+			 * address is the second reg region and the MIP register
+			 * base is the first. These are PCI/raw addresses that
+			 * must not be range-translated, so read them directly
+			 * from the reg cells.
+			 */
+			const __be32 *addrp;
+			int na = of_n_addr_cells(msi_np);
 
-		if (of_property_read_u64(msi_np, "reg", &msi_phys_addr)) {
+			addrp = of_get_address(msi_np, 1, NULL, NULL);
+			if (!addrp) {
+				dev_err(pcie->dev, "Unable to find MSI PCI address\n");
+				ret = -EINVAL;
+				goto fail;
+			}
+			msi_pci_addr = of_read_number(addrp, na);
+
+			addrp = of_get_address(msi_np, 0, NULL, NULL);
+			if (!addrp) {
+				dev_err(pcie->dev, "Unable to find MSI physical address\n");
+				ret = -EINVAL;
+				goto fail;
+			}
+			msi_phys_addr = of_read_number(addrp, na);
+		} else if (of_property_read_u64(msi_np, "reg", &msi_phys_addr)) {
 			dev_err(pcie->dev, "Unable to find MSI physical address\n");
 			ret = -EINVAL;
 			goto fail;
