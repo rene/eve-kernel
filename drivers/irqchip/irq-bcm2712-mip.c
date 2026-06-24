@@ -9,6 +9,7 @@
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
 #include <linux/of_pci.h>
+#include <linux/platform_device.h>
 
 #include <linux/irqchip.h>
 
@@ -229,8 +230,8 @@ static int mip_init_domains(struct mip_priv *priv,
 	return 0;
 }
 
-static int __init mip_of_msi_init(struct device_node *node,
-				  struct device_node *parent)
+static int mip_of_msi_init(struct device_node *node,
+			   struct device_node *parent)
 {
 	struct mip_priv *priv;
 	struct resource res;
@@ -249,25 +250,50 @@ static int __init mip_of_msi_init(struct device_node *node,
 		goto err_priv;
 	}
 
-	if (of_property_read_u32(node, "brcm,msi-base-spi", &priv->msi_base)) {
-		pr_err("Unable to parse MSI base\n");
-		ret = -EINVAL;
-		goto err_priv;
-	}
-
-	if (of_property_read_u32(node, "brcm,msi-num-spis", &priv->num_msis)) {
-		pr_err("Unable to parse MSI numbers\n");
-		ret = -EINVAL;
-		goto err_priv;
-	}
-
 	if (of_property_read_u32(node, "brcm,msi-offset", &priv->msi_offset))
 		priv->msi_offset = 0;
 
+	/*
+	 * The MSI base SPI and count come from the brcm,msi-base-spi /
+	 * brcm,msi-num-spis properties in the original "brcm,bcm2712-mip-intc"
+	 * binding, or from the msi-ranges property in the upstream
+	 * "brcm,bcm2712-mip" binding used by newer firmware device trees.
+	 */
+	if (of_property_read_u32(node, "brcm,msi-base-spi", &priv->msi_base) ||
+	    of_property_read_u32(node, "brcm,msi-num-spis", &priv->num_msis)) {
+		struct of_phandle_args args;
+
+		ret = of_parse_phandle_with_args(node, "msi-ranges",
+						 "#interrupt-cells", 0, &args);
+		if (!ret) {
+			priv->msi_base = args.args[1];
+			ret = of_property_read_u32_index(node, "msi-ranges",
+							 args.args_count + 1,
+							 &priv->num_msis);
+			of_node_put(args.np);
+		}
+		if (ret) {
+			pr_err("Unable to parse MSI base/count\n");
+			ret = -EINVAL;
+			goto err_priv;
+		}
+	}
+
+	/*
+	 * The MSI target (doorbell) address comes from the brcm,msi-pci-addr
+	 * property in the original binding, or from the second (untranslated)
+	 * reg region in the upstream binding.
+	 */
 	if (of_property_read_u64(node, "brcm,msi-pci-addr", &priv->msg_addr)) {
-		pr_err("Unable to parse MSI address\n");
-		ret = -EINVAL;
-		goto err_priv;
+		const __be32 *addrp;
+
+		addrp = of_get_address(node, 1, NULL, NULL);
+		if (!addrp) {
+			pr_err("Unable to parse MSI address\n");
+			ret = -EINVAL;
+			goto err_priv;
+		}
+		priv->msg_addr = of_read_number(addrp, of_n_addr_cells(node));
 	}
 
 	priv->base = ioremap(res.start, resource_size(&res));
@@ -321,3 +347,13 @@ err_priv:
 	return ret;
 }
 IRQCHIP_DECLARE(bcm_mip, "brcm,bcm2712-mip-intc", mip_of_msi_init);
+
+/*
+ * Newer Raspberry Pi firmware device trees describe the MIP using the
+ * upstream "brcm,bcm2712-mip" binding. That node only has a "msi-controller"
+ * property (no "interrupt-controller"), so it is not matched by
+ * of_irq_init()/IRQCHIP_DECLARE and must be probed as a platform device.
+ */
+IRQCHIP_PLATFORM_DRIVER_BEGIN(bcm2712_mip)
+IRQCHIP_MATCH("brcm,bcm2712-mip", mip_of_msi_init)
+IRQCHIP_PLATFORM_DRIVER_END(bcm2712_mip)
