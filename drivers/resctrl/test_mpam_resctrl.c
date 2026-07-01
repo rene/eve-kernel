@@ -15,16 +15,19 @@ struct percent_value_case {
 };
 
 /*
- * Mysterious inscriptions taken from ARM DDI 0598D.b,
+ * Mysterious inscriptions taken from the union of ARM DDI 0598D.b,
  * "Arm Architecture Reference Manual Supplement - Memory System
  * Resource Partitioning and Monitoring (MPAM), for A-profile
  * architecture", Section 9.8, "About the fixed-point fractional
- * format" (exact percentage entries only):
+ * format" (exact percentage entries only) and ARM IHI0099B.a
+ * "MPAM system component specification", Section 9.3,
+ * "The fixed-point fractional format":
  */
 static const struct percent_value_case percent_value_cases[] = {
 	/* Architectural cases: */
 	{   1,  8,    1 },	{   1, 12,  0x27 },	{   1, 16,  0x28e },
 	{  25,  8, 0x3f },	{  25, 12, 0x3ff },	{  25, 16, 0x3fff },
+	{  33,  8, 0x53 },	{  33, 12, 0x546 },	{  33, 16, 0x5479 },
 	{  35,  8, 0x58 },	{  35, 12, 0x598 },	{  35, 16, 0x5998 },
 	{  45,  8, 0x72 },	{  45, 12, 0x732 },	{  45, 16, 0x7332 },
 	{  50,  8, 0x7f },	{  50, 12, 0x7ff },	{  50, 16, 0x7fff },
@@ -32,10 +35,10 @@ static const struct percent_value_case percent_value_cases[] = {
 	{  55,  8, 0x8b },	{  55, 12, 0x8cb },	{  55, 16, 0x8ccb },
 	{  58,  8, 0x93 },	{  58, 12, 0x946 },	{  58, 16, 0x9479 },
 	{  75,  8, 0xbf },	{  75, 12, 0xbff },	{  75, 16, 0xbfff },
+	{  80,  8, 0xcb },	{  80, 12, 0xccb },	{  80, 16, 0xcccb },
 	{  88,  8, 0xe0 },	{  88, 12, 0xe13 },	{  88, 16, 0xe146 },
 	{  95,  8, 0xf2 },	{  95, 12, 0xf32 },	{  95, 16, 0xf332 },
 	{ 100,  8, 0xff },	{ 100, 12, 0xfff },	{ 100, 16, 0xffff },
-
 };
 
 static void test_percent_value_desc(const struct percent_value_case *param,
@@ -86,40 +89,7 @@ static void test_get_mba_granularity(struct kunit *test)
 	int ret;
 	struct mpam_props fake_props = { };
 
-	/* Use MBW_PBM */
-	mpam_set_feature(mpam_feat_mbw_part, &fake_props);
-
-	/* 0 bits means the control is unconfigurable */
-	fake_props.mbw_pbm_bits = 0;
-	KUNIT_EXPECT_FALSE(test, mba_class_use_mbw_part(&fake_props));
-
-	/* Otherwise, bitmaps that fit in a u32 are supported: */
-	fake_props.mbw_pbm_bits = 1;
-	KUNIT_EXPECT_TRUE(test, mba_class_use_mbw_part(&fake_props));
-
-	fake_props.mbw_pbm_bits = 32;
-	KUNIT_EXPECT_TRUE(test, mba_class_use_mbw_part(&fake_props));
-
-	/* But bigger bitmaps aren't: */
-	fake_props.mbw_pbm_bits = 33;
-	KUNIT_EXPECT_FALSE(test, mba_class_use_mbw_part(&fake_props));
-
-	fake_props.mbw_pbm_bits = 4;
-	ret = get_mba_granularity(&fake_props);
-	KUNIT_EXPECT_EQ(test, ret, 25);	/* DIV_ROUND_UP(100, 4)% = 25% */
-
-	fake_props.mbw_pbm_bits = 6;
-	ret = get_mba_granularity(&fake_props);
-	KUNIT_EXPECT_EQ(test, ret, 17);	/* DIV_ROUND_UP(100, 6)% = 7% */
-
-	/* Largest bitmap size that the drivers supports, for now: */
-	fake_props.mbw_pbm_bits = 32;
-	ret = get_mba_granularity(&fake_props);
-	KUNIT_EXPECT_EQ(test, ret, 4);	/* DIV_ROUND_UP(100, 32)% = 4% */
-
 	/* Use MBW_MAX */
-	bitmap_zero(fake_props.features, MPAM_FEATURE_LAST);
-	fake_props.mbw_pbm_bits = 0;
 	mpam_set_feature(mpam_feat_mbw_max, &fake_props);
 
 	fake_props.bwa_wd = 0;
@@ -163,32 +133,6 @@ static void test_get_mba_granularity(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ret, 1);	/* DIV_ROUND_UP(100, 1 << 16)% = 1% */
 }
 
-static void test_mbw_pbm_to_percent(struct kunit *test)
-{
-	int ret;
-	struct mpam_props fake_props = {0};
-
-	mpam_set_feature(mpam_feat_mbw_part, &fake_props);
-	fake_props.mbw_pbm_bits = 4;
-
-	ret = mbw_pbm_to_percent(0x0, &fake_props);
-	KUNIT_EXPECT_EQ(test, ret, 0);
-
-	ret = mbw_pbm_to_percent(0x3, &fake_props);
-	KUNIT_EXPECT_EQ(test, ret, 50);
-
-	ret = mbw_pbm_to_percent(0x7, &fake_props);
-	KUNIT_EXPECT_EQ(test, ret, 75);
-
-	fake_props.mbw_pbm_bits = 16;
-	ret = mbw_pbm_to_percent(0xffff, &fake_props);
-	KUNIT_EXPECT_EQ(test, ret, 100);
-
-	fake_props.mbw_pbm_bits = 0;
-	ret = mbw_pbm_to_percent(0xff, &fake_props);
-	KUNIT_EXPECT_EQ(test, ret, 0);
-}
-
 static void test_fract16_to_percent(struct kunit *test)
 {
 	const struct percent_value_case *param = test->param_value;
@@ -206,28 +150,6 @@ static void test_fract16_to_percent(struct kunit *test)
 	 */
 	__prepare_percent_value_test(test, &res, param);
 	KUNIT_EXPECT_EQ(test, res.pc, param->pc);
-}
-
-static void test_percent_to_mbw_pbm(struct kunit *test)
-{
-	unsigned long ret;
-	struct mpam_props fake_props = {0};
-
-	mpam_set_feature(mpam_feat_mbw_part, &fake_props);
-	fake_props.mbw_pbm_bits = 4;
-
-	ret = percent_to_mbw_pbm(100, &fake_props);
-	KUNIT_EXPECT_EQ(test, bitmap_weight(&ret, fake_props.mbw_pbm_bits), 4);
-
-	ret = percent_to_mbw_pbm(50, &fake_props);
-	KUNIT_EXPECT_EQ(test, bitmap_weight(&ret, fake_props.mbw_pbm_bits), 2);
-
-	ret = percent_to_mbw_pbm(0, &fake_props);
-	KUNIT_EXPECT_EQ(test, bitmap_weight(&ret, fake_props.mbw_pbm_bits), 0);
-
-	fake_props.mbw_pbm_bits = 16;
-	ret = percent_to_mbw_pbm(100, &fake_props);
-	KUNIT_EXPECT_EQ(test, bitmap_weight(&ret, fake_props.mbw_pbm_bits), 16);
 }
 
 static void test_percent_to_mbw_max(struct kunit *test)
@@ -250,7 +172,7 @@ static void test_percent_to_mbw_max(struct kunit *test)
 		KUNIT_EXPECT_EQ(test, res.value, res.max_value << res.shift);
 }
 
-static const void *test_all_bwa_wd_gen_params(const void *prev,
+static const void *test_all_bwa_wd_gen_params(struct kunit *test, const void *prev,
 					      char *desc)
 {
 	uintptr_t param = (uintptr_t)prev;
@@ -374,78 +296,14 @@ static void test_percent_to_max_rounding(struct kunit *test)
 	KUNIT_EXPECT_LE(test, 4 * num_rounded_up, 3 * total);
 }
 
-static void test_num_assignable_counters(struct kunit *test)
-{
-	unsigned int orig_l3_num_allocated_mbwu = l3_num_allocated_mbwu;
-	u32 orig_mpam_partid_max = mpam_partid_max;
-	u32 orig_mpam_pmg_max = mpam_pmg_max;
-	bool orig_cdp_enabled = cdp_enabled;
-	struct rdt_resource fake_l3;
-
-	/* Force there to be some PARTID/PMG */
-	mpam_partid_max = 3;
-	mpam_pmg_max = 1;
-
-	cdp_enabled = false;
-
-	/* ABMC off, CDP off */
-	l3_num_allocated_mbwu = resctrl_arch_system_num_rmid_idx();
-	mpam_resctrl_monitor_sync_abmc_vals(&fake_l3);
-	KUNIT_EXPECT_EQ(test, fake_l3.mon.num_mbm_cntrs, resctrl_arch_system_num_rmid_idx());
-	KUNIT_EXPECT_FALSE(test, fake_l3.mon.mbm_cntr_assignable);
-	KUNIT_EXPECT_FALSE(test, fake_l3.mon.mbm_assign_on_mkdir);
-
-	/* ABMC on, CDP off */
-	l3_num_allocated_mbwu = 4;
-	mpam_resctrl_monitor_sync_abmc_vals(&fake_l3);
-	KUNIT_EXPECT_EQ(test, fake_l3.mon.num_mbm_cntrs, 4);
-	KUNIT_EXPECT_TRUE(test, fake_l3.mon.mbm_cntr_assignable);
-	KUNIT_EXPECT_TRUE(test, fake_l3.mon.mbm_assign_on_mkdir);
-
-	cdp_enabled = true;
-
-	/* ABMC off, CDP on */
-	l3_num_allocated_mbwu = resctrl_arch_system_num_rmid_idx();
-	mpam_resctrl_monitor_sync_abmc_vals(&fake_l3);
-
-	/* (value not consumed by resctrl) */
-	KUNIT_EXPECT_EQ(test, fake_l3.mon.num_mbm_cntrs, resctrl_arch_system_num_rmid_idx() / 2);
-
-	KUNIT_EXPECT_FALSE(test, fake_l3.mon.mbm_cntr_assignable);
-	KUNIT_EXPECT_FALSE(test, fake_l3.mon.mbm_assign_on_mkdir);
-
-	/* ABMC on, CDP on */
-	l3_num_allocated_mbwu = 4;
-	mpam_resctrl_monitor_sync_abmc_vals(&fake_l3);
-	KUNIT_EXPECT_EQ(test, fake_l3.mon.num_mbm_cntrs, 2);
-	KUNIT_EXPECT_TRUE(test, fake_l3.mon.mbm_cntr_assignable);
-	KUNIT_EXPECT_TRUE(test, fake_l3.mon.mbm_assign_on_mkdir);
-
-	/* ABMC 'on', CDP on - but not enough counters */
-	l3_num_allocated_mbwu = 1;
-	mpam_resctrl_monitor_sync_abmc_vals(&fake_l3);
-	KUNIT_EXPECT_EQ(test, fake_l3.mon.num_mbm_cntrs, 0);
-	KUNIT_EXPECT_FALSE(test, fake_l3.mon.mbm_cntr_assignable);
-	KUNIT_EXPECT_FALSE(test, fake_l3.mon.mbm_assign_on_mkdir);
-
-	/* Restore global variables that were messed with */
-	l3_num_allocated_mbwu = orig_l3_num_allocated_mbwu;
-	mpam_partid_max = orig_mpam_partid_max;
-	mpam_pmg_max = orig_mpam_pmg_max;
-	cdp_enabled = orig_cdp_enabled;
-}
-
 static struct kunit_case mpam_resctrl_test_cases[] = {
 	KUNIT_CASE(test_get_mba_granularity),
-	KUNIT_CASE(test_mbw_pbm_to_percent),
 	KUNIT_CASE_PARAM(test_fract16_to_percent, test_percent_value_gen_params),
-	KUNIT_CASE(test_percent_to_mbw_pbm),
 	KUNIT_CASE_PARAM(test_percent_to_mbw_max, test_percent_value_gen_params),
 	KUNIT_CASE_PARAM(test_mbw_max_to_percent_limits, test_all_bwa_wd_gen_params),
 	KUNIT_CASE(test_percent_to_max_rounding),
 	KUNIT_CASE_PARAM(test_percent_max_roundtrip_stability,
 			 test_all_bwa_wd_gen_params),
-	KUNIT_CASE(test_num_assignable_counters),
 	{}
 };
 

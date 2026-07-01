@@ -16,10 +16,8 @@
 #include <linux/debugfs.h>
 #include <linux/fs.h>
 #include <linux/fs_parser.h>
-#include <linux/iommu.h>
 #include <linux/sysfs.h>
 #include <linux/kernfs.h>
-#include <linux/memory_hotplug.h>
 #include <linux/once.h>
 #include <linux/resctrl.h>
 #include <linux/seq_buf.h>
@@ -88,9 +86,6 @@ struct dentry *debugfs_resctrl;
 enum resctrl_event_id mba_mbps_default_event;
 
 static bool resctrl_debug;
-
-/* Enable wacky behaviour that is not supported upstream. */
-DEFINE_STATIC_KEY_FALSE(resctrl_abi_playground);
 
 void rdt_last_cmd_clear(void)
 {
@@ -771,65 +766,10 @@ static int rdtgroup_move_task(pid_t pid, struct rdtgroup *rdtgrp,
 	return ret;
 }
 
-static int rdtgroup_move_iommu(int iommu_group_id, struct rdtgroup *rdtgrp,
-			       struct kernfs_open_file *of)
-{
-	const struct cred *cred = current_cred();
-	struct iommu_group *iommu_group;
-	int err;
-
-	if (!uid_eq(cred->euid, GLOBAL_ROOT_UID)) {
-		rdt_last_cmd_printf("No permission to move iommu_group %d\n",
-				    iommu_group_id);
-		return -EPERM;
-	}
-
-	iommu_group = iommu_group_get_by_id(iommu_group_id);
-	if (!iommu_group) {
-		rdt_last_cmd_printf("No matching iommu_group %d\n",
-				    iommu_group_id);
-		return -ESRCH;
-	}
-
-	if (rdtgrp->type == RDTMON_GROUP &&
-	    !resctrl_arch_match_iommu_closid(iommu_group,
-					     rdtgrp->mon.parent->closid)) {
-		rdt_last_cmd_puts("Can't move iommu_group to different control group\n");
-		err = -EINVAL;
-	} else {
-		err = resctrl_arch_set_iommu_closid_rmid(iommu_group,
-							 rdtgrp->closid,
-							 rdtgrp->mon.rmid);
-	}
-
-	iommu_group_put(iommu_group);
-
-	return err;
-}
-
-static bool string_is_iommu_group(char *buf, int *val)
-{
-	if (!IS_ENABLED(CONFIG_RESCTRL_IOMMU) ||
-	    !static_branch_unlikely(&resctrl_abi_playground))
-		return false;
-
-	if (strlen(buf) <= strlen("iommu_group:"))
-		return false;
-
-	if (strncmp(buf, "iommu_group:", strlen("iommu_group:")))
-		return false;
-
-	buf += strlen("iommu_group:");
-
-	return !kstrtoint(buf, 0, val);
-}
-
 static ssize_t rdtgroup_tasks_write(struct kernfs_open_file *of,
 				    char *buf, size_t nbytes, loff_t off)
 {
 	struct rdtgroup *rdtgrp;
-	int iommu_group_id;
-	bool is_iommu;
 	char *pid_str;
 	int ret = 0;
 	pid_t pid;
@@ -851,10 +791,7 @@ static ssize_t rdtgroup_tasks_write(struct kernfs_open_file *of,
 	while (buf && buf[0] != '\0' && buf[0] != '\n') {
 		pid_str = strim(strsep(&buf, ","));
 
-		is_iommu = string_is_iommu_group(pid_str, &iommu_group_id);
-		if (is_iommu)
-			ret = rdtgroup_move_iommu(iommu_group_id, rdtgrp, of);
-		else if (kstrtoint(pid_str, 0, &pid)) {
+		if (kstrtoint(pid_str, 0, &pid)) {
 			rdt_last_cmd_printf("Task list parsing error pid %s\n", pid_str);
 			ret = -EINVAL;
 			break;
@@ -879,42 +816,6 @@ unlock:
 	return ret ?: nbytes;
 }
 
-static bool iommu_matches_rdtgroup(struct iommu_group *group, struct rdtgroup *r)
-{
-	if (r->type == RDTCTRL_GROUP)
-		return resctrl_arch_match_iommu_closid(group, r->closid);
-
-	return resctrl_arch_match_iommu_closid_rmid(group, r->closid,
-						    r->mon.rmid);
-}
-
-static void show_rdt_iommu(struct rdtgroup *r, struct seq_file *s)
-{
-	struct kset *iommu_groups;
-	struct iommu_group *group;
-	struct kobject *group_kobj = NULL;
-
-	if (!IS_ENABLED(CONFIG_RESCTRL_IOMMU) ||
-	    !static_branch_unlikely(&resctrl_abi_playground))
-		return;
-
-	iommu_groups = iommu_get_group_kset();
-
-	while ((group_kobj = kset_get_next_obj(iommu_groups, group_kobj))) {
-		/* iommu_group_get_from_kobj() wants to drop a reference */
-		kobject_get(group_kobj);
-
-		group = iommu_group_get_from_kobj(group_kobj);
-		if (!group)
-			continue;
-
-		if (iommu_matches_rdtgroup(group, r))
-			seq_printf(s, "iommu_group:%s\n", group_kobj->name);
-	}
-
-	kset_put(iommu_groups);
-}
-
 static void show_rdt_tasks(struct rdtgroup *r, struct seq_file *s)
 {
 	struct task_struct *p, *t;
@@ -929,8 +830,6 @@ static void show_rdt_tasks(struct rdtgroup *r, struct seq_file *s)
 		}
 	}
 	rcu_read_unlock();
-
-	show_rdt_iommu(r, s);
 }
 
 static int rdtgroup_tasks_show(struct kernfs_open_file *of,
@@ -1162,7 +1061,6 @@ static int rdt_bit_usage_show(struct kernfs_open_file *of,
 	u32 ctrl_val;
 
 	cpus_read_lock();
-	get_online_mems();
 	mutex_lock(&rdtgroup_mutex);
 	list_for_each_entry(dom, &r->ctrl_domains, hdr.list) {
 		if (sep)
@@ -1240,7 +1138,6 @@ static int rdt_bit_usage_show(struct kernfs_open_file *of,
 	}
 	seq_putc(seq, '\n');
 	mutex_unlock(&rdtgroup_mutex);
-	put_online_mems();
 	cpus_read_unlock();
 	return 0;
 }
@@ -1619,6 +1516,8 @@ out:
  *
  * @cbm is unsigned long, even if only 32 bits are used to make the
  * bitmap functions work correctly.
+ *
+ * Return: Size (in bytes) of cache portion represented by CBM, 0 on failure.
  */
 unsigned int rdtgroup_cbm_to_size(struct rdt_resource *r,
 				  struct rdt_ctrl_domain *d, unsigned long cbm)
@@ -1627,7 +1526,7 @@ unsigned int rdtgroup_cbm_to_size(struct rdt_resource *r,
 	struct cacheinfo *ci;
 	int num_b;
 
-	if (WARN_ON_ONCE(r->schema_fmt != RESCTRL_SCHEMA_BITMAP))
+	if (WARN_ON_ONCE(r->ctrl_scope != RESCTRL_L2_CACHE && r->ctrl_scope != RESCTRL_L3_CACHE))
 		return size;
 
 	num_b = bitmap_weight(&cbm, r->cache.cbm_len);
@@ -1714,11 +1613,11 @@ static int rdtgroup_size_show(struct kernfs_open_file *of,
 					ctrl = resctrl_arch_get_config(r, d,
 								       closid,
 								       type);
-
-				if (schema->schema_fmt == RESCTRL_SCHEMA_BITMAP)
-					size = rdtgroup_cbm_to_size(r, d, ctrl);
-				else
+				if (r->rid == RDT_RESOURCE_MBA ||
+				    r->rid == RDT_RESOURCE_SMBA)
 					size = ctrl;
+				else
+					size = rdtgroup_cbm_to_size(r, d, ctrl);
 			}
 			seq_printf(s, "%d=%u", d->hdr.id, size);
 			sep = true;
@@ -1745,7 +1644,6 @@ static int mbm_config_show(struct seq_file *s, struct rdt_resource *r, u32 evtid
 	bool sep = false;
 
 	cpus_read_lock();
-	get_online_mems();
 	mutex_lock(&rdtgroup_mutex);
 
 	list_for_each_entry(dom, &r->mon_domains, hdr.list) {
@@ -1764,7 +1662,6 @@ static int mbm_config_show(struct seq_file *s, struct rdt_resource *r, u32 evtid
 	seq_puts(s, "\n");
 
 	mutex_unlock(&rdtgroup_mutex);
-	put_online_mems();
 	cpus_read_unlock();
 
 	return 0;
@@ -1804,6 +1701,9 @@ static int resctrl_schema_format_show(struct kernfs_open_file *of,
 		break;
 	case RESCTRL_SCHEMA_MBPS:
 		seq_puts(seq, "mbps\n");
+		break;
+	case RESCTRL_SCHEMA_RANGE:
+		seq_puts(seq, "range\n");
 		break;
 	/* The way these schema behave isn't discoverable from resctrl */
 	case RESCTRL_SCHEMA__AMD_MBA:
@@ -1909,7 +1809,6 @@ static ssize_t mbm_total_bytes_config_write(struct kernfs_open_file *of,
 		return -EINVAL;
 
 	cpus_read_lock();
-	get_online_mems();
 	mutex_lock(&rdtgroup_mutex);
 
 	rdt_last_cmd_clear();
@@ -1919,7 +1818,6 @@ static ssize_t mbm_total_bytes_config_write(struct kernfs_open_file *of,
 	ret = mon_config_write(r, buf, QOS_L3_MBM_TOTAL_EVENT_ID);
 
 	mutex_unlock(&rdtgroup_mutex);
-	put_online_mems();
 	cpus_read_unlock();
 
 	return ret ?: nbytes;
@@ -1937,7 +1835,6 @@ static ssize_t mbm_local_bytes_config_write(struct kernfs_open_file *of,
 		return -EINVAL;
 
 	cpus_read_lock();
-	get_online_mems();
 	mutex_lock(&rdtgroup_mutex);
 
 	rdt_last_cmd_clear();
@@ -1947,7 +1844,6 @@ static ssize_t mbm_local_bytes_config_write(struct kernfs_open_file *of,
 	ret = mon_config_write(r, buf, QOS_L3_MBM_LOCAL_EVENT_ID);
 
 	mutex_unlock(&rdtgroup_mutex);
-	put_online_mems();
 	cpus_read_unlock();
 
 	return ret ?: nbytes;
@@ -2178,7 +2074,7 @@ static struct rftype res_common_files[] = {
 	},
 	{
 		.name		= "event_filter",
-		.mode		= 0644,
+		.mode		= 0444,
 		.kf_ops		= &rdtgroup_kf_single_ops,
 		.seq_show	= event_filter_show,
 		.write		= event_filter_write,
@@ -2379,6 +2275,15 @@ void resctrl_file_fflags_init(const char *config, unsigned long fflags)
 		rft->fflags = fflags;
 }
 
+void resctrl_file_mode_init(const char *config, umode_t mode)
+{
+	struct rftype *rft;
+
+	rft = rdtgroup_get_rftype_by_name(config);
+	if (rft)
+		rft->mode = mode;
+}
+
 /**
  * rdtgroup_kn_mode_restrict - Restrict user access to named resctrl file
  * @r: The resource group with which the file is associated.
@@ -2495,22 +2400,19 @@ static int resctrl_mkdir_event_configs(struct rdt_resource *r, struct kernfs_nod
 			continue;
 
 		kn_subdir2 = kernfs_create_dir(kn_subdir, mevt->name, kn_subdir->mode, mevt);
-		if (IS_ERR(kn_subdir2)) {
-			ret = PTR_ERR(kn_subdir2);
-			goto out;
-		}
+		if (IS_ERR(kn_subdir2))
+			return PTR_ERR(kn_subdir2);
 
 		ret = rdtgroup_kn_set_ugid(kn_subdir2);
 		if (ret)
-			goto out;
+			return ret;
 
 		ret = rdtgroup_add_files(kn_subdir2, RFTYPE_ASSIGN_CONFIG);
 		if (ret)
-			break;
+			return ret;
 	}
 
-out:
-	return ret;
+	return 0;
 }
 
 static int rdtgroup_mkdir_info_resdir(void *priv, char *name,
@@ -2702,10 +2604,13 @@ static void mba_sc_domain_destroy(struct rdt_resource *r,
 }
 
 /*
- * MBA software controller is supported only if
- * MBM is supported and MBA is in linear scale,
- * and the MBM monitor scope is the same as MBA
- * control scope.
+ * The MBA software controller is supported only if MBM is supported and MBA is
+ * in linear scale, and the MBM monitor scope is the same as MBA control scope.
+ *
+ * The software controller cannot be supported when the MBM counters are
+ * assignable.  There is no guarantee that MBM counters are assigned to the
+ * event backing the software controller in all monitoring domains of all
+ * monitoring groups.
  */
 static bool supports_mba_mbps(void)
 {
@@ -2714,7 +2619,8 @@ static bool supports_mba_mbps(void)
 
 	return (resctrl_is_mbm_enabled() &&
 		r->alloc_capable && is_mba_linear() &&
-		r->ctrl_scope == rmbm->mon_scope);
+		r->ctrl_scope == rmbm->mon_scope &&
+		!rmbm->mon.mbm_cntr_assignable);
 }
 
 /*
@@ -2804,7 +2710,6 @@ struct rdtgroup *rdtgroup_kn_lock_live(struct kernfs_node *kn)
 	rdtgroup_kn_get(rdtgrp, kn);
 
 	cpus_read_lock();
-	get_online_mems();
 	mutex_lock(&rdtgroup_mutex);
 
 	/* Was this group deleted while we waited? */
@@ -2822,7 +2727,6 @@ void rdtgroup_kn_unlock(struct kernfs_node *kn)
 		return;
 
 	mutex_unlock(&rdtgroup_mutex);
-	put_online_mems();
 	cpus_read_unlock();
 
 	rdtgroup_kn_put(rdtgrp, kn);
@@ -2836,7 +2740,6 @@ static void rdt_disable_ctx(void)
 {
 	resctrl_arch_set_cdp_enabled(RDT_RESOURCE_L3, false);
 	resctrl_arch_set_cdp_enabled(RDT_RESOURCE_L2, false);
-	resctrl_arch_set_mb_uses_numa_nid(false);
 	set_mba_sc(false);
 
 	resctrl_debug = false;
@@ -2867,17 +2770,8 @@ static int rdt_enable_ctx(struct rdt_fs_context *ctx)
 	if (ctx->enable_debug)
 		resctrl_debug = true;
 
-	if (ctx->mb_uses_numa_nid) {
-		ret = resctrl_arch_set_mb_uses_numa_nid(true);
-		if (ret)
-			goto out_debug;
-	}
-
 	return 0;
 
-out_debug:
-	resctrl_debug = false;
-	set_mba_sc(false);
 out_cdpl3:
 	resctrl_arch_set_cdp_enabled(RDT_RESOURCE_L3, false);
 out_cdpl2:
@@ -2942,7 +2836,7 @@ static int schemata_list_add(struct rdt_resource *r, enum resctrl_conf_type type
 	 * update_mba_bw().
 	 */
 	if (is_mba_sc(r)) {
-		s->schema_fmt = RESCTRL_SCHEMA_MBPS;
+		s->schema_fmt = RESCTRL_SCHEMA_RANGE;
 		s->membw.min_bw = 0;
 		s->membw.max_bw = MBA_MAX_MBPS;
 		s->membw.bw_gran = 1;
@@ -2952,6 +2846,7 @@ static int schemata_list_add(struct rdt_resource *r, enum resctrl_conf_type type
 	case RESCTRL_SCHEMA_BITMAP:
 		s->fmt_str = "%d=%x";
 		break;
+	case RESCTRL_SCHEMA_RANGE:
 	case RESCTRL_SCHEMA_PERCENT:
 	case RESCTRL_SCHEMA_MBPS:
 	case RESCTRL_SCHEMA__AMD_MBA:
@@ -3003,42 +2898,6 @@ static void schemata_list_destroy(void)
 	}
 }
 
-static void hack_file_mode(const char *name, u16 mode)
-{
-	struct rftype *rfts, *rft;
-	int len;
-
-	mutex_lock(&rdtgroup_mutex);
-
-	rfts = res_common_files;
-	len = ARRAY_SIZE(res_common_files);
-
-	for (rft = rfts; rft < rfts + len; rft++) {
-		if (!strcmp(rft->name, name))
-			rft->mode = mode;
-	}
-
-	mutex_unlock(&rdtgroup_mutex);
-}
-
-static void enable_abi_playground(void)
-{
-	static_key_enable(&resctrl_abi_playground.key);
-
-	/* Make the tasks file read only */
-	if (IS_ENABLED(CONFIG_CGROUP_RESCTRL))
-		hack_file_mode("tasks", 0444);
-}
-
-static void disable_abi_playground(void)
-{
-	static_key_disable(&resctrl_abi_playground.key);
-
-	/* Make the tasks file read/write only */
-	if (IS_ENABLED(CONFIG_CGROUP_RESCTRL))
-		hack_file_mode("tasks", 0644);
-}
-
 static int rdt_get_tree(struct fs_context *fc)
 {
 	struct rdt_fs_context *ctx = rdt_fc2context(fc);
@@ -3049,11 +2908,7 @@ static int rdt_get_tree(struct fs_context *fc)
 
 	DO_ONCE_SLEEPABLE(resctrl_arch_pre_mount);
 
-	if (ctx->enable_abi_playground)
-		enable_abi_playground();
-
 	cpus_read_lock();
-	get_online_mems();
 	mutex_lock(&rdtgroup_mutex);
 	/*
 	 * resctrl file system can only be mounted once.
@@ -3159,7 +3014,6 @@ out_root:
 out:
 	rdt_last_cmd_clear();
 	mutex_unlock(&rdtgroup_mutex);
-	put_online_mems();
 	cpus_read_unlock();
 	return ret;
 }
@@ -3169,24 +3023,14 @@ enum rdt_param {
 	Opt_cdpl2,
 	Opt_mba_mbps,
 	Opt_debug,
-	Opt_mb_uses_numa_nid,
-	Opt_not_abi_playground,
 	nr__rdt_params
 };
 
 static const struct fs_parameter_spec rdt_fs_parameters[] = {
-	fsparam_flag("cdp",			Opt_cdp),
-	fsparam_flag("cdpl2",			Opt_cdpl2),
-	fsparam_flag("mba_MBps",		Opt_mba_mbps),
-	fsparam_flag("debug",			Opt_debug),
-	fsparam_flag("mb_uses_numa_nid",	Opt_mb_uses_numa_nid),
-
-	/*
-	 * Some of MPAM's out of tree code exposes things through resctrl
-	 * that need much more discussion before they are considered for
-	 * mainline. Add a mount option that can be used to hide these crimes.
-	 */
-	fsparam_flag("this_is_not_abi",	Opt_not_abi_playground),
+	fsparam_flag("cdp",		Opt_cdp),
+	fsparam_flag("cdpl2",		Opt_cdpl2),
+	fsparam_flag("mba_MBps",	Opt_mba_mbps),
+	fsparam_flag("debug",		Opt_debug),
 	{}
 };
 
@@ -3209,19 +3053,13 @@ static int rdt_parse_param(struct fs_context *fc, struct fs_parameter *param)
 		ctx->enable_cdpl2 = true;
 		return 0;
 	case Opt_mba_mbps:
-		msg = "mba_MBps requires MBM and linear scale MBA at L3 scope";
+		msg = "mba_MBps requires MBM (mbm_event mode not supported) and linear scale MBA at L3 scope";
 		if (!supports_mba_mbps())
 			return invalfc(fc, msg);
 		ctx->enable_mba_mbps = true;
 		return 0;
 	case Opt_debug:
 		ctx->enable_debug = true;
-		return 0;
-	case Opt_mb_uses_numa_nid:
-		ctx->mb_uses_numa_nid = true;
-		return 0;
-	case Opt_not_abi_playground:
-		ctx->enable_abi_playground = true;
 		return 0;
 	}
 
@@ -3382,6 +3220,8 @@ static void rmdir_all_sub(void)
  * @mevt:   The type of event file being created.
  * @do_sum: Whether SNC summing monitors are being created. Only set
  *	    when @rid == RDT_RESOURCE_L3.
+ *
+ * Return: Pointer to mon_data private data of the event, NULL on failure.
  */
 static struct mon_data *mon_get_kn_priv(enum resctrl_res_level rid, int domid,
 					struct mon_evt *mevt,
@@ -3450,7 +3290,6 @@ static void rdt_kill_sb(struct super_block *sb)
 	struct rdt_resource *r;
 
 	cpus_read_lock();
-	get_online_mems();
 	mutex_lock(&rdtgroup_mutex);
 
 	rdt_disable_ctx();
@@ -3467,11 +3306,7 @@ static void rdt_kill_sb(struct super_block *sb)
 	resctrl_mounted = false;
 	kernfs_kill_sb(sb);
 	mutex_unlock(&rdtgroup_mutex);
-	put_online_mems();
 	cpus_read_unlock();
-
-	if (static_branch_unlikely(&resctrl_abi_playground))
-		disable_abi_playground();
 }
 
 static struct file_system_type rdt_fs_type = {
@@ -3781,6 +3616,8 @@ out_destroy:
  * resource group is initialized. The user can follow this with a
  * modification to the CBM if the default does not satisfy the
  * requirements.
+ *
+ * Return: A CBM that is valid for resource @r.
  */
 static u32 cbm_ensure_valid(u32 _val, struct rdt_resource *r)
 {
@@ -4522,12 +4359,6 @@ static int rdtgroup_show_options(struct seq_file *seq, struct kernfs_root *kf)
 	if (resctrl_debug)
 		seq_puts(seq, ",debug");
 
-	if (resctrl_arch_get_mb_uses_numa_nid())
-		seq_puts(seq, ",mb_uses_numa_nid");
-
-	if (static_branch_unlikely(&resctrl_abi_playground))
-		seq_puts(seq, ",this_is_not_abi");
-
 	return 0;
 }
 
@@ -4932,14 +4763,12 @@ static bool resctrl_online_domains_exist(void)
 void resctrl_exit(void)
 {
 	cpus_read_lock();
-	get_online_mems();
 	WARN_ON_ONCE(resctrl_online_domains_exist());
 
 	mutex_lock(&rdtgroup_mutex);
 	resctrl_fs_teardown();
 	mutex_unlock(&rdtgroup_mutex);
 
-	put_online_mems();
 	cpus_read_unlock();
 
 	debugfs_remove_recursive(debugfs_resctrl);

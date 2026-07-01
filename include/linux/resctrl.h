@@ -3,7 +3,6 @@
 #define _RESCTRL_H
 
 #include <linux/cacheinfo.h>
-#include <linux/iommu.h>
 #include <linux/kernel.h>
 #include <linux/list.h>
 #include <linux/pid.h>
@@ -140,7 +139,7 @@ enum resctrl_domain_type {
  */
 struct rdt_domain_hdr {
 	struct list_head		list;
-	u32				id;
+	int				id;
 	enum resctrl_domain_type	type;
 	enum resctrl_res_level		rid;
 	struct cpumask			cpu_mask;
@@ -286,12 +285,14 @@ enum resctrl_scope {
 /**
  * enum resctrl_schema_fmt - The format user-space provides for a schema.
  * @RESCTRL_SCHEMA_BITMAP:	The schema is a bitmap in hex.
+ * @RESCTRL_SCHEMA_RANGE:	The schema is a decimal number.
  * @RESCTRL_SCHEMA_PERCENT:	The schema is a percentage.
  * @RESCTRL_SCHEMA_MBPS:	The schema ia a MBps value.
  * @RESCTRL_SCHEMA__AMD_MBA:	The schema value is MBA for AMD platforms.
  */
 enum resctrl_schema_fmt {
 	RESCTRL_SCHEMA_BITMAP,
+	RESCTRL_SCHEMA_RANGE,
 	RESCTRL_SCHEMA_PERCENT,
 	RESCTRL_SCHEMA_MBPS,
 	RESCTRL_SCHEMA__AMD_MBA,
@@ -299,13 +300,15 @@ enum resctrl_schema_fmt {
 
 /**
  * struct resctrl_mon - Monitoring related data of a resctrl resource.
- * @num_rmid:		Number of RMIDs available.
- * @mbm_cfg_mask:	Memory transactions that can be tracked when bandwidth
- *			monitoring events can be configured.
- * @num_mbm_cntrs:	Number of assignable counters.
- * @mbm_cntr_assignable:Is system capable of supporting counter assignment?
- * @mbm_assign_on_mkdir:True if counters should automatically be assigned to MBM
- *			events of monitor groups created via mkdir.
+ * @num_rmid:			Number of RMIDs available.
+ * @mbm_cfg_mask:		Memory transactions that can be tracked when
+ *				bandwidth monitoring events can be configured.
+ * @num_mbm_cntrs:		Number of assignable counters.
+ * @mbm_cntr_assignable:	Is system capable of supporting counter assignment?
+ * @mbm_assign_on_mkdir:	True if counters should automatically be assigned to MBM
+ *				events of monitor groups created via mkdir.
+ * @mbm_cntr_configurable:	True if assignable counters are configurable.
+ * @mbm_cntr_assign_fixed:	True if the counter assignment mode is fixed.
  */
 struct resctrl_mon {
 	u32			num_rmid;
@@ -313,6 +316,8 @@ struct resctrl_mon {
 	int			num_mbm_cntrs;
 	bool			mbm_cntr_assignable;
 	bool			mbm_assign_on_mkdir;
+	bool			mbm_cntr_configurable;
+	bool			mbm_cntr_assign_fixed;
 };
 
 /**
@@ -425,6 +430,7 @@ static inline u32 resctrl_get_resource_default_ctrl(struct rdt_resource *r)
 	switch (r->schema_fmt) {
 	case RESCTRL_SCHEMA_BITMAP:
 		return BIT_MASK(r->cache.cbm_len) - 1;
+	case RESCTRL_SCHEMA_RANGE:
 	case RESCTRL_SCHEMA_PERCENT:
 	case RESCTRL_SCHEMA_MBPS:
 	case RESCTRL_SCHEMA__AMD_MBA:
@@ -444,6 +450,7 @@ static inline u32 resctrl_get_schema_default_ctrl(struct resctrl_schema *s)
 	switch (s->schema_fmt) {
 	case RESCTRL_SCHEMA_BITMAP:
 		return resctrl_get_resource_default_ctrl(s->res);
+	case RESCTRL_SCHEMA_RANGE:
 	case RESCTRL_SCHEMA_PERCENT:
 	case RESCTRL_SCHEMA_MBPS:
 	case RESCTRL_SCHEMA__AMD_MBA:
@@ -751,7 +758,6 @@ extern unsigned int resctrl_rmid_realloc_limit;
 int resctrl_init(void);
 void resctrl_exit(void);
 
-
 #ifdef CONFIG_RESCTRL_FS_PSEUDO_LOCK
 u64 resctrl_arch_get_prefetch_disable_bits(void);
 int resctrl_arch_pseudo_lock_fn(void *_plr);
@@ -765,30 +771,4 @@ static inline int resctrl_arch_measure_cycles_lat_fn(void *_plr) { return 0; }
 static inline int resctrl_arch_measure_l2_residency(void *_plr) { return 0; }
 static inline int resctrl_arch_measure_l3_residency(void *_plr) { return 0; }
 #endif /* CONFIG_RESCTRL_FS_PSEUDO_LOCK */
-
-/* When supported, the architecture must implement these */
-#ifdef CONFIG_RESCTRL_IOMMU
-int resctrl_arch_set_iommu_closid_rmid(struct iommu_group *group, u32 closid,
-				       u32 rmid);
-bool resctrl_arch_match_iommu_closid(struct iommu_group *group, u32 closid);
-bool resctrl_arch_match_iommu_closid_rmid(struct iommu_group *group, u32 closid,
-					  u32 rmid);
-#else
-static inline int resctrl_arch_set_iommu_closid_rmid(struct iommu_group *group,
-						     u32 closid, u32 rmid)
-{
-	return -EOPNOTSUPP;
-}
-static inline bool resctrl_arch_match_iommu_closid(struct iommu_group *group,
-						   u32 closid)
-{
-	return false;
-}
-static inline bool
-resctrl_arch_match_iommu_closid_rmid(struct iommu_group *group,
-				     u32 closid, u32 rmid)
-{
-	return false;
-}
-#endif /* CONFIG_RESCTRL_IOMMU */
 #endif /* _RESCTRL_H */

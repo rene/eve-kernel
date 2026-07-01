@@ -14,7 +14,6 @@ struct mpam_msc;
 enum mpam_msc_iface {
 	MPAM_IFACE_MMIO,	/* a real MPAM MSC */
 	MPAM_IFACE_PCC,		/* a fake MPAM MSC */
-	MPAM_IFACE_SCMI,	/* through a firmware interface */
 };
 
 enum mpam_class_types {
@@ -42,31 +41,15 @@ static inline int acpi_mpam_count_msc(void) { return -EINVAL; }
 
 #ifdef CONFIG_ARM64_MPAM_DRIVER
 int mpam_ris_create(struct mpam_msc *msc, u8 ris_idx,
-		    enum mpam_class_types type, u8 class_id, u32 component_id);
+		    enum mpam_class_types type, u8 class_id, int component_id);
 #else
 static inline int mpam_ris_create(struct mpam_msc *msc, u8 ris_idx,
 				  enum mpam_class_types type, u8 class_id,
-				  u32 component_id)
+				  int component_id)
 {
 	return -EINVAL;
 }
 #endif
-
-struct resctrl_schema;
-static inline u32 resctrl_arch_round_bw(u32 val,
-					const struct resctrl_schema *s __always_unused)
-{
-	/*
-	 * Do nothing: for MPAM, resctrl_arch_update_one() has the necessary
-	 * context to round the incoming value correctly.
-	 */
-	return val;
-}
-
-static inline unsigned int resctrl_arch_round_mon_val(unsigned int val)
-{
-	return val;
-}
 
 bool resctrl_arch_alloc_capable(void);
 bool resctrl_arch_mon_capable(void);
@@ -86,9 +69,6 @@ struct rdt_resource;
 void *resctrl_arch_mon_ctx_alloc(struct rdt_resource *r, enum resctrl_event_id evtid);
 void resctrl_arch_mon_ctx_free(struct rdt_resource *r, enum resctrl_event_id evtid, void *ctx);
 
-bool resctrl_arch_get_mb_uses_numa_nid(void);
-int resctrl_arch_set_mb_uses_numa_nid(bool enabled);
-
 /*
  * The CPU configuration for MPAM is cheap to write, and is only written if it
  * has changed. No need for fine grained enables.
@@ -97,6 +77,22 @@ static inline void resctrl_arch_enable_mon(void) { }
 static inline void resctrl_arch_disable_mon(void) { }
 static inline void resctrl_arch_enable_alloc(void) { }
 static inline void resctrl_arch_disable_alloc(void) { }
+
+struct resctrl_schema;
+static inline u32 resctrl_arch_round_bw(u32 val,
+					const struct resctrl_schema *s __always_unused)
+{
+	/*
+	 * Do nothing: for MPAM, resctrl_arch_update_one() has the necessary
+	 * context to round the incoming value correctly.
+	 */
+	return val;
+}
+
+static inline unsigned int resctrl_arch_round_mon_val(unsigned int val)
+{
+	return val;
+}
 
 /**
  * mpam_register_requestor() - Register a requestor with the MPAM driver
