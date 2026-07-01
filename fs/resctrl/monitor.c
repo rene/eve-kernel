@@ -18,7 +18,6 @@
 #define pr_fmt(fmt)	"resctrl: " fmt
 
 #include <linux/cpu.h>
-#include <linux/memory_hotplug.h>
 #include <linux/resctrl.h>
 #include <linux/sizes.h>
 #include <linux/slab.h>
@@ -99,16 +98,11 @@ unsigned int resctrl_rmid_realloc_limit;
  *
  * The domain's rmid_busy_llc and rmid_ptrs[] are sized by index. The arch code
  * must accept an attempt to read every index.
- *
- * Returns NULL if the rmid_ptrs[] array is not allocated.
  */
 static inline struct rmid_entry *__rmid_entry(u32 idx)
 {
 	struct rmid_entry *entry;
 	u32 closid, rmid;
-
-	if (!rmid_ptrs)
-		return NULL;
 
 	entry = &rmid_ptrs[idx];
 	resctrl_arch_rmid_idx_decode(idx, &closid, &rmid);
@@ -119,20 +113,6 @@ static inline struct rmid_entry *__rmid_entry(u32 idx)
 	return entry;
 }
 
-static bool __has_closid_num_dirty_rmid_array(void)
-{
-	lockdep_assert_held(&rdtgroup_mutex);
-
-	if (!IS_ENABLED(CONFIG_RESCTRL_RMID_DEPENDS_ON_CLOSID))
-		return false;
-
-	/*
-	 * Avoid a race with dom_data_exit() freeing the array under
-	 * rdtgroup_mutex.
-	 */
-	return closid_num_dirty_rmid;
-}
-
 static void limbo_release_entry(struct rmid_entry *entry)
 {
 	lockdep_assert_held(&rdtgroup_mutex);
@@ -140,7 +120,7 @@ static void limbo_release_entry(struct rmid_entry *entry)
 	rmid_limbo_count--;
 	list_add_tail(&entry->list, &rmid_free_lru);
 
-	if (__has_closid_num_dirty_rmid_array())
+	if (IS_ENABLED(CONFIG_RESCTRL_RMID_DEPENDS_ON_CLOSID))
 		closid_num_dirty_rmid[entry->closid]--;
 }
 
@@ -181,8 +161,6 @@ void __check_limbo(struct rdt_l3_mon_domain *d, bool force_free)
 			break;
 
 		entry = __rmid_entry(idx);
-		if (!entry)
-			break;
 		if (resctrl_arch_rmid_read(r, &d->hdr, entry->closid, entry->rmid,
 					   QOS_L3_OCCUP_EVENT_ID, arch_priv, &val,
 					   arch_mon_ctx)) {
@@ -256,6 +234,8 @@ static struct rmid_entry *resctrl_find_free_rmid(u32 closid)
  *
  * When the CLOSID and RMID are independent numbers, the first free CLOSID will
  * be returned.
+ *
+ * Return: Free CLOSID on success, < 0 on failure.
  */
 int resctrl_find_cleanest_closid(void)
 {
@@ -264,7 +244,7 @@ int resctrl_find_cleanest_closid(void)
 
 	lockdep_assert_held(&rdtgroup_mutex);
 
-	if (!__has_closid_num_dirty_rmid_array())
+	if (!IS_ENABLED(CONFIG_RESCTRL_RMID_DEPENDS_ON_CLOSID))
 		return -EIO;
 
 	for (i = 0; i < closids_supported(); i++) {
@@ -337,7 +317,7 @@ static void add_rmid_to_limbo(struct rmid_entry *entry)
 	}
 
 	rmid_limbo_count++;
-	if (__has_closid_num_dirty_rmid_array())
+	if (IS_ENABLED(CONFIG_RESCTRL_RMID_DEPENDS_ON_CLOSID))
 		closid_num_dirty_rmid[entry->closid]++;
 }
 
@@ -347,10 +327,6 @@ void free_rmid(u32 closid, u32 rmid)
 	struct rmid_entry *entry;
 
 	lockdep_assert_held(&rdtgroup_mutex);
-
-	/* rmid_ptrs[] not allocated if there are no monitors */
-	if (!resctrl_arch_mon_capable())
-		return;
 
 	/*
 	 * Do not allow the default rmid to be free'd. Comparing by index
@@ -363,8 +339,6 @@ void free_rmid(u32 closid, u32 rmid)
 		return;
 
 	entry = __rmid_entry(idx);
-	if (!entry)
-		return;
 
 	if (resctrl_is_mon_event_enabled(QOS_L3_OCCUP_EVENT_ID))
 		add_rmid_to_limbo(entry);
@@ -821,7 +795,6 @@ void cqm_handle_limbo(struct work_struct *work)
 	struct rdt_l3_mon_domain *d;
 
 	cpus_read_lock();
-	get_online_mems();
 	mutex_lock(&rdtgroup_mutex);
 
 	d = container_of(work, struct rdt_l3_mon_domain, cqm_limbo.work);
@@ -836,7 +809,6 @@ void cqm_handle_limbo(struct work_struct *work)
 	}
 
 	mutex_unlock(&rdtgroup_mutex);
-	put_online_mems();
 	cpus_read_unlock();
 }
 
@@ -870,7 +842,6 @@ void mbm_handle_overflow(struct work_struct *work)
 	struct rdt_resource *r;
 
 	cpus_read_lock();
-	get_online_mems();
 	mutex_lock(&rdtgroup_mutex);
 
 	/*
@@ -904,7 +875,6 @@ void mbm_handle_overflow(struct work_struct *work)
 
 out_unlock:
 	mutex_unlock(&rdtgroup_mutex);
-	put_online_mems();
 	cpus_read_unlock();
 }
 
@@ -977,7 +947,6 @@ int setup_rmid_lru_list(void)
 	idx = resctrl_arch_rmid_idx_encode(RESCTRL_RESERVED_CLOSID,
 					   RESCTRL_RESERVED_RMID);
 	entry = __rmid_entry(idx);
-	WARN_ON_ONCE(!entry);
 	list_del(&entry->list);
 
 	return 0;
@@ -1244,9 +1213,10 @@ static int rdtgroup_alloc_assign_cntr(struct rdt_resource *r, struct rdt_l3_mon_
  * NULL; otherwise, assign the counter to the specified domain @d.
  *
  * If all counters in a domain are already in use, rdtgroup_alloc_assign_cntr()
- * will fail. The assignment process will abort at the first failure encountered
- * during domain traversal, which may result in the event being only partially
- * assigned.
+ * will fail. When attempting to assign counters to all domains, carry on trying
+ * to assign counters after a failure since only some domains may have counters
+ * and the goal is to assign counters where possible. If any counter assignment
+ * fails, return the error from the last failing assignment.
  *
  * Return:
  * 0 on success, < 0 on failure.
@@ -1259,9 +1229,11 @@ static int rdtgroup_assign_cntr_event(struct rdt_l3_mon_domain *d, struct rdtgro
 
 	if (!d) {
 		list_for_each_entry(d, &r->mon_domains, hdr.list) {
-			ret = rdtgroup_alloc_assign_cntr(r, d, rdtgrp, mevt);
-			if (ret)
-				return ret;
+			int err;
+
+			err = rdtgroup_alloc_assign_cntr(r, d, rdtgrp, mevt);
+			if (err)
+				ret = err;
 		}
 	} else {
 		ret = rdtgroup_alloc_assign_cntr(r, d, rdtgrp, mevt);
@@ -1455,6 +1427,11 @@ ssize_t event_filter_write(struct kernfs_open_file *of, char *buf, size_t nbytes
 		ret = -EINVAL;
 		goto out_unlock;
 	}
+	if (!r->mon.mbm_cntr_configurable) {
+		rdt_last_cmd_puts("event_filter is not configurable\n");
+		ret = -EPERM;
+		goto out_unlock;
+	}
 
 	ret = resctrl_parse_mem_transactions(buf, &evt_cfg);
 	if (!ret && mevt->evt_cfg != evt_cfg) {
@@ -1484,7 +1461,7 @@ int resctrl_mbm_assign_mode_show(struct kernfs_open_file *of,
 		else
 			seq_puts(s, "[default]\n");
 
-		if (!IS_ENABLED(CONFIG_RESCTRL_ASSIGN_FIXED)) {
+		if (!r->mon.mbm_cntr_assign_fixed) {
 			if (enabled)
 				seq_puts(s, "default\n");
 			else
@@ -1535,6 +1512,12 @@ ssize_t resctrl_mbm_assign_mode_write(struct kernfs_open_file *of, char *buf,
 	}
 
 	if (enable != resctrl_arch_mbm_cntr_assign_enabled(r)) {
+		if (r->mon.mbm_cntr_assign_fixed) {
+			ret = -EINVAL;
+			rdt_last_cmd_puts("Counter assignment mode is not configurable\n");
+			goto out_unlock;
+		}
+
 		ret = resctrl_arch_mbm_cntr_assign_set(r, enable);
 		if (ret)
 			goto out_unlock;
@@ -1919,6 +1902,8 @@ int resctrl_l3_mon_resource_init(void)
 		resctrl_file_fflags_init("available_mbm_cntrs",
 					 RFTYPE_MON_INFO | RFTYPE_RES_CACHE);
 		resctrl_file_fflags_init("event_filter", RFTYPE_ASSIGN_CONFIG);
+		if (r->mon.mbm_cntr_configurable)
+			resctrl_file_mode_init("event_filter", 0644);
 		resctrl_file_fflags_init("mbm_assign_on_mkdir", RFTYPE_MON_INFO |
 					 RFTYPE_RES_CACHE);
 		resctrl_file_fflags_init("mbm_L3_assignments", RFTYPE_MON_BASE);

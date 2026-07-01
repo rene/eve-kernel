@@ -202,8 +202,6 @@ void debugfs_create_bool(const char *name, umode_t mode, struct dentry *parent,
 			 bool *value);
 void debugfs_create_str(const char *name, umode_t mode,
 			struct dentry *parent, char **value);
-void debugfs_create_cpumask(const char *name, umode_t mode,
-			    struct dentry *parent, struct cpumask *value);
 
 struct dentry *debugfs_create_blob(const char *name, umode_t mode,
 				  struct dentry *parent,
@@ -407,10 +405,6 @@ static inline void debugfs_create_bool(const char *name, umode_t mode,
 static inline void debugfs_create_str(const char *name, umode_t mode,
 				      struct dentry *parent,
 				      char **value)
-{ }
-
-static inline void debugfs_create_cpumask(const char *name, umode_t mode,
-					  struct dentry *parent, struct cpumask *value)
 { }
 
 static inline struct dentry *debugfs_create_blob(const char *name, umode_t mode,

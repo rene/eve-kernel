@@ -27,7 +27,13 @@ static int mpam_pm_notifier(struct notifier_block *self,
 		 * value has changed under our feet.
 		 */
 		regval = READ_ONCE(per_cpu(arm64_mpam_current, cpu));
-		write_sysreg_s(0, SYS_MPAM1_EL1);
+		write_sysreg_s(regval | MPAM1_EL1_MPAMEN, SYS_MPAM1_EL1);
+		if (system_supports_sme()) {
+			write_sysreg_s(regval & (MPAMSM_EL1_PARTID_D | MPAMSM_EL1_PMG_D),
+				       SYS_MPAMSM_EL1);
+		}
+		isb();
+
 		write_sysreg_s(regval, SYS_MPAM0_EL1);
 
 		return NOTIFY_OK;
@@ -45,6 +51,9 @@ static int __init arm64_mpam_register_cpus(void)
 	u64 mpamidr = read_sanitised_ftr_reg(SYS_MPAMIDR_EL1);
 	u16 partid_max = FIELD_GET(MPAMIDR_EL1_PARTID_MAX, mpamidr);
 	u8 pmg_max = FIELD_GET(MPAMIDR_EL1_PMG_MAX, mpamidr);
+
+	if (!system_supports_mpam())
+		return 0;
 
 	cpu_pm_register_notifier(&mpam_pm_nb);
 	return mpam_register_requestor(partid_max, pmg_max);

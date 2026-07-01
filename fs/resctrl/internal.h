@@ -42,8 +42,6 @@ struct rdt_fs_context {
 	bool				enable_cdpl3;
 	bool				enable_mba_mbps;
 	bool				enable_debug;
-	bool				mb_uses_numa_nid;
-	bool				enable_abi_playground;
 };
 
 static inline struct rdt_fs_context *rdt_fc2context(struct fs_context *fc)
@@ -255,6 +253,7 @@ struct rdtgroup {
 
 /* files that are specific to a type of resource, e.g. throttle_mode */
 #define RFTYPE_RES_CACHE		BIT(8)
+
 #define RFTYPE_RES_MB			BIT(9)
 
 #define RFTYPE_DEBUG			BIT(10)
@@ -320,8 +319,6 @@ struct mbm_state {
 	u64	prev_bw_bytes;
 	u32	prev_bw;
 };
-
-DECLARE_STATIC_KEY_FALSE(resctrl_abi_playground);
 
 extern struct mutex rdtgroup_mutex;
 
@@ -416,6 +413,8 @@ bool has_busy_rmid(struct rdt_l3_mon_domain *d);
 void __check_limbo(struct rdt_l3_mon_domain *d, bool force_free);
 
 void resctrl_file_fflags_init(const char *config, unsigned long fflags);
+
+void resctrl_file_mode_init(const char *config, umode_t mode);
 
 void rdt_staged_configs_clear(void);
 
