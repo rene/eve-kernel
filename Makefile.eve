@@ -7,7 +7,7 @@ DIRTY=$(shell git diff --quiet || echo '-dirty')
 EVE_KERNEL_CONFIG=eve-$(KERNEL_CONFIG_FLAVOR)_defconfig
 EVE_FLAVOR=generic
 ARCHITECTURE=amd64
-KERNEL_TAG=v6.12.49
+KERNEL_TAG=v6.12.96
 PLATFORM=linux/$(ARCHITECTURE)
 BUILD_USER:=$(shell id -un)
 
@@ -104,7 +104,7 @@ IMAGE_TAG_NO_FLAVOR := $(IMAGE_REPOSITORY):$(BRANCH)-$(VERSION)$(DIRTY)
 RT_BASE_DEFCONFIG := eve-core_defconfig
 RT_FRAGMENT       := arch/x86/configs/rt.fragment
 RT_STAMP          := .rt-merged.stamp
-RT_PATCH_URL      := https://cdn.kernel.org/pub/linux/kernel/projects/rt/6.12/older/patch-6.12.49-rt13.patch.gz
+RT_PATCH_URL      := https://cdn.kernel.org/pub/linux/kernel/projects/rt/6.12/older/patch-6.12.96-rt16.patch.gz
 RT_PATCH_FILE     := .rt-patch-applied.stamp
 
 .PHONY: rt-config gen-rt-fragment rt-clean
