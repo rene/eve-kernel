@@ -1737,6 +1737,7 @@ CONFIG_ARM64_ERRATUM_2658417                    policy<{'arm64': 'y'}>
 CONFIG_ARM64_ERRATUM_2966298                    policy<{'arm64': 'y'}>
 CONFIG_ARM64_ERRATUM_3117295                    policy<{'arm64': 'y'}>
 CONFIG_ARM64_ERRATUM_3194386                    policy<{'arm64': 'y'}>
+CONFIG_ARM64_ERRATUM_4118414                    policy<{'arm64': 'y'}>
 CONFIG_ARM64_ERRATUM_4311569                    policy<{'arm64': 'y'}>
 CONFIG_ARM64_ERRATUM_819472                     policy<{'arm64': 'y'}>
 CONFIG_ARM64_ERRATUM_824069                     policy<{'arm64': 'y'}>
@@ -3971,7 +3972,7 @@ CONFIG_DAVICOM_PHY                              policy<{'amd64': 'm', 'arm64': '
 CONFIG_DAX                                      policy<{'amd64': 'y', 'arm64': 'y', 'armhf': 'y', 'ppc64el': 'y', 'riscv64': 'y', 's390x': 'y'}>
 CONFIG_DA_MON_EVENTS_ID                         policy<{'amd64': 'y', 'arm64': 'y', 'armhf': 'y', 'ppc64el': 'y', 'riscv64': 'y', 's390x': 'y'}>
 CONFIG_DCA                                      policy<{'amd64': 'm'}>
-CONFIG_DCACHE_WORD_ACCESS                       policy<{'amd64': 'y', 'arm64': 'y', 'armhf': 'y', 'ppc64el': 'y', 's390x': 'y'}>
+CONFIG_DCACHE_WORD_ACCESS                       policy<{'amd64': 'y', 'arm64': 'y', 'armhf': 'y', 'ppc64el': 'y'}>
 CONFIG_DCB                                      policy<{'amd64': 'y', 'arm64': 'y', 'armhf': 'y', 'ppc64el': 'y', 'riscv64': 'y', 's390x': 'y'}>
 CONFIG_DCDBAS                                   policy<{'amd64': 'm'}>
 CONFIG_DCSSBLK                                  policy<{'s390x': 'm'}>
@@ -5487,7 +5488,7 @@ CONFIG_FSL_DPAA2_ETH                            policy<{'arm64': 'm'}>
 CONFIG_FSL_DPAA2_ETH_DCB                        policy<{'arm64': 'y'}>
 CONFIG_FSL_DPAA2_PTP_CLOCK                      policy<{'arm64': 'm'}>
 CONFIG_FSL_DPAA2_QDMA                           policy<{'arm64': 'm'}>
-CONFIG_FSL_DPAA2_SWITCH                         policy<{'arm64': 'm', 'armhf': 'm', 'ppc64el': 'm'}>
+CONFIG_FSL_DPAA2_SWITCH                         policy<{'arm64': 'm', 'armhf': '-', 'ppc64el': '-'}>
 CONFIG_FSL_DPAA_CHECKING                        policy<{'arm64': 'y'}>
 CONFIG_FSL_DPAA_ETH                             policy<{'arm64': 'm'}>
 CONFIG_FSL_EDMA                                 policy<{'arm64': 'm', 'armhf': 'm', 'ppc64el': 'm', 'riscv64': 'm'}>
@@ -5668,7 +5669,7 @@ CONFIG_GENERIC_IRQ_SHOW                         policy<{'amd64': 'y', 'arm64': '
 CONFIG_GENERIC_IRQ_SHOW_LEVEL                   policy<{'arm64': 'y', 'armhf': 'y', 'ppc64el': 'y', 'riscv64': 'y'}>
 CONFIG_GENERIC_ISA_DMA                          policy<{'amd64': 'y', 'ppc64el': 'y'}>
 CONFIG_GENERIC_LIB_DEVMEM_IS_ALLOWED            policy<{'arm64': 'y', 'armhf': 'y', 'riscv64': 'y'}>
-CONFIG_GENERIC_LOCKBREAK                        policy<{'ppc64el': 'y', 's390x': 'y'}>
+CONFIG_GENERIC_LOCKBREAK                        policy<{'ppc64el': 'y', 's390x': '-'}>
 CONFIG_GENERIC_MSI_IRQ                          policy<{'amd64': 'y', 'arm64': 'y', 'armhf': 'y', 'ppc64el': 'y', 'riscv64': 'y', 's390x': 'y'}>
 CONFIG_GENERIC_NET_UTILS                        policy<{'amd64': 'y', 'arm64': 'y', 'armhf': 'y', 'ppc64el': 'y', 'riscv64': 'y', 's390x': 'y'}>
 CONFIG_GENERIC_PCI_IOMAP                        policy<{'amd64': 'y', 'arm64': 'y', 'armhf': 'y', 'ppc64el': 'y', 'riscv64': 'y'}>
@@ -6398,8 +6399,8 @@ CONFIG_HSR                                      policy<{'amd64': 'm', 'arm64': '
 CONFIG_HT16K33                                  policy<{'amd64': 'm', 'arm64': 'm', 'armhf': 'm', 'ppc64el': 'm', 'riscv64': 'm', 's390x': '-'}>
 CONFIG_HTC_EGPIO                                policy<{'armhf': 'y'}>
 CONFIG_HTE                                      policy<{'amd64': 'y', 'arm64': 'y', 'armhf': 'y', 'ppc64el': 'y', 'riscv64': 'n', 's390x': 'n'}>
-CONFIG_HTE_TEGRA194                             policy<{'arm64': 'm'}>
-CONFIG_HTE_TEGRA194_TEST                        policy<{'arm64': 'm'}>
+CONFIG_HTE_TEGRA194                             policy<{'arm64': 'm', 'armhf': 'm'}>
+CONFIG_HTE_TEGRA194_TEST                        policy<{'arm64': 'm', 'armhf': 'm'}>
 CONFIG_HTMDUMP                                  policy<{'ppc64el': 'm'}>
 CONFIG_HTS221                                   policy<{'amd64': 'm', 'arm64': 'm', 'armhf': 'm', 'ppc64el': 'm', 'riscv64': 'm'}>
 CONFIG_HTS221_I2C                               policy<{'amd64': 'm', 'arm64': 'm', 'armhf': 'm', 'ppc64el': 'm', 'riscv64': 'm'}>
@@ -6875,16 +6876,28 @@ CONFIG_INIT_ON_FREE_DEFAULT_ON                  policy<{'amd64': 'n', 'arm64': '
 CONFIG_INIT_STACK_ALL_PATTERN                   policy<{'amd64': 'n', 'arm64': 'n', 'armhf': 'n', 'ppc64el': 'n', 'riscv64': 'n', 's390x': 'n'}>
 CONFIG_INIT_STACK_ALL_ZERO                      policy<{'amd64': 'y', 'arm64': 'y', 'armhf': 'y', 'ppc64el': 'y', 'riscv64': 'y', 's390x': 'y'}>
 CONFIG_INIT_STACK_NONE                          policy<{'amd64': 'n', 'arm64': 'n', 'armhf': 'n', 'ppc64el': 'n', 'riscv64': 'n', 's390x': 'n'}>
+CONFIG_INLINE_READ_LOCK                         policy<{'s390x': 'y'}>
+CONFIG_INLINE_READ_LOCK_BH                      policy<{'s390x': 'y'}>
+CONFIG_INLINE_READ_LOCK_IRQ                     policy<{'s390x': 'y'}>
+CONFIG_INLINE_READ_LOCK_IRQSAVE                 policy<{'s390x': 'y'}>
 CONFIG_INLINE_READ_TRYLOCK                      policy<{'s390x': 'y'}>
 CONFIG_INLINE_READ_UNLOCK                       policy<{'armhf': 'y', 'ppc64el': '-', 'riscv64': '-', 's390x': 'y'}>
 CONFIG_INLINE_READ_UNLOCK_BH                    policy<{'s390x': 'y'}>
 CONFIG_INLINE_READ_UNLOCK_IRQ                   policy<{'armhf': 'y', 'ppc64el': '-', 'riscv64': '-', 's390x': 'y'}>
 CONFIG_INLINE_READ_UNLOCK_IRQRESTORE            policy<{'s390x': 'y'}>
+CONFIG_INLINE_SPIN_LOCK                         policy<{'s390x': 'y'}>
+CONFIG_INLINE_SPIN_LOCK_BH                      policy<{'s390x': 'y'}>
+CONFIG_INLINE_SPIN_LOCK_IRQ                     policy<{'s390x': 'y'}>
+CONFIG_INLINE_SPIN_LOCK_IRQSAVE                 policy<{'s390x': 'y'}>
 CONFIG_INLINE_SPIN_TRYLOCK                      policy<{'s390x': 'y'}>
 CONFIG_INLINE_SPIN_TRYLOCK_BH                   policy<{'s390x': 'y'}>
 CONFIG_INLINE_SPIN_UNLOCK_BH                    policy<{'s390x': 'y'}>
 CONFIG_INLINE_SPIN_UNLOCK_IRQ                   policy<{'armhf': 'y', 'ppc64el': '-', 'riscv64': '-', 's390x': 'y'}>
 CONFIG_INLINE_SPIN_UNLOCK_IRQRESTORE            policy<{'s390x': 'y'}>
+CONFIG_INLINE_WRITE_LOCK                        policy<{'s390x': 'y'}>
+CONFIG_INLINE_WRITE_LOCK_BH                     policy<{'s390x': 'y'}>
+CONFIG_INLINE_WRITE_LOCK_IRQ                    policy<{'s390x': 'y'}>
+CONFIG_INLINE_WRITE_LOCK_IRQSAVE                policy<{'s390x': 'y'}>
 CONFIG_INLINE_WRITE_TRYLOCK                     policy<{'s390x': 'y'}>
 CONFIG_INLINE_WRITE_UNLOCK                      policy<{'armhf': 'y', 'ppc64el': '-', 'riscv64': '-', 's390x': 'y'}>
 CONFIG_INLINE_WRITE_UNLOCK_BH                   policy<{'s390x': 'y'}>
@@ -16057,7 +16070,7 @@ CONFIG_VIDEO_DW9714                             policy<{'amd64': 'm', 'arm64': '
 CONFIG_VIDEO_DW9719                             policy<{'amd64': 'm', 'arm64': 'm', 'armhf': 'm', 'ppc64el': 'm', 'riscv64': 'm'}>
 CONFIG_VIDEO_DW9768                             policy<{'amd64': 'm', 'arm64': 'm', 'armhf': 'm', 'ppc64el': 'm', 'riscv64': 'm'}>
 CONFIG_VIDEO_DW9807_VCM                         policy<{'amd64': 'm', 'arm64': 'm', 'armhf': 'm', 'ppc64el': 'm', 'riscv64': 'm'}>
-CONFIG_VIDEO_DW_MIPI_CSI2RX                     policy<{'amd64': 'm', 'arm64': 'm', 'armhf': 'm', 'ppc64el': 'm', 'riscv64': 'm'}>
+CONFIG_VIDEO_DW_MIPI_CSI2RX                     policy<{'amd64': '-', 'arm64': 'm', 'armhf': 'm', 'ppc64el': '-', 'riscv64': '-'}>
 CONFIG_VIDEO_E5010_JPEG_ENC                     policy<{'amd64': '-', 'arm64': 'm', 'armhf': '-', 'ppc64el': '-', 'riscv64': '-'}>
 CONFIG_VIDEO_EM28XX                             policy<{'amd64': 'm', 'arm64': 'm', 'armhf': 'm', 'ppc64el': 'm', 'riscv64': 'm'}>
 CONFIG_VIDEO_EM28XX_ALSA                        policy<{'amd64': 'm', 'arm64': 'm', 'armhf': 'm', 'ppc64el': 'm', 'riscv64': 'm'}>

@@ -118,12 +118,12 @@ static int ps883x_set(struct ps883x_retimer *retimer, struct typec_retimer_state
 				CONN_STATUS_1_DP_HPD_LEVEL;
 
 			switch (state->mode)  {
+			case TYPEC_DP_STATE_D:
+				cfg0 |= CONN_STATUS_0_USB_3_1_CONNECTED;
+				fallthrough;
 			case TYPEC_DP_STATE_C:
 				cfg1 |= CONN_STATUS_1_DP_SINK_REQUESTED |
 					CONN_STATUS_1_DP_PIN_ASSIGNMENT_C_D;
-				fallthrough;
-			case TYPEC_DP_STATE_D:
-				cfg1 |= CONN_STATUS_0_USB_3_1_CONNECTED;
 				break;
 			default: /* MODE_E */
 				break;
@@ -433,6 +433,7 @@ static int ps883x_retimer_probe(struct i2c_client *client)
 		goto err_switch_unregister;
 	}
 
+	i2c_set_clientdata(client, retimer);
 	return 0;
 
 err_switch_unregister:

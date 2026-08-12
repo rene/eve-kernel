@@ -1007,7 +1007,7 @@ static inline void cancel_protect_slice(struct sched_entity *se)
  *
  * Which allows tree pruning through eligibility.
  */
-static struct sched_entity *__pick_eevdf(struct cfs_rq *cfs_rq, bool protect)
+static struct sched_entity *pick_eevdf(struct cfs_rq *cfs_rq, bool protect)
 {
 	struct rb_node *node = cfs_rq->tasks_timeline.rb_root.rb_node;
 	struct sched_entity *se = __pick_first_entity(cfs_rq);
@@ -1076,11 +1076,6 @@ found:
 		best = curr;
 
 	return best;
-}
-
-static struct sched_entity *pick_eevdf(struct cfs_rq *cfs_rq)
-{
-	return __pick_eevdf(cfs_rq, true);
 }
 
 struct sched_entity *__pick_last_entity(struct cfs_rq *cfs_rq)
@@ -5540,11 +5535,11 @@ static int dequeue_entities(struct rq *rq, struct sched_entity *se, int flags);
  * 4) do not run the "skip" process, if something else is available
  */
 static struct sched_entity *
-pick_next_entity(struct rq *rq, struct cfs_rq *cfs_rq)
+pick_next_entity(struct rq *rq, struct cfs_rq *cfs_rq, bool protect)
 {
 	struct sched_entity *se;
 
-	se = pick_eevdf(cfs_rq);
+	se = pick_eevdf(cfs_rq, protect);
 	if (se->sched_delayed) {
 		dequeue_entities(rq, se, DEQUEUE_SLEEP | DEQUEUE_DELAYED);
 		/*
@@ -8888,7 +8883,7 @@ static void wakeup_preempt_fair(struct rq *rq, struct task_struct *p, int wake_f
 {
 	enum preempt_wakeup_action preempt_action = PREEMPT_WAKEUP_PICK;
 	struct task_struct *donor = rq->donor;
-	struct sched_entity *se = &donor->se, *pse = &p->se;
+	struct sched_entity *nse, *se = &donor->se, *pse = &p->se;
 	struct cfs_rq *cfs_rq = task_cfs_rq(donor);
 	int cse_is_idle, pse_is_idle;
 
@@ -8999,11 +8994,18 @@ static void wakeup_preempt_fair(struct rq *rq, struct task_struct *p, int wake_f
 	}
 
 pick:
-	/*
-	 * If @p has become the most eligible task, force preemption.
-	 */
-	if (__pick_eevdf(cfs_rq, preempt_action != PREEMPT_WAKEUP_SHORT) == pse)
+	nse = pick_next_entity(rq, cfs_rq, preempt_action != PREEMPT_WAKEUP_SHORT);
+	/* If @p has become the most eligible task, force preemption */
+	if (nse == pse)
 		goto preempt;
+
+	/*
+	 * Because p is enqueued, nse being null can only mean that we
+	 * dequeued a delayed task. If there are still entities queued in
+	 * cfs, check if the next one will be p.
+	 */
+	if (!nse && cfs_rq->nr_queued)
+		goto pick;
 
 	if (sched_feat(RUN_TO_PARITY))
 		update_protect_slice(cfs_rq, se);
@@ -9038,7 +9040,7 @@ again:
 
 		throttled |= check_cfs_rq_runtime(cfs_rq);
 
-		se = pick_next_entity(rq, cfs_rq);
+		se = pick_next_entity(rq, cfs_rq, true);
 		if (!se)
 			goto again;
 		cfs_rq = group_cfs_rq(se);
@@ -12503,29 +12505,67 @@ static inline int on_null_domain(struct rq *rq)
  */
 static inline int find_new_ilb(void)
 {
-	const struct cpumask *hk_mask;
-	int ilb_cpu;
+	int this_cpu = smp_processor_id();
+	struct cpumask *ilb_cpus;
+	int ilb_cpu, fallback = -1;
 
-	hk_mask = housekeeping_cpumask(HK_TYPE_KERNEL_NOISE);
+	lockdep_assert_irqs_disabled();
 
-	for_each_cpu_and(ilb_cpu, nohz.idle_cpus_mask, hk_mask) {
+	/*
+	 * Reuse the per-CPU select_rq_mask, which is protected from concurrent
+	 * use on this CPU by having interrupts disabled.
+	 */
+	ilb_cpus = this_cpu_cpumask_var_ptr(select_rq_mask);
+	cpumask_and(ilb_cpus, nohz.idle_cpus_mask,
+		    housekeeping_cpumask(HK_TYPE_KERNEL_NOISE));
 
-		if (ilb_cpu == smp_processor_id())
+	for_each_cpu(ilb_cpu, ilb_cpus) {
+		if (ilb_cpu == this_cpu)
 			continue;
 
-		if (idle_cpu(ilb_cpu))
-			return ilb_cpu;
+		if (!idle_cpu(ilb_cpu)) {
+			/*
+			 * Once an idle fallback exists, a busy CPU proves that
+			 * this core cannot be fully idle. Skip its siblings.
+			 */
+			if (sched_smt_active() && fallback >= 0)
+				cpumask_andnot(ilb_cpus, ilb_cpus,
+					       cpu_smt_mask(ilb_cpu));
+			continue;
+		}
+
+		/*
+		 * Running the idle load balancer on an idle sibling of a busy
+		 * SMT core can reduce the capacity available to its sibling. Prefer
+		 * a CPU whose entire core is idle, but retain the first idle CPU as
+		 * a fallback so idle balancing can still make progress when no fully
+		 * idle core exists.
+		 */
+		if (sched_smt_active() && !is_core_idle(ilb_cpu)) {
+			if (fallback < 0)
+				fallback = ilb_cpu;
+
+			/*
+			 * The core is not idle, so there is no need to check
+			 * any of its other SMT siblings.
+			 */
+			cpumask_andnot(ilb_cpus, ilb_cpus,
+				       cpu_smt_mask(ilb_cpu));
+			continue;
+		}
+
+		return ilb_cpu;
 	}
 
-	return -1;
+	return fallback;
 }
 
 /*
  * Kick a CPU to do the NOHZ balancing, if it is time for it, via a cross-CPU
  * SMP function call (IPI).
  *
- * We pick the first idle CPU in the HK_TYPE_KERNEL_NOISE housekeeping set
- * (if there is one).
+ * Prefer a CPU on a fully idle core in the HK_TYPE_KERNEL_NOISE housekeeping
+ * set. Fall back to the first idle CPU when no fully idle core exists.
  */
 static void kick_ilb(unsigned int flags)
 {

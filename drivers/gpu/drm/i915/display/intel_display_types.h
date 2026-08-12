@@ -351,6 +351,7 @@ struct intel_vbt_panel_data {
 		bool low_vswing;
 		bool hobl;
 		bool dsc_disable;
+		bool pipe_joiner_enable;
 	} edp;
 
 	struct {
@@ -583,6 +584,7 @@ struct intel_connector {
 
 		struct {
 			u8 dpcd[EDP_PSR_RECEIVER_CAP_SIZE];
+			u8 intel_wa_dpcd;
 
 			bool support;
 			bool su_support;
@@ -1784,6 +1786,8 @@ struct intel_psr {
 	u8 active_non_psr_pipes;
 
 	const char *no_psr_reason;
+
+	struct ref_tracker *vblank_wakeref;
 };
 
 struct intel_dp {

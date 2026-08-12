@@ -1288,14 +1288,16 @@ int mt7925_mcu_add_key(struct mt76_dev *dev, struct ieee80211_vif *vif,
 		return PTR_ERR(skb);
 
 	ret = mt7925_mcu_sta_key_tlv(wcid, sta_key_conf, skb, key, cmd, msta);
-	if (ret)
+	if (ret) {
+		dev_kfree_skb(skb);
 		return ret;
+	}
 
 	return mt76_mcu_skb_send_msg(dev, skb, mcu_cmd, true);
 }
 
-int mt7925_mcu_set_mlo_roc(struct mt792x_bss_conf *mconf, u16 sel_links,
-			   int duration, u8 token_id)
+int mt7925_mcu_set_mlo_roc(struct mt792x_phy *phy, struct mt792x_bss_conf *mconf,
+			   u16 sel_links, int duration, u8 token_id)
 {
 	struct mt792x_vif *mvif = mconf->vif;
 	struct ieee80211_vif *vif = container_of((void *)mvif,
@@ -1330,7 +1332,7 @@ int mt7925_mcu_set_mlo_roc(struct mt792x_bss_conf *mconf, u16 sel_links,
 			.roc[1].len = cpu_to_le16(sizeof(struct roc_acquire_tlv))
 	};
 
-	struct wiphy *wiphy = mvif->phy->mt76->hw->wiphy;
+	struct wiphy *wiphy = phy->mt76->hw->wiphy;
 
 	if (!mconf || hweight16(vif->valid_links) < 2 ||
 	    hweight16(sel_links) != 2)
@@ -1355,7 +1357,7 @@ int mt7925_mcu_set_mlo_roc(struct mt792x_bss_conf *mconf, u16 sel_links,
 	}
 
 	if (!(wiphy->iftype_ext_capab[0].mld_capa_and_ops &
-		IEEE80211_MLD_CAP_OP_MAX_SIMUL_LINKS))
+	      IEEE80211_MLD_CAP_OP_MAX_SIMUL_LINKS))
 		type = is_AG_band ? MT7925_ROC_REQ_MLSR_AG :
 				    MT7925_ROC_REQ_MLSR_AA;
 	else
@@ -3378,7 +3380,6 @@ __mt7925_mcu_set_clc(struct mt792x_dev *dev, u8 *alpha2,
 		u8 rsvd[64];
 	} __packed req = {
 		.tag = cpu_to_le16(0x3),
-		.len = cpu_to_le16(sizeof(req) - 4),
 
 		.idx = idx,
 		.env = env_cap,
@@ -3407,6 +3408,7 @@ __mt7925_mcu_set_clc(struct mt792x_dev *dev, u8 *alpha2,
 		memcpy(req.type, rule->type, 2);
 
 		req.size = cpu_to_le16(seg->len);
+		req.len = cpu_to_le16(sizeof(req) + seg->len - 4);
 		dev->phy.clc_chan_conf = clc->ver == 1 ? 0xff : rule->flag;
 		skb = __mt76_mcu_msg_alloc(&dev->mt76, &req,
 					   le16_to_cpu(req.size) + sizeof(req),
@@ -3730,7 +3732,7 @@ mt7925_mcu_rate_txpower_band(struct mt76_phy *phy,
 		memcpy(tx_power_tlv->alpha2, dev->alpha2, sizeof(dev->alpha2));
 		tx_power_tlv->n_chan = num_ch;
 		tx_power_tlv->tag = cpu_to_le16(0x1);
-		tx_power_tlv->len = cpu_to_le16(sizeof(*tx_power_tlv));
+		tx_power_tlv->len = cpu_to_le16(msg_len);
 
 		switch (band) {
 		case NL80211_BAND_2GHZ:
@@ -3806,43 +3808,6 @@ int mt7925_mcu_set_rate_txpower(struct mt76_phy *phy)
 	}
 
 	return 0;
-}
-
-int mt7925_mcu_wf_rf_pin_ctrl(struct mt792x_phy *phy)
-{
-#define UNI_CMD_RADIO_STATUS_GET	0
-	struct mt792x_dev *dev = phy->dev;
-	struct sk_buff *skb;
-	int ret;
-	struct {
-		__le16 tag;
-		__le16 len;
-		u8 rsv[4];
-	} __packed req = {
-		.tag = UNI_CMD_RADIO_STATUS_GET,
-		.len = cpu_to_le16(sizeof(req)),
-	};
-	struct mt7925_radio_status_event {
-		__le16 tag;
-		__le16 len;
-
-		u8 data;
-		u8 rsv[3];
-	} __packed *status;
-
-	ret = mt76_mcu_send_and_get_msg(&dev->mt76,
-					MCU_UNI_CMD(RADIO_STATUS),
-					&req, sizeof(req), true, &skb);
-	if (ret)
-		return ret;
-
-	skb_pull(skb, sizeof(struct tlv));
-	status = (struct mt7925_radio_status_event *)skb->data;
-	ret = status->data;
-
-	dev_kfree_skb(skb);
-
-	return ret;
 }
 
 int mt7925_mcu_set_rxfilter(struct mt792x_dev *dev, u32 fif,

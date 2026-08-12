@@ -1892,7 +1892,11 @@ static int amdgpu_dm_init(struct amdgpu_device *adev)
 		goto error;
 	}
 
-	init_data.asic_id.chip_family = adev->family;
+	/* special handling for early revisions of GC 11.5.4 */
+	if (amdgpu_ip_version(adev, GC_HWIP, 0) == IP_VERSION(11, 5, 4))
+		init_data.asic_id.chip_family = AMDGPU_FAMILY_GC_11_5_4;
+	else
+		init_data.asic_id.chip_family = adev->family;
 
 	init_data.asic_id.pci_revision_id = adev->pdev->revision;
 	init_data.asic_id.hw_internal_rev = adev->external_rev_id;
@@ -2079,6 +2083,14 @@ static int amdgpu_dm_init(struct amdgpu_device *adev)
 	}
 
 	dc_hardware_init(adev->dm.dc);
+
+	/* GOP/vBIOS may leave an OPTC enabled for a display present at power-on
+	 * but no longer driven (e.g. an external DP unplugged at boot). Such a
+	 * dangling pipe keeps DCN out of idle and blocks s0i3. Power it down
+	 * here when nothing needs to be preserved.
+	 */
+	if (adev->flags & AMD_IS_APU)
+		dc_disable_dangling_timing_generators(adev->dm.dc);
 
 	adev->dm.hpd_rx_offload_wq = hpd_rx_irq_create_workqueue(adev);
 	if (!adev->dm.hpd_rx_offload_wq) {
@@ -3203,6 +3215,7 @@ static int dm_suspend(struct amdgpu_ip_block *ip_block)
 
 		mutex_lock(&dm->dc_lock);
 
+		amdgpu_dm_ism_disable(dm);
 		dc_allow_idle_optimizations(adev->dm.dc, false);
 
 		dm->cached_dc_state = dc_state_create_copy(dm->dc->current_state);
@@ -3235,6 +3248,9 @@ static int dm_suspend(struct amdgpu_ip_block *ip_block)
 	s3_handle_mst(adev_to_drm(adev), true);
 
 	amdgpu_dm_irq_suspend(adev);
+
+	scoped_guard(mutex, &dm->dc_lock)
+		amdgpu_dm_ism_disable(dm);
 
 	hpd_rx_irq_work_suspend(dm);
 
@@ -3526,6 +3542,7 @@ static int dm_resume(struct amdgpu_ip_block *ip_block)
 
 		dc_resume(dm->dc);
 
+		amdgpu_dm_ism_enable(dm);
 		amdgpu_dm_irq_resume_early(adev);
 
 		for (i = 0; i < dc_state->stream_count; i++) {
@@ -3585,6 +3602,9 @@ static int dm_resume(struct amdgpu_ip_block *ip_block)
 
 	/* program HPD filter */
 	dc_resume(dm->dc);
+
+	scoped_guard(mutex, &dm->dc_lock)
+		amdgpu_dm_ism_enable(dm);
 
 	/*
 	 * early enable HPD Rx IRQ, should be done before set mode as short
@@ -9333,31 +9353,7 @@ static void manage_dm_interrupts(struct amdgpu_device *adev,
 	if (acrtc_state) {
 		timing = &acrtc_state->stream->timing;
 
-		/*
-		 * Depending on when the HW latching event of double-buffered
-		 * registers happen relative to the PSR SDP deadline, and how
-		 * bad the Panel clock has drifted since the last ALPM off
-		 * event, there can be up to 3 frames of delay between sending
-		 * the PSR exit cmd to DMUB fw, and when the panel starts
-		 * displaying live frames.
-		 *
-		 * We can set:
-		 *
-		 * 20/100 * offdelay_ms = 3_frames_ms
-		 * => offdelay_ms = 5 * 3_frames_ms
-		 *
-		 * This ensures that `3_frames_ms` will only be experienced as a
-		 * 20% delay on top how long the display has been static, and
-		 * thus make the delay less perceivable.
-		 */
-		if (acrtc_state->stream->link->psr_settings.psr_version <
-		    DC_PSR_VERSION_UNSUPPORTED) {
-			offdelay = DIV64_U64_ROUND_UP((u64)5 * 3 * 10 *
-						      timing->v_total *
-						      timing->h_total,
-						      timing->pix_clk_100hz);
-			config.offdelay_ms = offdelay ?: 30;
-		} else if (amdgpu_ip_version(adev, DCE_HWIP, 0) <
+		if (amdgpu_ip_version(adev, DCE_HWIP, 0) <
 			   IP_VERSION(3, 5, 0) ||
 			   !(adev->flags & AMD_IS_APU)) {
 			/*
@@ -10019,7 +10015,7 @@ static void amdgpu_dm_commit_planes(struct drm_atomic_state *state,
 			continue;
 
 		bundle->surface_updates[planes_count].surface = dc_plane;
-		if (new_pcrtc_state->color_mgmt_changed) {
+		if (new_pcrtc_state->color_mgmt_changed || new_plane_state->color_mgmt_changed) {
 			bundle->surface_updates[planes_count].gamma = &dc_plane->gamma_correction;
 			bundle->surface_updates[planes_count].in_transfer_func = &dc_plane->in_transfer_func;
 			bundle->surface_updates[planes_count].gamut_remap_matrix = &dc_plane->gamut_remap_matrix;
@@ -11757,6 +11753,10 @@ static bool should_reset_plane(struct drm_atomic_state *state,
 
 	/* CRTC Degamma changes currently require us to recreate planes. */
 	if (new_crtc_state->color_mgmt_changed)
+		return true;
+
+	/* Plane color pipeline or its colorop changes. */
+	if (new_plane_state->color_mgmt_changed)
 		return true;
 
 	/*

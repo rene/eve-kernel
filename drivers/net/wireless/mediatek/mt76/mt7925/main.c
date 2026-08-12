@@ -333,9 +333,6 @@ int __mt7925_start(struct mt792x_phy *phy)
 	ieee80211_queue_delayed_work(mphy->hw, &mphy->mac_work,
 				     MT792x_WATCHDOG_TIME);
 
-	if (phy->chip_cap & MT792x_CHIP_CAP_WF_RF_PIN_CTRL_EVT_EN)
-		wiphy_rfkill_start_polling(mphy->hw->wiphy);
-
 	return 0;
 }
 EXPORT_SYMBOL_GPL(__mt7925_start);
@@ -460,12 +457,16 @@ void mt7925_roc_abort_sync(struct mt792x_dev *dev)
 {
 	struct mt792x_phy *phy = &dev->phy;
 
+	if (!test_and_clear_bit(MT76_STATE_ROC, &phy->mt76->state))
+		return;
+
 	timer_delete_sync(&phy->roc_timer);
-	cancel_work_sync(&phy->roc_work);
-	if (test_and_clear_bit(MT76_STATE_ROC, &phy->mt76->state))
-		ieee80211_iterate_interfaces(mt76_hw(dev),
-					     IEEE80211_IFACE_ITER_RESUME_ALL,
-					     mt7925_roc_iter, (void *)phy);
+
+	cancel_work(&phy->roc_work);
+
+	ieee80211_iterate_interfaces(mt76_hw(dev),
+				     IEEE80211_IFACE_ITER_RESUME_ALL,
+				     mt7925_roc_iter, (void *)phy);
 }
 EXPORT_SYMBOL_GPL(mt7925_roc_abort_sync);
 
@@ -544,7 +545,7 @@ static int mt7925_set_mlo_roc(struct mt792x_phy *phy,
 
 	phy->roc_grant = false;
 
-	err = mt7925_mcu_set_mlo_roc(mconf, sel_links, 5, ++phy->roc_token_id);
+	err = mt7925_mcu_set_mlo_roc(phy, mconf, sel_links, 5, ++phy->roc_token_id);
 	if (err < 0) {
 		clear_bit(MT76_STATE_ROC, &phy->mt76->state);
 		goto out;
@@ -1147,6 +1148,9 @@ mt7925_mac_sta_remove_links(struct mt792x_dev *dev, struct ieee80211_vif *vif,
 
 		if (vif->type == NL80211_IFTYPE_AP)
 			break;
+
+		if (vif->type == NL80211_IFTYPE_STATION && sta->tdls)
+			continue;
 
 		link_sta = mt792x_sta_to_link_sta(vif, sta, link_id);
 		if (!link_sta)
@@ -1906,10 +1910,8 @@ static void mt7925_link_info_changed(struct ieee80211_hw *hw,
 	struct mt792x_phy *phy = mt792x_hw_phy(hw);
 	struct mt792x_dev *dev = mt792x_hw_dev(hw);
 	struct mt792x_bss_conf *mconf;
-	struct ieee80211_bss_conf *link_conf;
 
 	mconf = mt792x_vif_to_link(mvif, info->link_id);
-	link_conf = mt792x_vif_to_bss_conf(vif, mconf->link_id);
 
 	mt792x_mutex_acquire(dev);
 
@@ -1950,10 +1952,6 @@ static void mt7925_link_info_changed(struct ieee80211_hw *hw,
 		ieee80211_queue_delayed_work(hw, &dev->mlo_pm_work, 5 * HZ);
 		mvif->mlo_pm_state = MT792x_MLO_CHANGED_PS;
 	}
-
-	if (changed & IEEE80211_CHANCTX_CHANGE_PUNCTURING)
-		mt7925_mcu_set_eht_pp(mvif->phy->mt76, &mconf->mt76,
-				      link_conf, NULL);
 
 	if (changed & BSS_CHANGED_CQM)
 		mt7925_mcu_set_rssimonitor(dev, vif);
@@ -2163,18 +2161,6 @@ static void mt7925_unassign_vif_chanctx(struct ieee80211_hw *hw,
 	}
 }
 
-static void mt7925_rfkill_poll(struct ieee80211_hw *hw)
-{
-	struct mt792x_phy *phy = mt792x_hw_phy(hw);
-	int ret;
-
-	mt792x_mutex_acquire(phy->dev);
-	ret = mt7925_mcu_wf_rf_pin_ctrl(phy);
-	mt792x_mutex_release(phy->dev);
-
-	wiphy_rfkill_set_hw_state(hw->wiphy, ret == 0);
-}
-
 static int mt7925_switch_vif_chanctx(struct ieee80211_hw *hw,
 				     struct ieee80211_vif_chanctx_switch *vifs,
 				     int n_vifs,
@@ -2352,7 +2338,6 @@ const struct ieee80211_ops mt7925_ops = {
 	.link_info_changed = mt7925_link_info_changed,
 	.change_vif_links = mt7925_change_vif_links,
 	.change_sta_links = mt7925_change_sta_links,
-	.rfkill_poll = mt7925_rfkill_poll,
 
 	.switch_vif_chanctx = mt7925_switch_vif_chanctx,
 	.pre_channel_switch = mt7925_pre_channel_switch,

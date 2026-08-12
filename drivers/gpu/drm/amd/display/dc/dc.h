@@ -1638,7 +1638,7 @@ struct dc_scratch_space {
 	struct dc_link_training_overrides preferred_training_settings;
 	struct dp_audio_test_data audio_test_data;
 
-	uint8_t ddc_hw_inst;
+	enum gpio_ddc_line ddc_hw_inst;
 
 	uint8_t hpd_src;
 
@@ -2720,6 +2720,8 @@ void dc_set_power_state(
 void dc_resume(struct dc *dc);
 
 void dc_power_down_on_boot(struct dc *dc);
+
+void dc_disable_dangling_timing_generators(struct dc *dc);
 
 /*
  * HDCP Interfaces

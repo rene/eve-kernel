@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright (C) 2012-2014, 2018-2025 Intel Corporation
+ * Copyright (C) 2012-2014, 2018-2026 Intel Corporation
  * Copyright (C) 2013-2015 Intel Mobile Communications GmbH
  * Copyright (C) 2016-2017 Intel Deutschland GmbH
  */
@@ -459,16 +459,16 @@ static void iwl_mvm_phy_filter_init(struct iwl_mvm *mvm,
 
 static void iwl_mvm_uats_init(struct iwl_mvm *mvm)
 {
-	u8 cmd_ver;
-	int ret;
-	struct iwl_host_cmd cmd = {
-		.id = WIDE_ID(REGULATORY_AND_NVM_GROUP,
-			      MCC_ALLOWED_AP_TYPE_CMD),
-		.flags = 0,
-		.data[0] = &mvm->fwrt.uats_table,
-		.len[0] =  sizeof(mvm->fwrt.uats_table),
+	struct iwl_mcc_allowed_ap_type_cmd_v1 *cmd __free(kfree) = NULL;
+	int cmd_id = WIDE_ID(REGULATORY_AND_NVM_GROUP,
+			     MCC_ALLOWED_AP_TYPE_CMD);
+	struct iwl_host_cmd hcmd = {
+		.id = cmd_id,
+		.len[0] = sizeof(*cmd),
 		.dataflags[0] = IWL_HCMD_DFL_NOCOPY,
 	};
+	u8 cmd_ver;
+	int ret;
 
 	if (mvm->trans->mac_cfg->device_family < IWL_DEVICE_FAMILY_AX210 ||
 	    !mvm->trans->cfg->uhb_supported) {
@@ -476,7 +476,7 @@ static void iwl_mvm_uats_init(struct iwl_mvm *mvm)
 		return;
 	}
 
-	cmd_ver = iwl_fw_lookup_cmd_ver(mvm->fw, cmd.id,
+	cmd_ver = iwl_fw_lookup_cmd_ver(mvm->fw, cmd_id,
 					IWL_FW_CMD_VER_UNKNOWN);
 	if (cmd_ver != 1) {
 		IWL_DEBUG_RADIO(mvm,
@@ -487,10 +487,28 @@ static void iwl_mvm_uats_init(struct iwl_mvm *mvm)
 
 	iwl_uefi_get_uats_table(mvm->trans, &mvm->fwrt);
 
-	if (!mvm->fwrt.uats_valid)
+	if (!mvm->fwrt.ap_type_cmd_valid)
 		return;
 
-	ret = iwl_mvm_send_cmd(mvm, &cmd);
+	/* Since we free the command immediately after iwl_mvm_send_cmd, we
+	 * must send this command in SYNC mode.
+	 */
+	lockdep_assert_held(&mvm->mutex);
+
+	cmd = kzalloc_obj(*cmd);
+	if (!cmd)
+		return;
+
+	BUILD_BUG_ON(sizeof(mvm->fwrt.ap_type_cmd.mcc_to_ap_type_map) !=
+		     sizeof(cmd->mcc_to_ap_type_map));
+
+	memcpy(cmd->mcc_to_ap_type_map,
+	       mvm->fwrt.ap_type_cmd.mcc_to_ap_type_map,
+	       sizeof(mvm->fwrt.ap_type_cmd.mcc_to_ap_type_map));
+
+	hcmd.data[0] = cmd;
+
+	ret = iwl_mvm_send_cmd(mvm, &hcmd);
 	if (ret < 0)
 		IWL_ERR(mvm, "failed to send MCC_ALLOWED_AP_TYPE_CMD (%d)\n",
 			ret);
