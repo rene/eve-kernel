@@ -3662,7 +3662,7 @@ end:
 static int btf_repeat_fields(struct btf_field_info *info, int info_cnt,
 			     u32 field_cnt, u32 repeat_cnt, u32 elem_size)
 {
-	u32 i, j;
+	u32 i, j, total_cnt, total_repeats;
 	u32 cur;
 
 	/* Ensure not repeating fields that should not be repeated. */
@@ -3680,10 +3680,9 @@ static int btf_repeat_fields(struct btf_field_info *info, int info_cnt,
 		}
 	}
 
-	/* The type of struct size or variable size is u32,
-	 * so the multiplication will not overflow.
-	 */
-	if (field_cnt * (repeat_cnt + 1) > info_cnt)
+	if (check_add_overflow(repeat_cnt, 1, &total_repeats) ||
+	    check_mul_overflow(field_cnt, total_repeats, &total_cnt) ||
+	    total_cnt > (u32)info_cnt)
 		return -E2BIG;
 
 	cur = field_cnt;
@@ -9019,7 +9018,7 @@ static int btf_check_dtor_kfuncs(struct btf *btf, const struct btf_id_dtor_kfunc
 		if (!t || !btf_type_is_ptr(t))
 			return -EINVAL;
 
-		if (IS_ENABLED(CONFIG_CFI_CLANG)) {
+		if (IS_ENABLED(CONFIG_CFI)) {
 			/* Ensure the destructor kfunc type matches btf_dtor_kfunc_t */
 			t = btf_type_by_id(btf, t->type);
 			if (!btf_type_is_void(t))
