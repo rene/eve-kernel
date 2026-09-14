@@ -47,6 +47,11 @@ module_param(igd_virtual_pm, bool, 0444);
 MODULE_PARM_DESC(igd_virtual_pm,
 		 "Virtualize the PCI power state of Intel integrated graphics instead of programming the device (default: true)");
 
+static bool igd_log_transitions;
+module_param(igd_log_transitions, bool, 0444);
+MODULE_PARM_DESC(igd_log_transitions,
+		 "Log every guest power-state and command-register write to Intel integrated graphics (default: false)");
+
 static void vfio_pci_eventfd_rcu_free(struct rcu_head *rcu)
 {
 	struct vfio_pci_eventfd *eventfd =
@@ -2201,11 +2206,14 @@ int vfio_pci_core_init_dev(struct vfio_device *core_vdev)
 	 * no watchdog reset.  Emulate the power state for these devices and
 	 * leave the hardware in D0 for as long as it is assigned.
 	 */
-	if (igd_virtual_pm && vfio_pci_is_intel_igd(vdev->pdev)) {
-		vdev->pm_virtual = true;
-		vdev->disable_idle_d3 = true;
-		pci_info(vdev->pdev,
-			 "vfio-pci: virtualizing PCI power state, device stays in D0\n");
+	if (vfio_pci_is_intel_igd(vdev->pdev)) {
+		if (igd_virtual_pm) {
+			vdev->pm_virtual = true;
+			vdev->disable_idle_d3 = true;
+			pci_info(vdev->pdev,
+				 "vfio-pci: virtualizing PCI power state, device stays in D0\n");
+		}
+		vdev->log_transitions = igd_log_transitions;
 	}
 
 	return 0;
