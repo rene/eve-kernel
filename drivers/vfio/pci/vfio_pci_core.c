@@ -42,6 +42,11 @@ static bool nointxmask;
 static bool disable_vga;
 static bool disable_idle_d3;
 
+static bool igd_virtual_pm = true;
+module_param(igd_virtual_pm, bool, 0444);
+MODULE_PARM_DESC(igd_virtual_pm,
+		 "Virtualize the PCI power state of Intel integrated graphics instead of programming the device (default: true)");
+
 static void vfio_pci_eventfd_rcu_free(struct rcu_head *rcu)
 {
 	struct vfio_pci_eventfd *eventfd =
@@ -327,6 +332,16 @@ static int vfio_pci_runtime_pm_entry(struct vfio_pci_core_device *vdev,
 	if (vdev->pm_runtime_engaged) {
 		up_write(&vdev->memory_lock);
 		return -EINVAL;
+	}
+
+	/*
+	 * A device whose power state we refuse to program cannot be handed to
+	 * runtime PM either - that is just the same D3 transition taken by a
+	 * different route.
+	 */
+	if (vdev->pm_virtual) {
+		up_write(&vdev->memory_lock);
+		return -EOPNOTSUPP;
 	}
 
 	vdev->pm_runtime_engaged = true;
@@ -2173,6 +2188,25 @@ int vfio_pci_core_init_dev(struct vfio_device *core_vdev)
 	xa_init(&vdev->ctx);
 
 	vdev->disable_idle_d3 = disable_idle_d3;
+
+	/*
+	 * Intel integrated graphics is a root-complex integrated endpoint that
+	 * shares power wells, clocks and the display pipeline with the rest of
+	 * the SoC.  Its D-state transitions are sequenced by the host graphics
+	 * driver together with platform firmware (OpRegion), never by a bare
+	 * PMCSR write, and it reports No_Soft_Reset == 0, so each D3hot->D0
+	 * transition also resets the function.  Driving that from an assigned
+	 * guest wedges the whole machine: the SoC stops answering CPU
+	 * transactions to the device and the box dies with no MCE, no panic and
+	 * no watchdog reset.  Emulate the power state for these devices and
+	 * leave the hardware in D0 for as long as it is assigned.
+	 */
+	if (igd_virtual_pm && vfio_pci_is_intel_igd(vdev->pdev)) {
+		vdev->pm_virtual = true;
+		vdev->disable_idle_d3 = true;
+		pci_info(vdev->pdev,
+			 "vfio-pci: virtualizing PCI power state, device stays in D0\n");
+	}
 
 	return 0;
 }

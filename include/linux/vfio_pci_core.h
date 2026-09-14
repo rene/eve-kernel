@@ -86,6 +86,7 @@ struct vfio_pci_core_device {
 	bool			nointx:1;
 	bool			needs_pm_restore:1;
 	bool			disable_idle_d3:1;
+	bool			pm_virtual:1;
 	/* Flags modified at runtime - dedicated storage unit */
 	bool			needs_reset;
 	bool			pm_intx_masked;

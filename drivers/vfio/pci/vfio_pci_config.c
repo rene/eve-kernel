@@ -716,6 +716,22 @@ static void vfio_lock_and_set_power_state(struct vfio_pci_core_device *vdev,
 	up_write(&vdev->memory_lock);
 }
 
+/* The D-state a PMCSR read should report for a given power state */
+static u16 vfio_pm_state_bits(pci_power_t state)
+{
+	switch (state) {
+	case PCI_D1:
+		return 1;
+	case PCI_D2:
+		return 2;
+	case PCI_D3hot:
+	case PCI_D3cold:
+		return 3;
+	default:
+		return 0;
+	}
+}
+
 static int vfio_pm_config_write(struct vfio_pci_core_device *vdev, int pos,
 				int count, struct perm_bits *perm,
 				int offset, __le32 val)
@@ -725,6 +741,7 @@ static int vfio_pm_config_write(struct vfio_pci_core_device *vdev, int pos,
 		return count;
 
 	if (offset == PCI_PM_CTRL) {
+		__le16 *vpmcsr = (__le16 *)&vdev->vconfig[pos];
 		pci_power_t state;
 
 		switch (le32_to_cpu(val) & PCI_PM_CTRL_STATE_MASK) {
@@ -742,7 +759,23 @@ static int vfio_pm_config_write(struct vfio_pci_core_device *vdev, int pos,
 			break;
 		}
 
-		vfio_lock_and_set_power_state(vdev, state);
+		if (!vdev->pm_virtual) {
+			vfio_lock_and_set_power_state(vdev, state);
+			/*
+			 * The transition can be refused or clamped, by a PCI
+			 * quirk or because the device has VFs enabled, so
+			 * report where the device actually ended up.
+			 */
+			state = vdev->pdev->current_state;
+		}
+
+		/*
+		 * With a virtualized power state the hardware was left alone,
+		 * and we report back the state the user asked for so that its
+		 * driver sees a transition that completed.
+		 */
+		*vpmcsr &= ~cpu_to_le16(PCI_PM_CTRL_STATE_MASK);
+		*vpmcsr |= cpu_to_le16(vfio_pm_state_bits(state));
 	}
 
 	return count;
@@ -776,12 +809,19 @@ static int __init init_pci_cap_pm_perm(struct perm_bits *perm)
 	 * the user change power state, but we trap and initiate the
 	 * change ourselves, so the state bits are read-only.
 	 *
+	 * The state bits are also virtualized: vfio_pm_config_write() owns
+	 * them and fills them in from the state the device actually reached,
+	 * which is not necessarily what the hardware PMCSR reports (D3cold
+	 * reads back as all-ones, and a device whose power state we emulate
+	 * never leaves D0).
+	 *
 	 * The guest can't process PME from D3cold so virtualize PME_Status
 	 * and PME_En bits. The vconfig bits will be cleared during device
 	 * capability initialization.
 	 */
 	p_setd(perm, PCI_PM_CTRL,
-	       PCI_PM_CTRL_PME_ENABLE | PCI_PM_CTRL_PME_STATUS,
+	       PCI_PM_CTRL_PME_ENABLE | PCI_PM_CTRL_PME_STATUS |
+	       PCI_PM_CTRL_STATE_MASK,
 	       ~(PCI_PM_CTRL_PME_ENABLE | PCI_PM_CTRL_PME_STATUS |
 		 PCI_PM_CTRL_STATE_MASK));
 

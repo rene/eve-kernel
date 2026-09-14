@@ -105,4 +105,18 @@ static inline bool vfio_pci_is_vga(struct pci_dev *pdev)
 	return (pdev->class >> 8) == PCI_CLASS_DISPLAY_VGA;
 }
 
+/*
+ * Intel integrated graphics: always the VGA function at 00:02.0, and the only
+ * Intel display device that can be assigned in IGD legacy mode.  Discrete
+ * Intel GPUs are ordinary PCIe endpoints and are deliberately not matched.
+ */
+static inline bool vfio_pci_is_intel_igd(struct pci_dev *pdev)
+{
+	return pdev->vendor == PCI_VENDOR_ID_INTEL &&
+	       vfio_pci_is_vga(pdev) &&
+	       pci_domain_nr(pdev->bus) == 0 &&
+	       pdev->bus->number == 0 &&
+	       pdev->devfn == PCI_DEVFN(2, 0);
+}
+
 #endif
