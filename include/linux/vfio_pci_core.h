@@ -100,6 +100,7 @@ struct vfio_pci_core_device {
 	struct delayed_work	pm_defer_work;
 	struct mutex		pm_defer_lock;	/* protects the three below */
 	pci_power_t		pm_defer_target;
+	unsigned long		pm_defer_armed;	/* jiffies, for the log */
 	bool			pm_defer_hw_d3;
 	int			ioeventfds_nr;
 	struct vfio_pci_eventfd __rcu *err_trigger;

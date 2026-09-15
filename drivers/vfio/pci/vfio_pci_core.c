@@ -392,16 +392,37 @@ void vfio_pci_pm_defer_request(struct vfio_pci_core_device *vdev,
 		 * the deadline out for ever.  schedule_delayed_work() is a nop
 		 * when the work is already queued.
 		 */
-		if (igd_d3_delay_ms && !vdev->pm_defer_hw_d3)
-			schedule_delayed_work(&vdev->pm_defer_work,
-					      msecs_to_jiffies(igd_d3_delay_ms));
+		if (igd_d3_delay_ms && !vdev->pm_defer_hw_d3) {
+			if (schedule_delayed_work(&vdev->pm_defer_work,
+						  msecs_to_jiffies(igd_d3_delay_ms))) {
+				vdev->pm_defer_armed = jiffies;
+				if (vdev->log_transitions)
+					pci_info(vdev->pdev,
+						 "vfio-pci: D3 deferred, applies in %ums if still idle\n",
+						 igd_d3_delay_ms);
+			}
+		} else if (!igd_d3_delay_ms && vdev->log_transitions) {
+			pci_info_ratelimited(vdev->pdev,
+					     "vfio-pci: D3 never applied to the hardware (igd_d3_delay_ms=0)\n");
+		}
 	} else {
 		/*
 		 * Not _sync: the work takes pm_defer_lock, which we hold, so
 		 * a sync cancel would deadlock.  If it is already running it
 		 * blocks on the mutex and then sees the cleared target.
 		 */
-		cancel_delayed_work(&vdev->pm_defer_work);
+		if (cancel_delayed_work(&vdev->pm_defer_work) &&
+		    vdev->log_transitions) {
+			/*
+			 * The interesting line: a D3 the guest asked for and
+			 * left again before the deadline, so the hardware was
+			 * never touched.  The dwell is what the coalescing
+			 * suppressed.
+			 */
+			pci_info(vdev->pdev,
+				 "vfio-pci: coalesced away a %ums D3 dwell\n",
+				 jiffies_to_msecs(jiffies - vdev->pm_defer_armed));
+		}
 
 		if (vdev->pm_defer_hw_d3) {
 			vfio_lock_and_set_power_state(vdev, PCI_D0);
@@ -2340,6 +2361,13 @@ void vfio_pci_core_release_dev(struct vfio_device *core_vdev)
 {
 	struct vfio_pci_core_device *vdev =
 		container_of(core_vdev, struct vfio_pci_core_device, vdev);
+
+	/*
+	 * Every path that can arm the work goes through vfio_pci_core_disable()
+	 * first, which cancels it, but do not rely on that to avoid destroying
+	 * a mutex the work would then take.
+	 */
+	cancel_delayed_work_sync(&vdev->pm_defer_work);
 
 	mutex_destroy(&vdev->igate);
 	mutex_destroy(&vdev->ioeventfds_lock);

@@ -772,11 +772,14 @@ static int vfio_pm_config_write(struct vfio_pci_core_device *vdev, int pos,
 			break;
 		}
 
+		/*
+		 * Only the request is reported here; what actually reaches the
+		 * hardware is decided, and logged, by the deferral code.
+		 */
 		if (vdev->log_transitions)
 			pci_info(vdev->pdev,
-				 "vfio-pci: guest PMCSR D%u -> D%u%s\n",
-				 old_bits, vfio_pm_state_bits(state),
-				 vdev->pm_virtual ? " (virtualized)" : "");
+				 "vfio-pci: guest PMCSR D%u -> D%u\n",
+				 old_bits, vfio_pm_state_bits(state));
 
 		if (vdev->pm_virtual) {
 			/*
