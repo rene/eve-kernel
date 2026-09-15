@@ -714,8 +714,8 @@ static int __init init_pci_cap_basic_perm(struct perm_bits *perm)
  * It takes all the required locks to protect the access of power related
  * variables and then invokes vfio_pci_set_power_state().
  */
-static void vfio_lock_and_set_power_state(struct vfio_pci_core_device *vdev,
-					  pci_power_t state)
+void vfio_lock_and_set_power_state(struct vfio_pci_core_device *vdev,
+				   pci_power_t state)
 {
 	if (state >= PCI_D3hot)
 		vfio_pci_zap_and_down_write_memory_lock(vdev);
@@ -778,7 +778,14 @@ static int vfio_pm_config_write(struct vfio_pci_core_device *vdev, int pos,
 				 old_bits, vfio_pm_state_bits(state),
 				 vdev->pm_virtual ? " (virtualized)" : "");
 
-		if (!vdev->pm_virtual) {
+		if (vdev->pm_virtual) {
+			/*
+			 * Hand the request to the deferral machinery: the
+			 * hardware is not touched now, and only follows if the
+			 * user stays in D3 long enough to be worth it.
+			 */
+			vfio_pci_pm_defer_request(vdev, state);
+		} else {
 			vfio_lock_and_set_power_state(vdev, state);
 			/*
 			 * The transition can be refused or clamped, by a PCI
@@ -789,9 +796,9 @@ static int vfio_pm_config_write(struct vfio_pci_core_device *vdev, int pos,
 		}
 
 		/*
-		 * With a virtualized power state the hardware was left alone,
-		 * and we report back the state the user asked for so that its
-		 * driver sees a transition that completed.
+		 * With a virtualized power state we report back the state the
+		 * user asked for, so that its driver sees a transition that
+		 * completed, whatever the hardware is doing underneath.
 		 */
 		*vpmcsr &= ~cpu_to_le16(PCI_PM_CTRL_STATE_MASK);
 		*vpmcsr |= cpu_to_le16(vfio_pm_state_bits(state));

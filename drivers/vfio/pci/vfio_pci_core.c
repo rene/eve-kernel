@@ -52,6 +52,11 @@ module_param(igd_log_transitions, bool, 0444);
 MODULE_PARM_DESC(igd_log_transitions,
 		 "Log every guest power-state and command-register write to Intel integrated graphics (default: false)");
 
+static unsigned int igd_d3_delay_ms;
+module_param(igd_d3_delay_ms, uint, 0644);
+MODULE_PARM_DESC(igd_d3_delay_ms,
+		 "How long Intel integrated graphics must stay idle in D3 before the transition is applied to the hardware; 0 never applies it (default: 0)");
+
 static void vfio_pci_eventfd_rcu_free(struct rcu_head *rcu)
 {
 	struct vfio_pci_eventfd *eventfd =
@@ -324,6 +329,107 @@ int vfio_pci_set_power_state(struct vfio_pci_core_device *vdev, pci_power_t stat
 	}
 
 	return ret;
+}
+
+/*
+ * Deferred (coalesced) D3 entry.
+ *
+ * Putting an assigned Intel iGPU into D3hot is what wedges the SoC, but the
+ * transitions that matter are the rapid ones: a guest display driver bouncing
+ * the device through D3hot and back every few seconds re-initialises it
+ * hundreds of times an hour, and one of those re-initialisations eventually
+ * never completes.  A device that is genuinely idle for a while is a different
+ * proposition, and refusing D3 outright costs real power.
+ *
+ * So do not follow the user into D3 immediately.  Record the request, leave
+ * the hardware in D0, and start a timer.  If the user asks for D0 again before
+ * it expires - which is what the pathological cycling looks like - the timer
+ * is cancelled and the hardware was never touched.  Only a user that stays in
+ * D3 for igd_d3_delay_ms gets a real transition.
+ *
+ * With igd_d3_delay_ms == 0 the hardware is never put into D3 at all, which is
+ * the conservative default: on the parts where this was diagnosed it is not
+ * yet established that *any* rate of D3 entry is safe.
+ *
+ * The reported power state does not depend on any of this.  vconfig always
+ * carries what the user asked for, so its driver sees a transition that
+ * completed either way.
+ */
+static void vfio_pci_pm_defer_fn(struct work_struct *work)
+{
+	struct vfio_pci_core_device *vdev =
+		container_of(to_delayed_work(work), struct vfio_pci_core_device,
+			     pm_defer_work);
+
+	mutex_lock(&vdev->pm_defer_lock);
+	/*
+	 * A D0 request may have overtaken us while this was queued, or run
+	 * while we were waiting for the mutex; it clears pm_defer_target.
+	 */
+	if (igd_d3_delay_ms && vdev->pm_defer_target >= PCI_D3hot &&
+	    !vdev->pm_defer_hw_d3) {
+		if (vdev->log_transitions) {
+			pci_info(vdev->pdev,
+				 "vfio-pci: applying deferred D3 after %ums idle\n",
+				 igd_d3_delay_ms);
+		}
+		vfio_lock_and_set_power_state(vdev, PCI_D3hot);
+		vdev->pm_defer_hw_d3 = true;
+	}
+	mutex_unlock(&vdev->pm_defer_lock);
+}
+
+void vfio_pci_pm_defer_request(struct vfio_pci_core_device *vdev,
+			       pci_power_t state)
+{
+	mutex_lock(&vdev->pm_defer_lock);
+	vdev->pm_defer_target = state;
+
+	if (state >= PCI_D3hot) {
+		/*
+		 * Arm the timer, but do not re-arm it if one is already
+		 * pending: a user that rewrites D3 while idle should not push
+		 * the deadline out for ever.  schedule_delayed_work() is a nop
+		 * when the work is already queued.
+		 */
+		if (igd_d3_delay_ms && !vdev->pm_defer_hw_d3)
+			schedule_delayed_work(&vdev->pm_defer_work,
+					      msecs_to_jiffies(igd_d3_delay_ms));
+	} else {
+		/*
+		 * Not _sync: the work takes pm_defer_lock, which we hold, so
+		 * a sync cancel would deadlock.  If it is already running it
+		 * blocks on the mutex and then sees the cleared target.
+		 */
+		cancel_delayed_work(&vdev->pm_defer_work);
+
+		if (vdev->pm_defer_hw_d3) {
+			vfio_lock_and_set_power_state(vdev, PCI_D0);
+			vdev->pm_defer_hw_d3 = false;
+			if (vdev->log_transitions) {
+				pci_info(vdev->pdev,
+					 "vfio-pci: resumed hardware from deferred D3\n");
+			}
+		}
+	}
+	mutex_unlock(&vdev->pm_defer_lock);
+}
+
+/* Drop any pending deferral and make sure the hardware is left in D0. */
+void vfio_pci_pm_defer_cancel(struct vfio_pci_core_device *vdev)
+{
+	if (!vdev->pm_virtual)
+		return;
+
+	cancel_delayed_work_sync(&vdev->pm_defer_work);
+
+	mutex_lock(&vdev->pm_defer_lock);
+	vdev->pm_defer_target = PCI_D0;
+	if (vdev->pm_defer_hw_d3) {
+		vfio_lock_and_set_power_state(vdev, PCI_D0);
+		vdev->pm_defer_hw_d3 = false;
+	}
+	mutex_unlock(&vdev->pm_defer_lock);
 }
 
 static int vfio_pci_runtime_pm_entry(struct vfio_pci_core_device *vdev,
@@ -669,6 +775,13 @@ void vfio_pci_core_disable(struct vfio_pci_core_device *vdev)
 	 */
 	vfio_pci_runtime_pm_exit(vdev);
 	pm_runtime_resume(&pdev->dev);
+
+	/*
+	 * Drop any deferred D3 and bring the hardware back to D0 before the
+	 * reset below, which needs the device in D0 (see the comment about
+	 * NoSoftRst- devices and pci_pm_reset()).
+	 */
+	vfio_pci_pm_defer_cancel(vdev);
 
 	/*
 	 * This function calls __pci_reset_function_locked() which internally
@@ -2191,6 +2304,9 @@ int vfio_pci_core_init_dev(struct vfio_device *core_vdev)
 	INIT_LIST_HEAD(&vdev->sriov_pfs_item);
 	init_rwsem(&vdev->memory_lock);
 	xa_init(&vdev->ctx);
+	mutex_init(&vdev->pm_defer_lock);
+	INIT_DELAYED_WORK(&vdev->pm_defer_work, vfio_pci_pm_defer_fn);
+	vdev->pm_defer_target = PCI_D0;
 
 	vdev->disable_idle_d3 = disable_idle_d3;
 
@@ -2227,6 +2343,7 @@ void vfio_pci_core_release_dev(struct vfio_device *core_vdev)
 
 	mutex_destroy(&vdev->igate);
 	mutex_destroy(&vdev->ioeventfds_lock);
+	mutex_destroy(&vdev->pm_defer_lock);
 	kfree(vdev->region);
 	kfree(vdev->pm_save);
 }

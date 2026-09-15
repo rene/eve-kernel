@@ -16,6 +16,7 @@
 #include <linux/types.h>
 #include <linux/uuid.h>
 #include <linux/notifier.h>
+#include <linux/workqueue.h>
 
 #ifndef VFIO_PCI_CORE_H
 #define VFIO_PCI_CORE_H
@@ -95,6 +96,11 @@ struct vfio_pci_core_device {
 	bool			sriov_active;
 	struct pci_saved_state	*pci_saved_state;
 	struct pci_saved_state	*pm_save;
+	/* Deferred (coalesced) D3 entry, see vfio_pci_pm_defer_request() */
+	struct delayed_work	pm_defer_work;
+	struct mutex		pm_defer_lock;	/* protects the three below */
+	pci_power_t		pm_defer_target;
+	bool			pm_defer_hw_d3;
 	int			ioeventfds_nr;
 	struct vfio_pci_eventfd __rcu *err_trigger;
 	struct vfio_pci_eventfd __rcu *req_trigger;
