@@ -16,6 +16,7 @@
 #include <linux/types.h>
 #include <linux/uuid.h>
 #include <linux/notifier.h>
+#include <linux/workqueue.h>
 
 #ifndef VFIO_PCI_CORE_H
 #define VFIO_PCI_CORE_H
@@ -86,6 +87,8 @@ struct vfio_pci_core_device {
 	bool			nointx:1;
 	bool			needs_pm_restore:1;
 	bool			disable_idle_d3:1;
+	bool			pm_virtual:1;
+	bool			log_transitions:1;
 	/* Flags modified at runtime - dedicated storage unit */
 	bool			needs_reset;
 	bool			pm_intx_masked;
@@ -93,6 +96,12 @@ struct vfio_pci_core_device {
 	bool			sriov_active;
 	struct pci_saved_state	*pci_saved_state;
 	struct pci_saved_state	*pm_save;
+	/* Deferred (coalesced) D3 entry, see vfio_pci_pm_defer_request() */
+	struct delayed_work	pm_defer_work;
+	struct mutex		pm_defer_lock;	/* protects the three below */
+	pci_power_t		pm_defer_target;
+	unsigned long		pm_defer_armed;	/* jiffies, for the log */
+	bool			pm_defer_hw_d3;
 	int			ioeventfds_nr;
 	struct vfio_pci_eventfd __rcu *err_trigger;
 	struct vfio_pci_eventfd __rcu *req_trigger;

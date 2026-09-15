@@ -66,6 +66,12 @@ int vfio_pci_set_power_state(struct vfio_pci_core_device *vdev,
 
 bool __vfio_pci_memory_enabled(struct vfio_pci_core_device *vdev);
 void vfio_pci_zap_and_down_write_memory_lock(struct vfio_pci_core_device *vdev);
+
+void vfio_lock_and_set_power_state(struct vfio_pci_core_device *vdev,
+				   pci_power_t state);
+void vfio_pci_pm_defer_request(struct vfio_pci_core_device *vdev,
+			       pci_power_t state);
+void vfio_pci_pm_defer_cancel(struct vfio_pci_core_device *vdev);
 u16 vfio_pci_memory_lock_and_enable(struct vfio_pci_core_device *vdev);
 void vfio_pci_memory_unlock_and_restore(struct vfio_pci_core_device *vdev,
 					u16 cmd);
@@ -103,6 +109,20 @@ static inline void vfio_pci_zdev_close_device(struct vfio_pci_core_device *vdev)
 static inline bool vfio_pci_is_vga(struct pci_dev *pdev)
 {
 	return (pdev->class >> 8) == PCI_CLASS_DISPLAY_VGA;
+}
+
+/*
+ * Intel integrated graphics: always the VGA function at 00:02.0, and the only
+ * Intel display device that can be assigned in IGD legacy mode.  Discrete
+ * Intel GPUs are ordinary PCIe endpoints and are deliberately not matched.
+ */
+static inline bool vfio_pci_is_intel_igd(struct pci_dev *pdev)
+{
+	return pdev->vendor == PCI_VENDOR_ID_INTEL &&
+	       vfio_pci_is_vga(pdev) &&
+	       pci_domain_nr(pdev->bus) == 0 &&
+	       pdev->bus->number == 0 &&
+	       pdev->devfn == PCI_DEVFN(2, 0);
 }
 
 #endif
