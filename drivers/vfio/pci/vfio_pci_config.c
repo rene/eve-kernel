@@ -752,6 +752,28 @@ static u16 vfio_pm_state_bits(pci_power_t state)
 	}
 }
 
+/*
+ * Set the virtualized PMCSR state bits to @state.
+ *
+ * The caller provides the serialization: memory_lock for write when the
+ * state follows the hardware (vfio_pci_set_power_state()), pm_defer_lock when
+ * it is emulated (the deferral code).  Safe to call before vconfig exists,
+ * which the D0 transitions at bind and open do.
+ */
+void vfio_pci_pm_sync_vconfig(struct vfio_pci_core_device *vdev,
+			      pci_power_t state)
+{
+	struct pci_dev *pdev = vdev->pdev;
+	__le16 *vpmcsr;
+
+	if (!vdev->vconfig || !pdev->pm_cap)
+		return;
+
+	vpmcsr = (__le16 *)&vdev->vconfig[pdev->pm_cap + PCI_PM_CTRL];
+	*vpmcsr &= ~cpu_to_le16(PCI_PM_CTRL_STATE_MASK);
+	*vpmcsr |= cpu_to_le16(vfio_pm_state_bits(state));
+}
+
 static int vfio_pm_config_write(struct vfio_pci_core_device *vdev, int pos,
 				int count, struct perm_bits *perm,
 				int offset, __le32 val)
@@ -765,6 +787,7 @@ static int vfio_pm_config_write(struct vfio_pci_core_device *vdev, int pos,
 		u16 old_bits;
 		pci_power_t state;
 
+		/* Unlocked, for the log line only. */
 		old_bits = le16_to_cpu(*vpmcsr) & PCI_PM_CTRL_STATE_MASK;
 
 		switch (le32_to_cpu(val) & PCI_PM_CTRL_STATE_MASK) {
@@ -791,30 +814,29 @@ static int vfio_pm_config_write(struct vfio_pci_core_device *vdev, int pos,
 				 "vfio-pci: guest PMCSR D%u -> D%u\n",
 				 old_bits, vfio_pm_state_bits(state));
 
+		/*
+		 * Either path updates the virtualized state bits itself, under
+		 * the lock that serializes it against a concurrent write:
+		 * there is no per-device serialization on the config write
+		 * path, so doing it here afterwards would let two writes
+		 * complete in the opposite order to their transitions.
+		 */
 		if (vdev->pm_virtual) {
 			/*
 			 * Hand the request to the deferral machinery: the
 			 * hardware is not touched now, and only follows if the
-			 * user stays in D3 long enough to be worth it.
+			 * user stays in D3 long enough to be worth it.  What
+			 * the user reads back is the state it asked for.
 			 */
 			vfio_pci_pm_defer_request(vdev, state);
 		} else {
-			vfio_lock_and_set_power_state(vdev, state);
 			/*
-			 * The transition can be refused or clamped, by a PCI
-			 * quirk or because the device has VFs enabled, so
-			 * report where the device actually ended up.
+			 * vfio_pci_set_power_state() records where the device
+			 * actually ended up; the transition can be refused or
+			 * clamped by a PCI quirk or because VFs are enabled.
 			 */
-			state = vdev->pdev->current_state;
+			vfio_lock_and_set_power_state(vdev, state);
 		}
-
-		/*
-		 * With a virtualized power state we report back the state the
-		 * user asked for, so that its driver sees a transition that
-		 * completed, whatever the hardware is doing underneath.
-		 */
-		*vpmcsr &= ~cpu_to_le16(PCI_PM_CTRL_STATE_MASK);
-		*vpmcsr |= cpu_to_le16(vfio_pm_state_bits(state));
 	}
 
 	return count;
@@ -848,11 +870,14 @@ static int __init init_pci_cap_pm_perm(struct perm_bits *perm)
 	 * the user change power state, but we trap and initiate the
 	 * change ourselves, so the state bits are read-only.
 	 *
-	 * The state bits are also virtualized: vfio_pm_config_write() owns
-	 * them and fills them in from the state the device actually reached,
-	 * which is not necessarily what the hardware PMCSR reports (D3cold
-	 * reads back as all-ones, and a device whose power state we emulate
-	 * never leaves D0).
+	 * The state bits are also virtualized, and kept current by
+	 * vfio_pci_pm_sync_vconfig().  For an ordinary device they follow the
+	 * hardware from vfio_pci_set_power_state(), which every transition
+	 * passes through, including the ones a reset or SR-IOV enable makes
+	 * without a PMCSR write from the user; that is what the user read
+	 * from the hardware before, minus the all-ones a D3cold device
+	 * returns.  For a device whose power state we emulate they carry
+	 * what the user asked for, while the hardware stays in D0.
 	 *
 	 * The guest can't process PME from D3cold so virtualize PME_Status
 	 * and PME_En bits. The vconfig bits will be cleared during device

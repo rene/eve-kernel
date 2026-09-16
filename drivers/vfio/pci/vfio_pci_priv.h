@@ -69,6 +69,8 @@ void vfio_pci_zap_and_down_write_memory_lock(struct vfio_pci_core_device *vdev);
 
 void vfio_lock_and_set_power_state(struct vfio_pci_core_device *vdev,
 				   pci_power_t state);
+void vfio_pci_pm_sync_vconfig(struct vfio_pci_core_device *vdev,
+			      pci_power_t state);
 void vfio_pci_pm_defer_request(struct vfio_pci_core_device *vdev,
 			       pci_power_t state);
 void vfio_pci_pm_defer_cancel(struct vfio_pci_core_device *vdev);

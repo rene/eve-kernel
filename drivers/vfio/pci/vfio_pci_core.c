@@ -358,6 +358,27 @@ int vfio_pci_set_power_state(struct vfio_pci_core_device *vdev, pci_power_t stat
 		}
 	}
 
+	/*
+	 * The PMCSR state bits are virtualized (see init_pci_cap_pm_perm()),
+	 * so every transition the hardware makes has to be reflected into
+	 * vconfig, and this is the one place they all pass through: the
+	 * user's own PMCSR write, but also a reset, SR-IOV enable or runtime
+	 * PM moving the device to D0 behind the user's back.  Whether the
+	 * transition succeeded, was clamped by a quirk or refused, what the
+	 * user reads is where the device actually is.
+	 *
+	 * Every caller with a user present holds memory_lock for write, which
+	 * is what serializes this against concurrent PMCSR writes.  The two
+	 * that do not, vfio_pci_core_register_device() and
+	 * vfio_pci_core_enable(), run before vconfig exists.
+	 *
+	 * A device with a virtualized power state reports what its user asked
+	 * for, not what the hardware did; that is owned by the deferral code
+	 * under pm_defer_lock and left alone here.
+	 */
+	if (!vdev->pm_virtual)
+		vfio_pci_pm_sync_vconfig(vdev, pdev->current_state);
+
 	return ret;
 }
 
@@ -381,10 +402,29 @@ int vfio_pci_set_power_state(struct vfio_pci_core_device *vdev, pci_power_t stat
  * the conservative default: on the parts where this was diagnosed it is not
  * yet established that *any* rate of D3 entry is safe.
  *
- * The reported power state does not depend on any of this.  vconfig always
- * carries what the user asked for, so its driver sees a transition that
- * completed either way.
+ * The reported power state does not depend on any of this.  vconfig carries
+ * what the user asked for, so its driver sees a transition that completed
+ * either way.  pm_defer_lock serializes the request, the vconfig update and
+ * the hardware transition against each other, so two racing PMCSR writes
+ * cannot leave the reported state, the target and the hardware disagreeing.
  */
+
+/*
+ * Ask the hardware to move and record where it actually ended up: the
+ * transition can be refused (a PF with VFs enabled, a no-D3 quirk) or ignored
+ * by the device, and the deferral state must follow the hardware, not the
+ * request, or a later D3 is never re-armed and a later D0 reports a resume
+ * that never happened.
+ */
+static void vfio_pci_pm_defer_apply(struct vfio_pci_core_device *vdev,
+				    pci_power_t state)
+{
+	lockdep_assert_held(&vdev->pm_defer_lock);
+
+	vfio_lock_and_set_power_state(vdev, state);
+	vdev->pm_defer_hw_d3 = vdev->pdev->current_state >= PCI_D3hot;
+}
+
 static void vfio_pci_pm_defer_fn(struct work_struct *work)
 {
 	struct vfio_pci_core_device *vdev =
@@ -404,8 +444,7 @@ static void vfio_pci_pm_defer_fn(struct work_struct *work)
 				 "vfio-pci: applying deferred D3 after %ums idle\n",
 				 delay_ms);
 		}
-		vfio_lock_and_set_power_state(vdev, PCI_D3hot);
-		vdev->pm_defer_hw_d3 = true;
+		vfio_pci_pm_defer_apply(vdev, PCI_D3hot);
 	}
 	mutex_unlock(&vdev->pm_defer_lock);
 }
@@ -414,9 +453,20 @@ void vfio_pci_pm_defer_request(struct vfio_pci_core_device *vdev,
 			       pci_power_t state)
 {
 	unsigned int delay_ms = vfio_pci_igd_params.d3_delay_ms;
+	struct pci_dev *pdev = vdev->pdev;
+
+	/*
+	 * The hardware is never asked for D1 or D2, so answer the way
+	 * pci_set_power_state() would have: a state the device does not
+	 * advertise is refused and leaves it in D0.
+	 */
+	if ((state == PCI_D1 && !pdev->d1_support) ||
+	    (state == PCI_D2 && !pdev->d2_support))
+		state = PCI_D0;
 
 	mutex_lock(&vdev->pm_defer_lock);
 	vdev->pm_defer_target = state;
+	vfio_pci_pm_sync_vconfig(vdev, state);
 
 	if (state >= PCI_D3hot) {
 		/*
@@ -458,8 +508,7 @@ void vfio_pci_pm_defer_request(struct vfio_pci_core_device *vdev,
 		}
 
 		if (vdev->pm_defer_hw_d3) {
-			vfio_lock_and_set_power_state(vdev, PCI_D0);
-			vdev->pm_defer_hw_d3 = false;
+			vfio_pci_pm_defer_apply(vdev, PCI_D0);
 			if (vdev->log_transitions) {
 				pci_info(vdev->pdev,
 					 "vfio-pci: resumed hardware from deferred D3\n");
@@ -469,7 +518,19 @@ void vfio_pci_pm_defer_request(struct vfio_pci_core_device *vdev,
 	mutex_unlock(&vdev->pm_defer_lock);
 }
 
-/* Drop any pending deferral and make sure the hardware is left in D0. */
+/*
+ * Drop any pending deferral and make sure the hardware is left in D0.
+ *
+ * Called before every host-initiated transition to D0 that does not go
+ * through the user's PMCSR write: device close, VFIO_DEVICE_RESET, hot reset
+ * and SR-IOV enable.  Without it a D3 armed just before a reset would fire on
+ * the freshly reset, in-use device, and a D3 already applied would leave
+ * pm_defer_hw_d3 claiming the hardware is still there after the reset moved
+ * it to D0.  The reported state follows: a reset returns the device to D0 in
+ * the user's eyes too, exactly as a physical PMCSR would read afterwards.
+ *
+ * Takes memory_lock, so callers must not hold it.
+ */
 void vfio_pci_pm_defer_cancel(struct vfio_pci_core_device *vdev)
 {
 	if (!vdev->pm_virtual)
@@ -478,12 +539,26 @@ void vfio_pci_pm_defer_cancel(struct vfio_pci_core_device *vdev)
 	cancel_delayed_work_sync(&vdev->pm_defer_work);
 
 	mutex_lock(&vdev->pm_defer_lock);
+	/* A request may have re-armed the work between the two calls. */
+	cancel_delayed_work(&vdev->pm_defer_work);
 	vdev->pm_defer_target = PCI_D0;
-	if (vdev->pm_defer_hw_d3) {
-		vfio_lock_and_set_power_state(vdev, PCI_D0);
-		vdev->pm_defer_hw_d3 = false;
-	}
+	vfio_pci_pm_sync_vconfig(vdev, PCI_D0);
+	if (vdev->pm_defer_hw_d3)
+		vfio_pci_pm_defer_apply(vdev, PCI_D0);
 	mutex_unlock(&vdev->pm_defer_lock);
+}
+
+/*
+ * A device whose power state we refuse to program cannot be handed to
+ * runtime PM either - that is just the same D3 transition taken by a
+ * different route.  The three VFIO_DEVICE_FEATURE_LOW_POWER_* features are
+ * therefore absent as a set: PROBE and SET both fail with -ENOTTY, as for any
+ * other feature the device does not have, rather than PROBE succeeding and
+ * SET failing with an errno the uAPI does not document.
+ */
+static bool vfio_pci_low_power_supported(struct vfio_pci_core_device *vdev)
+{
+	return !vdev->pm_virtual;
 }
 
 static int vfio_pci_runtime_pm_entry(struct vfio_pci_core_device *vdev,
@@ -497,16 +572,6 @@ static int vfio_pci_runtime_pm_entry(struct vfio_pci_core_device *vdev,
 	if (vdev->pm_runtime_engaged) {
 		up_write(&vdev->memory_lock);
 		return -EINVAL;
-	}
-
-	/*
-	 * A device whose power state we refuse to program cannot be handed to
-	 * runtime PM either - that is just the same D3 transition taken by a
-	 * different route.
-	 */
-	if (vdev->pm_virtual) {
-		up_write(&vdev->memory_lock);
-		return -EOPNOTSUPP;
 	}
 
 	vdev->pm_runtime_engaged = true;
@@ -523,6 +588,9 @@ static int vfio_pci_core_pm_entry(struct vfio_device *device, u32 flags,
 	struct vfio_pci_core_device *vdev =
 		container_of(device, struct vfio_pci_core_device, vdev);
 	int ret;
+
+	if (!vfio_pci_low_power_supported(vdev))
+		return -ENOTTY;
 
 	ret = vfio_check_feature(flags, argsz, VFIO_DEVICE_FEATURE_SET, 0);
 	if (ret != 1)
@@ -547,6 +615,9 @@ static int vfio_pci_core_pm_entry_with_wakeup(
 	struct vfio_device_low_power_entry_with_wakeup entry;
 	struct eventfd_ctx *efdctx;
 	int ret;
+
+	if (!vfio_pci_low_power_supported(vdev))
+		return -ENOTTY;
 
 	ret = vfio_check_feature(flags, argsz, VFIO_DEVICE_FEATURE_SET,
 				 sizeof(entry));
@@ -600,6 +671,9 @@ static int vfio_pci_core_pm_exit(struct vfio_device *device, u32 flags,
 	struct vfio_pci_core_device *vdev =
 		container_of(device, struct vfio_pci_core_device, vdev);
 	int ret;
+
+	if (!vfio_pci_low_power_supported(vdev))
+		return -ENOTTY;
 
 	ret = vfio_check_feature(flags, argsz, VFIO_DEVICE_FEATURE_SET, 0);
 	if (ret != 1)
@@ -1480,6 +1554,9 @@ static int vfio_pci_ioctl_reset(struct vfio_pci_core_device *vdev,
 
 	if (!vdev->reset_works)
 		return -EINVAL;
+
+	/* Before memory_lock: this takes it. */
+	vfio_pci_pm_defer_cancel(vdev);
 
 	vfio_pci_zap_and_down_write_memory_lock(vdev);
 
@@ -2603,6 +2680,9 @@ int vfio_pci_core_sriov_configure(struct vfio_pci_core_device *vdev,
 		if (ret)
 			goto out_del;
 
+		/* Before memory_lock: this takes it. */
+		vfio_pci_pm_defer_cancel(vdev);
+
 		down_write(&vdev->memory_lock);
 		vfio_pci_set_power_state(vdev, PCI_D0);
 		vdev->sriov_active = true;
@@ -2781,6 +2861,12 @@ static int vfio_pci_dev_set_hot_reset(struct vfio_device_set *dev_set,
 			ret = -EINVAL;
 			break;
 		}
+
+		/*
+		 * The user owns this device, so its deferred D3 can be dropped
+		 * ahead of the reset.  Before its memory_lock: this takes it.
+		 */
+		vfio_pci_pm_defer_cancel(vdev);
 
 		/*
 		 * Take the memory write lock for each device and zap BAR
