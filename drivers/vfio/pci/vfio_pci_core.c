@@ -11,6 +11,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/aperture.h>
+#include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/eventfd.h>
 #include <linux/file.h>
@@ -56,6 +57,11 @@ static unsigned int igd_d3_delay_ms;
 module_param(igd_d3_delay_ms, uint, 0644);
 MODULE_PARM_DESC(igd_d3_delay_ms,
 		 "How long Intel integrated graphics must stay idle in D3 before the transition is applied to the hardware; 0 never applies it (default: 0)");
+
+static unsigned int igd_d0_settle_us;
+module_param(igd_d0_settle_us, uint, 0644);
+MODULE_PARM_DESC(igd_d0_settle_us,
+		 "Microseconds to keep Intel integrated graphics inaccessible after it returns to D0, on top of the 10ms PCI recovery time; 0 disables (default: 0)");
 
 static void vfio_pci_eventfd_rcu_free(struct rcu_head *rcu)
 {
@@ -327,6 +333,28 @@ int vfio_pci_set_power_state(struct vfio_pci_core_device *vdev, pci_power_t stat
 			pci_restore_state(pdev);
 		}
 	}
+
+	/*
+	 * pci_set_power_state() already waited the 10ms that the PCI spec
+	 * requires after D3hot->D0, but on an assigned Intel iGPU that is
+	 * demonstrably not enough: the recorded hangs took their fatal access
+	 * 1-51ms after the device was asked to come back, and simply enabling
+	 * the transition log - roughly 19ms of synchronous 115200-baud console
+	 * writes between the D0 transition and memory decode being re-enabled -
+	 * was on its own enough to stop them reproducing.
+	 *
+	 * Callers hold memory_lock for write and the BAR mmaps are still
+	 * zapped, so sleeping here keeps every guest access out, whether it
+	 * arrives through the mmap fault handler or the config/MMIO paths.
+	 * The user's next access stalls rather than reaching a device that is
+	 * still coming back.
+	 *
+	 * If this turns out not to be enough, the next thing to try is moving
+	 * the delay ahead of the pci_restore_state() above: that too is a
+	 * write to a device that has just been reset.
+	 */
+	if (!ret && state == PCI_D0 && vdev->is_igd && igd_d0_settle_us)
+		fsleep(igd_d0_settle_us);
 
 	return ret;
 }
@@ -2344,6 +2372,7 @@ int vfio_pci_core_init_dev(struct vfio_device *core_vdev)
 	 * leave the hardware in D0 for as long as it is assigned.
 	 */
 	if (vfio_pci_is_intel_igd(vdev->pdev)) {
+		vdev->is_igd = true;
 		if (igd_virtual_pm) {
 			vdev->pm_virtual = true;
 			vdev->disable_idle_d3 = true;
