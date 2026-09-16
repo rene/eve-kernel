@@ -73,7 +73,7 @@ MODULE_PARM_DESC(igd_virtual_pm,
 module_param_named(igd_log_transitions, vfio_pci_igd_params.log_transitions,
 		   bool, 0444);
 MODULE_PARM_DESC(igd_log_transitions,
-		 "Log every guest power-state and command-register write to Intel integrated graphics (default: false)");
+		 "Log guest power-state and command-register changes on Intel integrated graphics, rate limited (default: false)");
 
 module_param_named(igd_d3_delay_ms, vfio_pci_igd_params.d3_delay_ms, uint, 0644);
 MODULE_PARM_DESC(igd_d3_delay_ms,
@@ -138,9 +138,14 @@ static int vfio_pci_open_device(struct vfio_device *core_vdev)
 	if (ret)
 		return ret;
 
-	if (vfio_pci_is_vga(pdev) &&
-	    pdev->vendor == PCI_VENDOR_ID_INTEL &&
-	    IS_ENABLED(CONFIG_VFIO_PCI_IGD)) {
+	/*
+	 * The same test that selects the device for power-state emulation in
+	 * vfio_pci_core_init_dev(): the IGD legacy-mode regions set up below
+	 * expose the host bridge and LPC bridge of domain 0, bus 0, so they
+	 * make no sense for a device anywhere else, and a discrete Intel GPU
+	 * has none of this.
+	 */
+	if (vfio_pci_is_intel_igd(pdev) && IS_ENABLED(CONFIG_VFIO_PCI_IGD)) {
 		ret = vfio_pci_igd_init(vdev);
 		if (ret && ret != -ENODEV) {
 			pci_warn(pdev, "Failed to setup Intel IGD regions\n");

@@ -407,6 +407,9 @@ int vfio_pci_set_power_state(struct vfio_pci_core_device *vdev, pci_power_t stat
  * either way.  pm_defer_lock serializes the request, the vconfig update and
  * the hardware transition against each other, so two racing PMCSR writes
  * cannot leave the reported state, the target and the hardware disagreeing.
+ *
+ * All of the messages below are driven by guest config-space writes, which
+ * arrive at VM-exit rate, so they are rate limited.
  */
 
 /*
@@ -439,11 +442,10 @@ static void vfio_pci_pm_defer_fn(struct work_struct *work)
 	 */
 	if (delay_ms && vdev->pm_defer_target >= PCI_D3hot &&
 	    !vdev->pm_defer_hw_d3) {
-		if (vdev->log_transitions) {
-			pci_info(vdev->pdev,
-				 "vfio-pci: applying deferred D3 after %ums idle\n",
-				 delay_ms);
-		}
+		if (vdev->log_transitions)
+			pci_info_ratelimited(vdev->pdev,
+					     "vfio-pci: applying deferred D3 after %ums idle\n",
+					     delay_ms);
 		vfio_pci_pm_defer_apply(vdev, PCI_D3hot);
 	}
 	mutex_unlock(&vdev->pm_defer_lock);
@@ -480,12 +482,12 @@ void vfio_pci_pm_defer_request(struct vfio_pci_core_device *vdev,
 						  msecs_to_jiffies(delay_ms))) {
 				vdev->pm_defer_armed = jiffies;
 				if (vdev->log_transitions)
-					pci_info(vdev->pdev,
-						 "vfio-pci: D3 deferred, applies in %ums if still idle\n",
-						 delay_ms);
+					pci_info_ratelimited(pdev,
+							     "vfio-pci: D3 deferred, applies in %ums if still idle\n",
+							     delay_ms);
 			}
 		} else if (!delay_ms && vdev->log_transitions) {
-			pci_info_ratelimited(vdev->pdev,
+			pci_info_ratelimited(pdev,
 					     "vfio-pci: D3 never applied to the hardware (igd_d3_delay_ms=0)\n");
 		}
 	} else {
@@ -502,17 +504,16 @@ void vfio_pci_pm_defer_request(struct vfio_pci_core_device *vdev,
 			 * never touched.  The dwell is what the coalescing
 			 * suppressed.
 			 */
-			pci_info(vdev->pdev,
-				 "vfio-pci: coalesced away a %ums D3 dwell\n",
-				 jiffies_to_msecs(jiffies - vdev->pm_defer_armed));
+			pci_info_ratelimited(pdev,
+					     "vfio-pci: coalesced away a %ums D3 dwell\n",
+					     jiffies_to_msecs(jiffies - vdev->pm_defer_armed));
 		}
 
 		if (vdev->pm_defer_hw_d3) {
 			vfio_pci_pm_defer_apply(vdev, PCI_D0);
-			if (vdev->log_transitions) {
-				pci_info(vdev->pdev,
-					 "vfio-pci: resumed hardware from deferred D3\n");
-			}
+			if (vdev->log_transitions)
+				pci_info_ratelimited(pdev,
+						     "vfio-pci: resumed hardware from deferred D3\n");
 		}
 	}
 	mutex_unlock(&vdev->pm_defer_lock);

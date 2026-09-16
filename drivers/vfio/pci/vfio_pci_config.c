@@ -592,12 +592,14 @@ static int vfio_basic_config_write(struct vfio_pci_core_device *vdev, int pos,
 		/*
 		 * Logged before the mmaps are torn down, so that this is the
 		 * last thing on the console if the device stops answering.
+		 * Guest-driven and arriving at VM-exit rate, so only when the
+		 * register actually changes, and rate limited.
 		 */
-		if (vdev->log_transitions)
-			pci_info(pdev,
-				 "vfio-pci: guest COMMAND 0x%04x -> 0x%04x (mem=%u io=%u busmaster=%u)\n",
-				 phys_cmd, new_cmd, new_mem, new_io,
-				 !!(new_cmd & PCI_COMMAND_MASTER));
+		if (vdev->log_transitions && new_cmd != phys_cmd)
+			pci_info_ratelimited(pdev,
+					     "vfio-pci: guest COMMAND 0x%04x -> 0x%04x (mem=%u io=%u busmaster=%u)\n",
+					     phys_cmd, new_cmd, new_mem, new_io,
+					     !!(new_cmd & PCI_COMMAND_MASTER));
 
 		if (!new_mem)
 			vfio_pci_zap_and_down_write_memory_lock(vdev);
@@ -784,13 +786,14 @@ static int vfio_pm_config_write(struct vfio_pci_core_device *vdev, int pos,
 
 	if (offset == PCI_PM_CTRL) {
 		__le16 *vpmcsr = (__le16 *)&vdev->vconfig[pos];
-		u16 old_bits;
+		u16 old_bits, new_bits;
 		pci_power_t state;
 
 		/* Unlocked, for the log line only. */
 		old_bits = le16_to_cpu(*vpmcsr) & PCI_PM_CTRL_STATE_MASK;
+		new_bits = le32_to_cpu(val) & PCI_PM_CTRL_STATE_MASK;
 
-		switch (le32_to_cpu(val) & PCI_PM_CTRL_STATE_MASK) {
+		switch (new_bits) {
 		case 0:
 			state = PCI_D0;
 			break;
@@ -806,13 +809,14 @@ static int vfio_pm_config_write(struct vfio_pci_core_device *vdev, int pos,
 		}
 
 		/*
-		 * Only the request is reported here; what actually reaches the
+		 * Only the request is logged here; what actually reaches the
 		 * hardware is decided, and logged, by the deferral code.
+		 * Guest-driven, so only on a change and rate limited.
 		 */
-		if (vdev->log_transitions)
-			pci_info(vdev->pdev,
-				 "vfio-pci: guest PMCSR D%u -> D%u\n",
-				 old_bits, vfio_pm_state_bits(state));
+		if (vdev->log_transitions && old_bits != new_bits)
+			pci_info_ratelimited(vdev->pdev,
+					     "vfio-pci: guest PMCSR D%u -> D%u\n",
+					     old_bits, new_bits);
 
 		/*
 		 * Either path updates the virtualized state bits itself, under
