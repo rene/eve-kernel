@@ -716,6 +716,22 @@ static void vfio_lock_and_set_power_state(struct vfio_pci_core_device *vdev,
 	up_write(&vdev->memory_lock);
 }
 
+/* The D-state a PMCSR read should report for a given power state */
+static u16 vfio_pm_state_bits(pci_power_t state)
+{
+	switch (state) {
+	case PCI_D1:
+		return 1;
+	case PCI_D2:
+		return 2;
+	case PCI_D3hot:
+	case PCI_D3cold:
+		return 3;
+	default:
+		return 0;
+	}
+}
+
 static int vfio_pm_config_write(struct vfio_pci_core_device *vdev, int pos,
 				int count, struct perm_bits *perm,
 				int offset, __le32 val)
@@ -725,6 +741,7 @@ static int vfio_pm_config_write(struct vfio_pci_core_device *vdev, int pos,
 		return count;
 
 	if (offset == PCI_PM_CTRL) {
+		__le16 *vpmcsr = (__le16 *)&vdev->vconfig[pos];
 		pci_power_t state;
 
 		switch (le32_to_cpu(val) & PCI_PM_CTRL_STATE_MASK) {
@@ -743,6 +760,18 @@ static int vfio_pm_config_write(struct vfio_pci_core_device *vdev, int pos,
 		}
 
 		vfio_lock_and_set_power_state(vdev, state);
+
+		/*
+		 * Report the state the device actually reached, not what the
+		 * hardware PMCSR says.  The register reports D0 as soon as the
+		 * write lands, which is why the spec mandates a recovery delay
+		 * before the device is usable; pdev->current_state is only
+		 * updated once pci_set_power_state() has waited it out.  A user
+		 * polling this register therefore cannot see the device come
+		 * back before it is ready to be touched.
+		 */
+		*vpmcsr &= ~cpu_to_le16(PCI_PM_CTRL_STATE_MASK);
+		*vpmcsr |= cpu_to_le16(vfio_pm_state_bits(vdev->pdev->current_state));
 	}
 
 	return count;
@@ -781,7 +810,8 @@ static int __init init_pci_cap_pm_perm(struct perm_bits *perm)
 	 * capability initialization.
 	 */
 	p_setd(perm, PCI_PM_CTRL,
-	       PCI_PM_CTRL_PME_ENABLE | PCI_PM_CTRL_PME_STATUS,
+	       PCI_PM_CTRL_PME_ENABLE | PCI_PM_CTRL_PME_STATUS |
+	       PCI_PM_CTRL_STATE_MASK,
 	       ~(PCI_PM_CTRL_PME_ENABLE | PCI_PM_CTRL_PME_STATUS |
 		 PCI_PM_CTRL_STATE_MASK));
 
