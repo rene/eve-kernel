@@ -61,7 +61,17 @@ MODULE_PARM_DESC(igd_d3_delay_ms,
 static unsigned int igd_d0_settle_us;
 module_param(igd_d0_settle_us, uint, 0644);
 MODULE_PARM_DESC(igd_d0_settle_us,
-		 "Microseconds to keep Intel integrated graphics inaccessible after it returns to D0, on top of the 10ms PCI recovery time; 0 disables (default: 0)");
+		 "Microseconds to keep Intel integrated graphics inaccessible after a real D3->D0 transition, on top of the 10ms PCI recovery time; 0 disables (default: 0)");
+
+static unsigned int igd_mem_settle_us;
+module_param(igd_mem_settle_us, uint, 0644);
+MODULE_PARM_DESC(igd_mem_settle_us,
+		 "Microseconds to keep Intel integrated graphics inaccessible after the guest re-enables memory decode; 0 disables (default: 0)");
+
+unsigned int vfio_pci_igd_mem_settle_us(void)
+{
+	return igd_mem_settle_us;
+}
 
 static void vfio_pci_eventfd_rcu_free(struct rcu_head *rcu)
 {
@@ -290,6 +300,7 @@ int vfio_pci_set_power_state(struct vfio_pci_core_device *vdev, pci_power_t stat
 {
 	struct pci_dev *pdev = vdev->pdev;
 	bool needs_restore = false, needs_save = false;
+	pci_power_t was = pdev->current_state;
 	int ret;
 
 	/* Prevent changing power state for PFs with VFs enabled */
@@ -353,7 +364,8 @@ int vfio_pci_set_power_state(struct vfio_pci_core_device *vdev, pci_power_t stat
 	 * the delay ahead of the pci_restore_state() above: that too is a
 	 * write to a device that has just been reset.
 	 */
-	if (!ret && state == PCI_D0 && vdev->is_igd && igd_d0_settle_us)
+	if (!ret && state == PCI_D0 && was >= PCI_D3hot &&
+	    vdev->is_igd && igd_d0_settle_us)
 		fsleep(igd_d0_settle_us);
 
 	return ret;

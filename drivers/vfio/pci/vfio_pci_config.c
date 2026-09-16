@@ -20,6 +20,7 @@
  * must be negotiated with the underlying OS.
  */
 
+#include <linux/delay.h>
 #include <linux/fs.h>
 #include <linux/pci.h>
 #include <linux/uaccess.h>
@@ -633,9 +634,31 @@ static int vfio_basic_config_write(struct vfio_pci_core_device *vdev, int pos,
 	 */
 	if (offset == PCI_COMMAND) {
 		u16 mask = PCI_COMMAND_MEMORY | PCI_COMMAND_IO;
+		bool reenabled = (new_cmd & PCI_COMMAND_MEMORY) &&
+				 !(le16_to_cpu(*virt_cmd) & PCI_COMMAND_MEMORY);
 
 		*virt_cmd &= cpu_to_le16(~mask);
 		*virt_cmd |= cpu_to_le16(new_cmd & mask);
+
+		/*
+		 * An assigned Intel iGPU is re-initialised by its guest driver
+		 * every few seconds: decode off, config space rewritten, decode
+		 * back on, and then an MMIO access within a millisecond or two.
+		 * Most of those cycles never change the D-state at all - 1077
+		 * D0 writes against 221 D3 writes in one traced session - so
+		 * this edge, not the power transition, is the one every cycle
+		 * passes through.
+		 *
+		 * memory_lock is still held for write here and the BAR mmaps are
+		 * still zapped, so sleeping gives the device time before the
+		 * user's first access rather than after it.
+		 */
+		if (reenabled && vdev->is_igd) {
+			unsigned int us = vfio_pci_igd_mem_settle_us();
+
+			if (us)
+				fsleep(us);
+		}
 
 		up_write(&vdev->memory_lock);
 	}

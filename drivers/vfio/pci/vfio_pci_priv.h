@@ -72,6 +72,7 @@ void vfio_lock_and_set_power_state(struct vfio_pci_core_device *vdev,
 void vfio_pci_pm_defer_request(struct vfio_pci_core_device *vdev,
 			       pci_power_t state);
 void vfio_pci_pm_defer_cancel(struct vfio_pci_core_device *vdev);
+unsigned int vfio_pci_igd_mem_settle_us(void);
 u16 vfio_pci_memory_lock_and_enable(struct vfio_pci_core_device *vdev);
 void vfio_pci_memory_unlock_and_restore(struct vfio_pci_core_device *vdev,
 					u16 cmd);
