@@ -633,9 +633,19 @@ static int vfio_basic_config_write(struct vfio_pci_core_device *vdev, int pos,
 	 */
 	if (offset == PCI_COMMAND) {
 		u16 mask = PCI_COMMAND_MEMORY | PCI_COMMAND_IO;
+		bool reenabled = (new_cmd & PCI_COMMAND_MEMORY) &&
+				 !(le16_to_cpu(*virt_cmd) & PCI_COMMAND_MEMORY);
 
 		*virt_cmd &= cpu_to_le16(~mask);
 		*virt_cmd |= cpu_to_le16(new_cmd & mask);
+
+		/*
+		 * memory_lock is still held for write here and the BAR mmaps
+		 * are still zapped, so an assigned Intel iGPU gets its settle
+		 * time before the user's first access rather than after it.
+		 */
+		if (reenabled)
+			vfio_pci_igd_mem_settle(vdev);
 
 		up_write(&vdev->memory_lock);
 	}

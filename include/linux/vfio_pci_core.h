@@ -87,6 +87,7 @@ struct vfio_pci_core_device {
 	bool			nointx:1;
 	bool			needs_pm_restore:1;
 	bool			disable_idle_d3:1;
+	bool			is_igd:1;
 	bool			pm_virtual:1;
 	bool			log_transitions:1;
 	/* Flags modified at runtime - dedicated storage unit */
@@ -102,6 +103,7 @@ struct vfio_pci_core_device {
 	pci_power_t		pm_defer_target;
 	unsigned long		pm_defer_armed;	/* jiffies, for the log */
 	bool			pm_defer_hw_d3;
+	unsigned int		d3hot_delay_saved; /* pdev->d3hot_delay at bind */
 	int			ioeventfds_nr;
 	struct vfio_pci_eventfd __rcu *err_trigger;
 	struct vfio_pci_eventfd __rcu *req_trigger;

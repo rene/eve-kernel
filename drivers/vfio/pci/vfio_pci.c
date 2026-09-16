@@ -60,6 +60,33 @@ static bool disable_denylist;
 module_param(disable_denylist, bool, 0444);
 MODULE_PARM_DESC(disable_denylist, "Disable use of device denylist. Disabling the denylist allows binding to devices with known errata that may lead to exploitable stability or security issues when accessed by untrusted users.");
 
+/*
+ * Intel integrated graphics knobs.  The storage is vfio-pci-core's, where the
+ * code that uses it lives; declaring the parameters on it here, rather than
+ * copying values once at init like vfio_pci_core_set_params(), keeps the
+ * runtime-writable ones live.
+ */
+module_param_named(igd_virtual_pm, vfio_pci_igd_params.virtual_pm, bool, 0444);
+MODULE_PARM_DESC(igd_virtual_pm,
+		 "Virtualize the PCI power state of Intel integrated graphics instead of programming the device (default: true)");
+
+module_param_named(igd_log_transitions, vfio_pci_igd_params.log_transitions,
+		   bool, 0444);
+MODULE_PARM_DESC(igd_log_transitions,
+		 "Log every guest power-state and command-register write to Intel integrated graphics (default: false)");
+
+module_param_named(igd_d3_delay_ms, vfio_pci_igd_params.d3_delay_ms, uint, 0644);
+MODULE_PARM_DESC(igd_d3_delay_ms,
+		 "How long Intel integrated graphics must stay idle in D3 before the transition is applied to the hardware; 0 never applies it (default: 0)");
+
+module_param_named(igd_d0_settle_ms, vfio_pci_igd_params.d0_settle_ms, uint, 0644);
+MODULE_PARM_DESC(igd_d0_settle_ms,
+		 "Milliseconds added to the D3hot->D0 transition delay of Intel integrated graphics, on top of the PCI recovery time; applied when the device is bound; 0 disables (default: 0)");
+
+module_param_named(igd_mem_settle_us, vfio_pci_igd_params.mem_settle_us, uint, 0644);
+MODULE_PARM_DESC(igd_mem_settle_us,
+		 "Microseconds to keep Intel integrated graphics inaccessible after the guest re-enables memory decode, at most 1000000; 0 disables (default: 0)");
+
 static bool vfio_pci_dev_in_denylist(struct pci_dev *pdev)
 {
 	switch (pdev->vendor) {

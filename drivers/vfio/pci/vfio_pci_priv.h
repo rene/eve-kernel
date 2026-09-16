@@ -72,6 +72,21 @@ void vfio_lock_and_set_power_state(struct vfio_pci_core_device *vdev,
 void vfio_pci_pm_defer_request(struct vfio_pci_core_device *vdev,
 			       pci_power_t state);
 void vfio_pci_pm_defer_cancel(struct vfio_pci_core_device *vdev);
+void vfio_pci_igd_mem_settle(struct vfio_pci_core_device *vdev);
+
+/*
+ * Tunables for assigned Intel integrated graphics.  Owned by vfio-pci-core,
+ * exposed as the vfio-pci.igd_* module parameters by vfio_pci.c.
+ */
+struct vfio_pci_igd_params {
+	bool virtual_pm;
+	bool log_transitions;
+	unsigned int d3_delay_ms;
+	unsigned int d0_settle_ms;
+	unsigned int mem_settle_us;
+};
+extern struct vfio_pci_igd_params vfio_pci_igd_params;
+
 u16 vfio_pci_memory_lock_and_enable(struct vfio_pci_core_device *vdev);
 void vfio_pci_memory_unlock_and_restore(struct vfio_pci_core_device *vdev,
 					u16 cmd);

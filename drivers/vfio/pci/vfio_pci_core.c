@@ -11,6 +11,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/aperture.h>
+#include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/eventfd.h>
 #include <linux/file.h>
@@ -42,20 +43,49 @@ static bool nointxmask;
 static bool disable_vga;
 static bool disable_idle_d3;
 
-static bool igd_virtual_pm = true;
-module_param(igd_virtual_pm, bool, 0444);
-MODULE_PARM_DESC(igd_virtual_pm,
-		 "Virtualize the PCI power state of Intel integrated graphics instead of programming the device (default: true)");
+/*
+ * Tunables for assigned Intel integrated graphics.  The storage lives here
+ * because the code that consumes it does, but the knobs are exposed as
+ * parameters of vfio-pci (vfio-pci.igd_*), alongside disable_idle_d3 and the
+ * rest, so that users find them where every other vfio-pci knob is.  vfio_pci.c
+ * declares its module parameters directly on these fields, which keeps the
+ * runtime-writable ones live rather than copied once at init.
+ */
+struct vfio_pci_igd_params vfio_pci_igd_params = {
+	.virtual_pm = true,
+};
+EXPORT_SYMBOL_GPL(vfio_pci_igd_params);
 
-static bool igd_log_transitions;
-module_param(igd_log_transitions, bool, 0444);
-MODULE_PARM_DESC(igd_log_transitions,
-		 "Log every guest power-state and command-register write to Intel integrated graphics (default: false)");
+/*
+ * Upper bound on the settle windows.  They are slept with memory_lock held
+ * for write, which stalls every access to the device and makes hot reset of
+ * anything in the same dev_set fail with -EBUSY, so a typo in a sysfs write
+ * must not turn into an hour-long stall.
+ */
+#define VFIO_PCI_IGD_SETTLE_MAX_US	1000000U
 
-static unsigned int igd_d3_delay_ms;
-module_param(igd_d3_delay_ms, uint, 0644);
-MODULE_PARM_DESC(igd_d3_delay_ms,
-		 "How long Intel integrated graphics must stay idle in D3 before the transition is applied to the hardware; 0 never applies it (default: 0)");
+/*
+ * Keep an assigned Intel iGPU inaccessible for a while after the guest
+ * re-enables memory decode.  The guest driver re-initialises the device every
+ * few seconds - decode off, config space rewritten, decode back on, MMIO
+ * within a millisecond or two - and most of those cycles never touch the
+ * D-state, so this edge is the one every cycle passes through.
+ *
+ * Callers hold memory_lock for write with the BAR mmaps zapped, so the sleep
+ * keeps every guest access out until the device has had its time.
+ */
+void vfio_pci_igd_mem_settle(struct vfio_pci_core_device *vdev)
+{
+	unsigned int us = min(vfio_pci_igd_params.mem_settle_us,
+			      VFIO_PCI_IGD_SETTLE_MAX_US);
+
+	lockdep_assert_held_write(&vdev->memory_lock);
+
+	if (!vdev->is_igd || !us)
+		return;
+
+	usleep_range(us, us + us / 10 + 1);
+}
 
 static void vfio_pci_eventfd_rcu_free(struct rcu_head *rcu)
 {
@@ -360,18 +390,19 @@ static void vfio_pci_pm_defer_fn(struct work_struct *work)
 	struct vfio_pci_core_device *vdev =
 		container_of(to_delayed_work(work), struct vfio_pci_core_device,
 			     pm_defer_work);
+	unsigned int delay_ms = vfio_pci_igd_params.d3_delay_ms;
 
 	mutex_lock(&vdev->pm_defer_lock);
 	/*
 	 * A D0 request may have overtaken us while this was queued, or run
 	 * while we were waiting for the mutex; it clears pm_defer_target.
 	 */
-	if (igd_d3_delay_ms && vdev->pm_defer_target >= PCI_D3hot &&
+	if (delay_ms && vdev->pm_defer_target >= PCI_D3hot &&
 	    !vdev->pm_defer_hw_d3) {
 		if (vdev->log_transitions) {
 			pci_info(vdev->pdev,
 				 "vfio-pci: applying deferred D3 after %ums idle\n",
-				 igd_d3_delay_ms);
+				 delay_ms);
 		}
 		vfio_lock_and_set_power_state(vdev, PCI_D3hot);
 		vdev->pm_defer_hw_d3 = true;
@@ -382,6 +413,8 @@ static void vfio_pci_pm_defer_fn(struct work_struct *work)
 void vfio_pci_pm_defer_request(struct vfio_pci_core_device *vdev,
 			       pci_power_t state)
 {
+	unsigned int delay_ms = vfio_pci_igd_params.d3_delay_ms;
+
 	mutex_lock(&vdev->pm_defer_lock);
 	vdev->pm_defer_target = state;
 
@@ -392,16 +425,16 @@ void vfio_pci_pm_defer_request(struct vfio_pci_core_device *vdev,
 		 * the deadline out for ever.  schedule_delayed_work() is a nop
 		 * when the work is already queued.
 		 */
-		if (igd_d3_delay_ms && !vdev->pm_defer_hw_d3) {
+		if (delay_ms && !vdev->pm_defer_hw_d3) {
 			if (schedule_delayed_work(&vdev->pm_defer_work,
-						  msecs_to_jiffies(igd_d3_delay_ms))) {
+						  msecs_to_jiffies(delay_ms))) {
 				vdev->pm_defer_armed = jiffies;
 				if (vdev->log_transitions)
 					pci_info(vdev->pdev,
 						 "vfio-pci: D3 deferred, applies in %ums if still idle\n",
-						 igd_d3_delay_ms);
+						 delay_ms);
 			}
-		} else if (!igd_d3_delay_ms && vdev->log_transitions) {
+		} else if (!delay_ms && vdev->log_transitions) {
 			pci_info_ratelimited(vdev->pdev,
 					     "vfio-pci: D3 never applied to the hardware (igd_d3_delay_ms=0)\n");
 		}
@@ -2337,13 +2370,46 @@ int vfio_pci_core_init_dev(struct vfio_device *core_vdev)
 	 * leave the hardware in D0 for as long as it is assigned.
 	 */
 	if (vfio_pci_is_intel_igd(vdev->pdev)) {
-		if (igd_virtual_pm) {
+		struct pci_dev *pdev = vdev->pdev;
+
+		vdev->is_igd = true;
+		if (vfio_pci_igd_params.virtual_pm) {
 			vdev->pm_virtual = true;
 			vdev->disable_idle_d3 = true;
-			pci_info(vdev->pdev,
+			pci_info(pdev,
 				 "vfio-pci: virtualizing PCI power state, device stays in D0\n");
 		}
-		vdev->log_transitions = igd_log_transitions;
+		vdev->log_transitions = vfio_pci_igd_params.log_transitions;
+
+		/*
+		 * pci_set_power_state() waits the 10ms that the PCI spec
+		 * requires after D3hot->D0, but on an assigned Intel iGPU
+		 * that is demonstrably not enough: the recorded hangs took
+		 * their fatal access 1-51ms after the device was asked to come
+		 * back, and simply enabling the transition log - roughly 19ms
+		 * of synchronous console writes between the D0 transition and
+		 * memory decode being re-enabled - was on its own enough to
+		 * stop them reproducing.
+		 *
+		 * Lengthen the device's own D3hot->D0 delay, the way the PCI
+		 * quirks for devices with the same problem do.  The PCI core
+		 * applies it inside pci_power_up(), before it restores config
+		 * space and before we do, and also in pci_pm_reset(); it
+		 * covers the D0 transitions we drive ourselves as well as the
+		 * ones runtime PM makes when the power state is not
+		 * virtualized.  It only ever fires after a real D3hot, never
+		 * on the UNKNOWN->D0 transition made at bind.
+		 *
+		 * Applied when the device is bound, and undone when it is
+		 * released, so a quirk's value is kept underneath.
+		 */
+		vdev->d3hot_delay_saved = pdev->d3hot_delay;
+		if (vfio_pci_igd_params.d0_settle_ms) {
+			pdev->d3hot_delay += vfio_pci_igd_params.d0_settle_ms;
+			pci_info(pdev,
+				 "vfio-pci: D3hot->D0 delay extended to %ums\n",
+				 pdev->d3hot_delay);
+		}
 	}
 
 	return 0;
@@ -2361,6 +2427,9 @@ void vfio_pci_core_release_dev(struct vfio_device *core_vdev)
 	 * a mutex the work would then take.
 	 */
 	cancel_delayed_work_sync(&vdev->pm_defer_work);
+
+	if (vdev->is_igd)
+		vdev->pdev->d3hot_delay = vdev->d3hot_delay_saved;
 
 	mutex_destroy(&vdev->igate);
 	mutex_destroy(&vdev->ioeventfds_lock);
