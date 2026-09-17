@@ -101,7 +101,9 @@
  * Faulting in a VM_IO/VM_PFNMAP mapping failed because its fault handler
  * declined to install a PTE, e.g. a passed-through PCI BAR whose device memory
  * is currently disabled (guest cleared PCI_COMMAND.MEM). The memslot is valid;
- * the access should be treated as MMIO rather than a fatal -EFAULT.
+ * the access should be treated as MMIO rather than a fatal -EFAULT. The
+ * condition is transient, so the arch handler must emulate without caching the
+ * result against the memslot generation.
  */
 #define KVM_PFN_ERR_PFNMAP	(KVM_PFN_ERR_MASK + 4)
 

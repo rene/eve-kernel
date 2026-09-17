@@ -2990,14 +2990,19 @@ retry:
 		r = hva_to_pfn_remapped(vma, addr, write_fault, writable, &pfn);
 		if (r == -EAGAIN)
 			goto retry;
-		if (r < 0)
+		if (r == -EFAULT)
 			/*
 			 * The mapping's fault handler declined to install a PTE
 			 * (e.g. a passed-through PCI BAR with device memory
-			 * disabled). Flag it distinctly so the fault handler can
-			 * treat the access as MMIO instead of a fatal -EFAULT.
+			 * disabled). Flag it distinctly so the arch fault
+			 * handler can treat the access as MMIO instead of a
+			 * fatal -EFAULT. Only -EFAULT means "no PTE here";
+			 * every other errno (-ENOMEM on OOM, -EINTR on a fatal
+			 * signal) is a genuine failure and must stay fatal.
 			 */
 			pfn = KVM_PFN_ERR_PFNMAP;
+		else if (r < 0)
+			pfn = KVM_PFN_ERR_FAULT;
 	} else {
 		if (async && vma_is_valid(vma, write_fault))
 			*async = true;

@@ -4526,14 +4526,27 @@ static int kvm_faultin_pfn(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault,
 		 * A passed-through PCI BAR is backed by a VM_IO/VM_PFNMAP
 		 * mapping whose fault handler refuses to install a PTE while the
 		 * device's memory space is disabled (e.g. the guest cleared
-		 * PCI_COMMAND.MEM). The gup then fails even though the memslot
-		 * is still valid. Treat such an access as MMIO and emulate it
-		 * (the guest observes Unsupported Request semantics, matching
-		 * real hardware) instead of killing the VM with -EFAULT. Other,
+		 * PCI_COMMAND.MEM, or vfio is mid-reset or holds the device in
+		 * low power). The gup then fails even though the memslot is
+		 * still valid. Emulate such an access as MMIO (the guest
+		 * observes Unsupported Request semantics, matching real
+		 * hardware) instead of killing the VM with -EFAULT. Other,
 		 * non-pfnmap errors still take the fatal path.
+		 *
+		 * Emulate directly rather than via kvm_handle_noslot_fault():
+		 * that caches an MMIO SPTE, which is only dropped when the
+		 * memslot generation changes. Of the vfio windows that block
+		 * the fault handler, only a guest write to PCI_COMMAND.MEM
+		 * updates memslots; device reset, runtime PM entry and the
+		 * memory_lock-and-enable windows do not. A cached MMIO SPTE
+		 * would therefore outlive those windows and divert the GPA away
+		 * from the BAR for the remaining life of the memslot. Emulating
+		 * without caching keeps the condition transient: once the
+		 * device's memory is enabled again, the next fault installs a
+		 * normal SPTE.
 		 */
 		if (fault->pfn == KVM_PFN_ERR_PFNMAP)
-			return kvm_handle_noslot_fault(vcpu, fault, access);
+			return RET_PF_EMULATE;
 
 		return kvm_handle_error_pfn(vcpu, fault);
 	}
